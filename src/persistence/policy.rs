@@ -20,6 +20,8 @@ fn denied() -> KeydError {
 /// 策略的用途。名字即线上字符串,kebab-case。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+// `PurposeSigning` 的前缀就是枚举名,但线上词是 `purpose-signing`,不为 lint 改。
+#[allow(clippy::enum_variant_names)]
 pub(super) enum Purpose {
     HttpAuthentication,
     OriginProof,
@@ -111,7 +113,7 @@ struct RootContent {}
 
 /// 校验过的 content。`purpose` 由它是哪个变体决定,不再单独存一份可以写错的副本。
 ///
-/// `purpose-signing`/`ecdh` 的内容今天只做校验,求值要等 P2/P3 的操作落地。
+/// `ecdh` 的内容今天只做校验,求值要等 P3 的 `ECDH` 操作落地。
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 enum Content {
@@ -521,7 +523,8 @@ pub(super) fn evaluate_origin(content: Value, proof: &OriginProof) -> Result<()>
     // 待签 `@target-uri` 用 daemon 拼签名基的同一个函数算,再把策略的
     // `origin` 剥掉得到 suffix:匹配的就是签名基里那几个字节,不是另算一套。
     let kind = anp::proof::TargetKind::try_from(proof.target_kind()).map_err(|_| denied())?;
-    let target = anp::proof::build_logical_target_uri(kind, proof.target_did()).map_err(|_| denied())?;
+    let target =
+        anp::proof::build_logical_target_uri(kind, proof.target_did()).map_err(|_| denied())?;
     let path = target
         .strip_prefix(&o.origin)
         .filter(|path| path.starts_with('/'))
@@ -535,6 +538,19 @@ pub(super) fn evaluate_origin(content: Value, proof: &OriginProof) -> Result<()>
         || (o.body.mode == "empty" && !proof.is_empty_body())
         || (o.body.mode == "bounded" && proof.is_empty_body())
     {
+        return Err(denied());
+    }
+    Ok(())
+}
+
+/// 一个 `SIGN_PURPOSE` 的 purpose 标签能不能落在这条策略里。标签是签名基的
+/// 一部分,不在白名单里就等于换了一个请求形状,直接拒。
+pub(super) fn evaluate_signing(content: Value, purpose: &str) -> Result<()> {
+    let p = parse(content)?;
+    let Content::PurposeSigning(s) = &p.content else {
+        return Err(denied());
+    };
+    if !s.purposes.iter().any(|name| name == purpose) {
         return Err(denied());
     }
     Ok(())
@@ -567,7 +583,9 @@ mod tests {
             did,
         )
         .unwrap();
-        uri.strip_prefix(&format!("anp://{kind}")).unwrap().to_owned()
+        uri.strip_prefix(&format!("anp://{kind}"))
+            .unwrap()
+            .to_owned()
     }
 
     fn origin_proof(kind: &str, did: &str) -> OriginProof {
@@ -680,7 +698,11 @@ mod tests {
         // 方法名和 body 上限照旧各自把关。
         let mut other_method = origin_content();
         other_method["methods"] = json!(["direct.ack"]);
-        assert!(evaluate_origin(v2("origin-proof", other_method), &origin_proof("agent", bob)).is_err());
+        assert!(evaluate_origin(
+            v2("origin-proof", other_method),
+            &origin_proof("agent", bob)
+        )
+        .is_err());
         let mut tiny = origin_content();
         tiny["body"] = json!({"mode":"bounded","max_bytes":4});
         assert!(evaluate_origin(v2("origin-proof", tiny), &origin_proof("agent", bob)).is_err());
@@ -698,6 +720,19 @@ mod tests {
             policy["limits"] = limits;
             assert!(normalize(policy).is_err());
         }
+    }
+
+    #[test]
+    fn purpose_signing_only_admits_the_listed_tags() {
+        let content = json!({"purposes":["device_assertion"]});
+        let policy = v2("purpose-signing", content.clone());
+        assert!(normalize(policy.clone()).is_ok());
+        assert!(evaluate_signing(policy.clone(), "device_assertion").is_ok());
+        assert!(evaluate_signing(policy.clone(), "application_assertion").is_err());
+        // 换一个 purpose 的策略不认 signing 标签,哪怕 content 形状碰巧一样。
+        assert!(
+            evaluate_signing(v2("origin-proof", origin_content()), "device_assertion").is_err()
+        );
     }
 
     #[test]

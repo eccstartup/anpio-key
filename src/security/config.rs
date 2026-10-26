@@ -43,6 +43,36 @@ pub struct Features {
     /// `SIGN_ORIGIN_PROOF`。默认关,开的时候启动审计里有一条 FEATURES。
     #[serde(default)]
     pub sign_origin_proof: bool,
+    /// `SIGN_PURPOSE`。每个 purpose 一个独立开关,默认全关。
+    #[serde(default)]
+    pub sign_purpose: PurposeSwitches,
+}
+
+/// 每用途一个开关。开哪一路审计里就多一条 `SIGN_PURPOSE_ENABLED`。
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PurposeSwitches {
+    #[serde(default)]
+    pub device_assertion: bool,
+    #[serde(default)]
+    pub application_assertion: bool,
+}
+
+impl PurposeSwitches {
+    pub fn enabled(&self, purpose: super::purpose::SigningPurpose) -> bool {
+        match purpose {
+            super::purpose::SigningPurpose::DeviceAssertion => self.device_assertion,
+            super::purpose::SigningPurpose::ApplicationAssertion => self.application_assertion,
+        }
+    }
+
+    pub fn enabled_names(&self) -> Vec<&'static str> {
+        super::purpose::SigningPurpose::ALL
+            .into_iter()
+            .filter(|purpose| self.enabled(*purpose))
+            .map(super::purpose::SigningPurpose::name)
+            .collect()
+    }
 }
 
 impl ServiceConfig {

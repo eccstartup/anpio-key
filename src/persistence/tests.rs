@@ -67,18 +67,53 @@ fn se_session_loss_revokes_exhausted_cached_results_and_old_approvals() {
     let (mut f, key, policy) = grant_fixture();
     let grant = new_grant(&mut f, &key, &policy);
     let id = uuid();
-    f.db.reserve_http(&grant.principal_id, &grant.grant_id, &id, &canonical(), now()).unwrap();
-    f.db.complete_http(&grant.principal_id, &id, &json!({"signature":"cached"}), (1040, 45000), "digest", now()).unwrap();
-    f.db.connection.execute("UPDATE grants SET state='exhausted',used_uses=max_uses WHERE grant_id=?1", [&grant.grant_id]).unwrap();
-    assert!(f.db.request_status(&grant.principal_id, &id, now()).unwrap().result.is_some());
+    f.db.reserve_http(
+        &grant.principal_id,
+        &grant.grant_id,
+        &id,
+        &canonical(),
+        now(),
+    )
+    .unwrap();
+    f.db.complete_http(
+        &grant.principal_id,
+        &id,
+        &json!({"signature":"cached"}),
+        (1040, 45000),
+        "digest",
+        now(),
+    )
+    .unwrap();
+    f.db.connection
+        .execute(
+            "UPDATE grants SET state='exhausted',used_uses=max_uses WHERE grant_id=?1",
+            [&grant.grant_id],
+        )
+        .unwrap();
+    assert!(f
+        .db
+        .request_status(&grant.principal_id, &id, now())
+        .unwrap()
+        .result
+        .is_some());
     let approval = f.disable();
     let epoch = f.db.mutation_epoch().unwrap();
     f.db.end_se_session(1002, "old-session").unwrap();
-    assert!(f.db.request_status(&grant.principal_id, &id, now()).unwrap().result.is_none());
-    let after = grants::get(&f.db.connection, &grant.grant_id).unwrap().unwrap();
+    assert!(f
+        .db
+        .request_status(&grant.principal_id, &id, now())
+        .unwrap()
+        .result
+        .is_none());
+    let after = grants::get(&f.db.connection, &grant.grant_id)
+        .unwrap()
+        .unwrap();
     assert_eq!(after.state, "revoked");
     assert_eq!(after.used_uses, grant.max_uses);
-    assert!(f.db.commit(1002, &approval.operation_id, &approval.digest, now()).is_err());
+    assert!(f
+        .db
+        .commit(1002, &approval.operation_id, &approval.digest, now())
+        .is_err());
     assert!(f.db.mutation_epoch().unwrap() > epoch);
 }
 
@@ -91,9 +126,18 @@ fn se_session_end_audit_failure_rolls_back_all_authority_mutations() {
     f.db.connection.execute_batch("CREATE TRIGGER fail_session_audit BEFORE INSERT ON audit_events BEGIN SELECT RAISE(ABORT,'fail'); END;").unwrap();
     assert!(f.db.end_se_session(1002, "old-session").is_err());
     assert_eq!(f.db.mutation_epoch().unwrap(), epoch);
-    assert_eq!(grants::get(&f.db.connection, &grant.grant_id).unwrap().unwrap().state, "active");
-    f.db.connection.execute_batch("DROP TRIGGER fail_session_audit").unwrap();
-    f.db.commit(1002, &approval.operation_id, &approval.digest, now()).unwrap();
+    assert_eq!(
+        grants::get(&f.db.connection, &grant.grant_id)
+            .unwrap()
+            .unwrap()
+            .state,
+        "active"
+    );
+    f.db.connection
+        .execute_batch("DROP TRIGGER fail_session_audit")
+        .unwrap();
+    f.db.commit(1002, &approval.operation_id, &approval.digest, now())
+        .unwrap();
 }
 
 #[cfg(all(target_os = "macos", feature = "hardware-se"))]
@@ -102,29 +146,69 @@ fn se_session_end_audit_failure_rolls_back_all_authority_mutations() {
 fn local_console_se_bridge_signs_and_disconnect_revokes_without_hardware_mock_claims() {
     use crate::persistence::clock::{Clock, SystemClock};
     for ending in ["disconnect", "replay", "silence", "bad-pass", "bad-hs"] {
-    let (mut f, key_id, policy) = grant_fixture();
-    let key = f.db.catalog().unwrap().keys.into_iter().find(|key| key.key_id == key_id).unwrap();
-    let layout = crate::keystore::layout::KeydLayout::at(f.dir.join("vaults").join(&key.vault_id));
-    let old = crate::keystore::store::resolve(&layout, &key.did, Some("http-hot")).unwrap();
-    let wrapped = crate::keystore::unwrap::rewrap_test_se(&old, b"test-pass", &crate::keystore::device::load(&layout).unwrap());
-    crate::keystore::store::write(&layout, &wrapped).unwrap();
-    apply_change(&mut f, catalog::CatalogChange::EnrollVault { vault_id: key.vault_id.clone() });
-    apply_change(&mut f, catalog::CatalogChange::ConfirmRole { key_id: key_id.clone(), role: catalog::KeyRole::Hot });
-    let grant = new_grant(&mut f, &key_id, &policy);
-    let current = SystemClock.now().unwrap();
-    f.db.connection.execute("UPDATE grants SET expiry=?1 WHERE grant_id=?2", params![current.wall + 120, grant.grant_id]).unwrap();
-    f.db.connection.execute("UPDATE grant_deadlines SET monotonic_deadline=?1 WHERE grant_id=?2", params![current.monotonic_ms + 120_000, grant.grant_id]).unwrap();
-    let mut config = f.config.clone();
-    config.admin_uids = vec![crate::daemon::peer::self_uid()];
-    config.state_dir = f.dir.clone();
-    config.vault_ids = vec![key.vault_id];
-    let placeholder = Database { connection: Connection::open_in_memory().unwrap(), boot_epoch: 0, root: f.dir.clone() };
-    let database = std::mem::replace(&mut f.db, placeholder);
-    f.db = crate::security::server::exercise_local_se_bridge(config, database, grant, ending);
-    if ending == "bad-pass" || ending == "bad-hs" {
-        let count: i64 = f.db.connection.query_row("SELECT count(*) FROM audit_events WHERE json_extract(CAST(event_data AS TEXT),'$.event')='SE_SESSION_REFUSED'", [], |row| row.get(0)).unwrap();
-        assert_eq!(count, 1, "failed bridge unlock must be audited without plaintext secrets");
-    }
+        let (mut f, key_id, policy) = grant_fixture();
+        let key =
+            f.db.catalog()
+                .unwrap()
+                .keys
+                .into_iter()
+                .find(|key| key.key_id == key_id)
+                .unwrap();
+        let layout =
+            crate::keystore::layout::KeydLayout::at(f.dir.join("vaults").join(&key.vault_id));
+        let old = crate::keystore::store::resolve(&layout, &key.did, Some("http-hot")).unwrap();
+        let wrapped = crate::keystore::unwrap::rewrap_test_se(
+            &old,
+            b"test-pass",
+            &crate::keystore::device::load(&layout).unwrap(),
+        );
+        crate::keystore::store::write(&layout, &wrapped).unwrap();
+        apply_change(
+            &mut f,
+            catalog::CatalogChange::EnrollVault {
+                vault_id: key.vault_id.clone(),
+            },
+        );
+        apply_change(
+            &mut f,
+            catalog::CatalogChange::ConfirmRole {
+                key_id: key_id.clone(),
+                role: catalog::KeyRole::Hot,
+                purpose: String::new(),
+            },
+        );
+        let grant = new_grant(&mut f, &key_id, &policy);
+        let current = SystemClock.now().unwrap();
+        f.db.connection
+            .execute(
+                "UPDATE grants SET expiry=?1 WHERE grant_id=?2",
+                params![current.wall + 120, grant.grant_id],
+            )
+            .unwrap();
+        f.db.connection
+            .execute(
+                "UPDATE grant_deadlines SET monotonic_deadline=?1 WHERE grant_id=?2",
+                params![current.monotonic_ms + 120_000, grant.grant_id],
+            )
+            .unwrap();
+        let mut config = f.config.clone();
+        config.admin_uids = vec![crate::daemon::peer::self_uid()];
+        config.state_dir = f.dir.clone();
+        config.vault_ids = vec![key.vault_id];
+        let placeholder = Database {
+            connection: Connection::open_in_memory().unwrap(),
+            boot_epoch: 0,
+            root: f.dir.clone(),
+        };
+        let database = std::mem::replace(&mut f.db, placeholder);
+        f.db = crate::security::server::exercise_local_se_bridge(config, database, grant, ending);
+        if ending == "bad-pass" || ending == "bad-hs" {
+            let count: i64 = f.db.connection.query_row("SELECT count(*) FROM audit_events WHERE json_extract(CAST(event_data AS TEXT),'$.event')='SE_SESSION_REFUSED'", [], |row| row.get(0)).unwrap();
+            assert_eq!(
+                count, 1,
+                "failed bridge unlock must be audited without plaintext secrets"
+            );
+        }
     }
 }
 
@@ -256,7 +340,7 @@ fn audit_failure_rolls_back_both_preparation_and_commit() {
 fn recovery_preserves_consumption_and_marks_incomplete_requests_unknown() {
     let mut f = Fixture::new();
     let principal = &f.config.principals[0].principal_id;
-    f.db.connection.execute_batch("INSERT INTO vaults VALUES('vault','vaults/vault','active'); INSERT INTO keys VALUES('key','vault','did','did#hot','hot','digest','active',0,0,''); INSERT INTO policies VALUES('policy',1,'{}','digest');").unwrap();
+    f.db.connection.execute_batch("INSERT INTO vaults VALUES('vault','vaults/vault','active'); INSERT INTO keys VALUES('key','vault','did','did#hot','hot','','digest','active',0,0,''); INSERT INTO policies VALUES('policy',1,'{}','digest');").unwrap();
     f.db.connection
         .execute(
             "INSERT INTO grants VALUES('grant',?1,'key','policy',1,1,9999,'request',0,2,1,0,0,'active')",
@@ -393,7 +477,8 @@ fn catalog_enrollment_never_infers_role_and_root_cannot_become_hot() {
             Change::Catalog {
                 change: CatalogChange::ConfirmRole {
                     key_id: key.key_id.clone(),
-                    role: KeyRole::Hot
+                    role: KeyRole::Hot,
+                    purpose: String::new(),
                 }
             },
             now()
@@ -404,6 +489,7 @@ fn catalog_enrollment_never_infers_role_and_root_cannot_become_hot() {
         CatalogChange::ConfirmRole {
             key_id: key.key_id.clone(),
             role: KeyRole::Root,
+            purpose: String::new(),
         },
     );
     f.db.check_key(&vault, &did, &key.kid).unwrap();
@@ -576,7 +662,7 @@ fn legacy_commands_reject_managed_vault_even_through_symlink() {
     std::fs::remove_file(alias).unwrap();
 }
 
-/// 把 schema-4 的库回退成 `version` 的样子,好让迁移链整段重跑。
+/// 把当前的库回退成 `version` 的样子,好让迁移链整段重跑。
 ///
 /// `grants` 只能重建不能 DROP COLUMN:交叉列的 CHECK 让 SQLite 拒绝删列。
 fn rewind_schema(c: &Connection, version: i64) {
@@ -637,7 +723,7 @@ fn v1_migration_is_transactional_and_bound_to_instance_and_audit() {
         f.db.connection
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-    assert_eq!(version, 4);
+    assert_eq!(version, SCHEMA);
     verify_audit(&f.db.connection).unwrap();
 }
 
@@ -795,7 +881,8 @@ fn hot_and_recovery_roles_require_verified_document_relationships() {
                 Change::Catalog {
                     change: CatalogChange::ConfirmRole {
                         key_id: record.key_id.clone(),
-                        role: wrong
+                        role: wrong,
+                        purpose: String::new(),
                     }
                 },
                 now()
@@ -806,6 +893,7 @@ fn hot_and_recovery_roles_require_verified_document_relationships() {
             CatalogChange::ConfirmRole {
                 key_id: record.key_id,
                 role,
+                purpose: String::new(),
             },
         );
         f.db.check_key(&vault, &did, &record.kid).unwrap();
@@ -918,6 +1006,7 @@ fn grant_fixture() -> (Fixture, String, String) {
         CatalogChange::ConfirmRole {
             key_id: hot.clone(),
             role: KeyRole::Hot,
+            purpose: String::new(),
         },
     );
     let policy = uuid();
@@ -1386,6 +1475,72 @@ fn v2_to_v3_migration_is_atomic_and_invalidates_old_grants() {
     verify_audit(&f.db.connection).unwrap();
 }
 
+/// 把 `keys` 退回 schema 4:没有 `purpose` 列,角色只有原来的五个。v4→v5 只
+/// 重建 `keys` 和 `service_meta`,所以 grants 原样留着 —— 这正是要验的。
+fn rewind_keys_to_v4(c: &Connection) {
+    c.execute_batch(
+        "PRAGMA foreign_keys=OFF;
+         CREATE TABLE keys_v4 (
+          key_id TEXT PRIMARY KEY, vault_id TEXT NOT NULL REFERENCES vaults(vault_id), did TEXT NOT NULL, kid TEXT NOT NULL,
+          role TEXT NOT NULL DEFAULT 'unclassified' CHECK(role IN ('unclassified','root','hot','recovery','challenge')),
+          envelope_digest TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('active','maintenance','retired')),
+          identity_epoch INTEGER NOT NULL CHECK(identity_epoch>=0), generation INTEGER NOT NULL CHECK(generation>=0), document_digest TEXT NOT NULL, UNIQUE(vault_id,kid)
+         ) STRICT;
+         INSERT INTO keys_v4(key_id,vault_id,did,kid,role,envelope_digest,state,identity_epoch,generation,document_digest)
+          SELECT key_id,vault_id,did,kid,role,envelope_digest,state,identity_epoch,generation,document_digest FROM keys;
+         DROP TABLE keys;
+         ALTER TABLE keys_v4 RENAME TO keys;
+         ALTER TABLE service_meta RENAME TO meta_v4;
+         CREATE TABLE service_meta(singleton INTEGER PRIMARY KEY CHECK(singleton=1),schema_version INTEGER NOT NULL CHECK(schema_version=4),instance_id TEXT NOT NULL,boot_epoch INTEGER NOT NULL CHECK(boot_epoch>=0),mutation_epoch INTEGER NOT NULL CHECK(mutation_epoch>=0)) STRICT;
+         INSERT INTO service_meta SELECT singleton,4,instance_id,boot_epoch,mutation_epoch FROM meta_v4;
+         DROP TABLE meta_v4;
+         PRAGMA foreign_keys=ON;
+         PRAGMA user_version=4;",
+    )
+    .unwrap();
+}
+
+#[test]
+fn v4_to_v5_migration_rebuilds_keys_and_keeps_grants_usable() {
+    let (mut f, key, policy) = grant_fixture();
+    let g = new_grant(&mut f, &key, &policy);
+    rewind_keys_to_v4(&f.db.connection);
+    f.db.recovery(&f.config, now()).unwrap();
+    assert_eq!(
+        f.db.connection
+            .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        SCHEMA
+    );
+    // 老键原样留下来,新列给空值:升级不会替谁猜一个 purpose。
+    let (role, purpose): (String, String) =
+        f.db.connection
+            .query_row(
+                "SELECT role,purpose FROM keys WHERE key_id=?1",
+                [&key],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+    assert_eq!((role.as_str(), purpose.as_str()), ("hot", ""));
+    // 重建 keys 期间外键是关的,所以结果要验:没有悬空引用,老 grant 还在。
+    let mut check = f.db.connection.prepare("PRAGMA foreign_key_check").unwrap();
+    let dangling = check.exists([]).unwrap();
+    drop(check);
+    assert!(!dangling);
+    let surviving =
+        f.db.grant_status(&g.principal_id, &g.grant_id, now())
+            .unwrap();
+    assert_eq!(surviving.key_id, key);
+    // 重启让这条 grant 失效,这是恢复流程的事,不是迁移弄丢的;重建后的 keys
+    // 还能不能签,用一条新 grant 验。
+    assert_ne!(surviving.state, "active");
+    let fresh = new_grant(&mut f, &key, &policy);
+    assert_eq!(fresh.key_id, key);
+    f.db.authorize_http(&fresh.principal_id, &fresh.grant_id, &canonical(), now())
+        .unwrap();
+    verify_audit(&f.db.connection).unwrap();
+}
+
 fn origin_policy(f: &mut Fixture, max_renewals: u32) -> String {
     let id = uuid();
     apply_change(
@@ -1415,9 +1570,8 @@ fn origin_proof() -> crate::security::origin::OriginProof {
 
 fn new_session(f: &mut Fixture, key: &str, policy: &str, expiry: i64) -> grants::Grant {
     let principal = f.config.principals[0].principal_id.clone();
-    let p = f
-        .db
-        .prepare(
+    let p =
+        f.db.prepare(
             1002,
             Change::Grant {
                 change: grants::GrantChange::CreateSession {
@@ -1450,21 +1604,19 @@ fn session_grants_carry_their_operation_and_authorize_only_that_purpose() {
     assert_eq!(g.max_renewals, 16);
     assert_eq!(g.created_at, 1_000);
     let operations: Vec<String> = {
-        let mut s = f
-            .db
-            .connection
-            .prepare("SELECT operation FROM grant_operations WHERE grant_id=?1")
-            .unwrap();
+        let mut s =
+            f.db.connection
+                .prepare("SELECT operation FROM grant_operations WHERE grant_id=?1")
+                .unwrap();
         s.query_map([&g.grant_id], |r| r.get(0))
             .unwrap()
             .collect::<std::result::Result<_, _>>()
             .unwrap()
     };
     assert_eq!(operations, ["SIGN_ORIGIN_PROOF"]);
-    let (_, selected) = f
-        .db
-        .authorize_origin(&g.principal_id, &g.grant_id, &origin_proof(), now())
-        .unwrap();
+    let (_, selected) =
+        f.db.authorize_origin(&g.principal_id, &g.grant_id, &origin_proof(), now())
+            .unwrap();
     assert_eq!(selected.key_id, key);
     // 同一个 grant 不能拿来签 HTTP:操作集里只有它被建出来的那一个。
     assert!(f
@@ -1484,25 +1636,23 @@ fn session_renewal_extends_to_the_nearest_ceiling_and_is_audited() {
         monotonic_ms: 500_000,
     };
     // 请求 10000,实际给到 now+900。
-    let renewed = f
-        .db
-        .renew_grant(&g.principal_id, &g.grant_id, 10_000, later)
-        .unwrap();
+    let renewed =
+        f.db.renew_grant(&g.principal_id, &g.grant_id, 10_000, later)
+            .unwrap();
     assert_eq!((renewed.expiry, renewed.renewals), (2_400, 1));
     // 不能原地踏步,也不能把到期日往下压。
     assert!(matches!(
         f.db.renew_grant(&g.principal_id, &g.grant_id, 2_400, later),
         Err(KeydError::Misuse(c)) if c == "GRANT_INVALID"
     ));
-    let renewed: i64 = f
-        .db
-        .connection
-        .query_row(
-            "SELECT monotonic_deadline FROM grant_deadlines WHERE grant_id=?1",
-            [&g.grant_id],
-            |r| r.get(0),
-        )
-        .unwrap();
+    let renewed: i64 =
+        f.db.connection
+            .query_row(
+                "SELECT monotonic_deadline FROM grant_deadlines WHERE grant_id=?1",
+                [&g.grant_id],
+                |r| r.get(0),
+            )
+            .unwrap();
     assert_eq!(renewed, 500_000 + 900_000);
     let events: Vec<String> = {
         let mut s = f
@@ -1559,10 +1709,9 @@ fn renewal_stops_at_the_absolute_lifetime_and_at_the_renewal_budget() {
         wall: 86_900,
         monotonic_ms: 86_900_000,
     };
-    let renewed = f
-        .db
-        .renew_grant(&g.principal_id, &g.grant_id, 200_000, near_end)
-        .unwrap();
+    let renewed =
+        f.db.renew_grant(&g.principal_id, &g.grant_id, 200_000, near_end)
+            .unwrap();
     assert_eq!(renewed.expiry, 87_400);
     verify_audit(&f.db.connection).unwrap();
 }
@@ -1597,15 +1746,14 @@ fn origin_reservations_deduplicate_and_never_share_an_id_with_another_purpose() 
             .unwrap(),
         requests::Reservation::Existing(_)
     ));
-    let uses: i64 = f
-        .db
-        .connection
-        .query_row(
-            "SELECT used_uses FROM grants WHERE grant_id=?1",
-            [&g.grant_id],
-            |r| r.get(0),
-        )
-        .unwrap();
+    let uses: i64 =
+        f.db.connection
+            .query_row(
+                "SELECT used_uses FROM grants WHERE grant_id=?1",
+                [&g.grant_id],
+                |r| r.get(0),
+            )
+            .unwrap();
     assert_eq!(uses, 1);
     // 同一个 id 换个用途是冲突,不是缓存命中 —— 缓存不跨操作复用。
     assert!(matches!(
@@ -1696,6 +1844,280 @@ fn every_nonhot_role_is_forbidden_for_grants_and_data() {
             )
             .is_err());
     }
+}
+
+/// P2 的夹具:一把 `#device-sign`(Authentication + AssertionMethod 两处都挂)
+/// 加一条 `purpose-signing` 策略。返回 (fixture, device key_id, policy_id)。
+fn purpose_fixture() -> (Fixture, String, String) {
+    use catalog::*;
+    let mut f = Fixture::new();
+    let (vault, did, doc) = vault_fixture(&mut f);
+    let layout = crate::keystore::layout::KeydLayout::at(f.dir.join("vaults").join(&vault));
+    let (_, extra) = crate::keystore::create::create_extra(
+        &layout,
+        &did,
+        "device-sign",
+        vec![
+            anp::authentication::DidVerificationRelationship::Authentication,
+            anp::authentication::DidVerificationRelationship::AssertionMethod,
+        ],
+        "test",
+        b"test-pass",
+        crate::crypto::kdf::Argon2Config {
+            m_cost: 1024,
+            t_cost: 1,
+            p_cost: 1,
+        },
+        crate::keystore::hardware::HardwareChoice::None,
+    )
+    .unwrap();
+    let root = crate::keystore::store::resolve(&layout, &did, None).unwrap();
+    let secret = crate::keystore::device::load(&layout).unwrap();
+    let key = crate::keystore::unwrap::unlock(&root, b"test-pass", &secret).unwrap();
+    let unsigned = crate::did::lifecycle::strip_proof(&doc).unwrap();
+    let unsigned =
+        crate::did::lifecycle::with_extra_key(&unsigned, &did, &key.verifying_key(), extra)
+            .unwrap();
+    let signed = crate::did::document::sign_document(&unsigned, &key, &root.id.kid).unwrap();
+    crate::keystore::store::write_did_document(&layout, &did, &signed).unwrap();
+    apply_change(&mut f, CatalogChange::EnrollVault { vault_id: vault });
+    let device =
+        f.db.catalog()
+            .unwrap()
+            .keys
+            .into_iter()
+            .find(|k| k.kid.ends_with("#device-sign"))
+            .unwrap()
+            .key_id;
+    apply_change(
+        &mut f,
+        CatalogChange::ConfirmRole {
+            key_id: device.clone(),
+            role: KeyRole::DeviceSigning,
+            purpose: "device_assertion".into(),
+        },
+    );
+    let policy = purpose_policy(&mut f, &["device_assertion"]);
+    (f, device, policy)
+}
+
+fn purpose_policy(f: &mut Fixture, purposes: &[&str]) -> String {
+    let id = uuid();
+    apply_change(
+        f,
+        catalog::CatalogChange::PublishPolicy {
+            policy_id: id.clone(),
+            version: 1,
+            content: json!({"schema_version":2,"name":"mls-assertion","purpose":"purpose-signing",
+              "limits":{"max_duration_seconds":900,"max_uses":100000,"max_lifetime_seconds":86400,"max_renewals":16},
+              "content":{"purposes":purposes}}),
+        },
+    );
+    id
+}
+
+#[test]
+fn a_device_signing_key_needs_both_relationships_and_one_fixed_purpose() {
+    use catalog::*;
+    let (mut f, device, _) = purpose_fixture();
+    let record =
+        f.db.catalog()
+            .unwrap()
+            .keys
+            .into_iter()
+            .find(|k| k.key_id == device)
+            .unwrap();
+    assert_eq!(record.role, KeyRole::DeviceSigning);
+    assert_eq!(record.purpose, "device_assertion");
+    // 绑定只设一次:换标签、清空、换个角色都不行。
+    for (role, purpose) in [
+        (KeyRole::DeviceSigning, "application_assertion"),
+        (KeyRole::DeviceSigning, ""),
+        (KeyRole::Hot, ""),
+    ] {
+        let what = format!("{role:?}/{purpose}");
+        let refused =
+            f.db.prepare(
+                1002,
+                Change::Catalog {
+                    change: CatalogChange::ConfirmRole {
+                        key_id: device.clone(),
+                        role,
+                        purpose: purpose.into(),
+                    },
+                },
+                now(),
+            )
+            .is_err();
+        assert!(refused, "{what} should be refused");
+    }
+}
+
+#[test]
+fn a_hot_key_cannot_be_classified_as_device_signing() {
+    use catalog::*;
+    let (mut f, hot, _) = grant_fixture();
+    // 文档里只挂了 authentication,断言那一路没有它 —— 角色验不过。
+    assert!(f
+        .db
+        .prepare(
+            1002,
+            Change::Catalog {
+                change: CatalogChange::ConfirmRole {
+                    key_id: hot.clone(),
+                    role: KeyRole::DeviceSigning,
+                    purpose: "device_assertion".into()
+                }
+            },
+            now()
+        )
+        .is_err());
+    // 反过来,purpose-signing 策略也不能配一把 hot 键。
+    let policy = purpose_policy(&mut f, &["device_assertion"]);
+    assert!(f
+        .db
+        .prepare(
+            1002,
+            Change::Grant {
+                change: grants::GrantChange::Create {
+                    principal_id: f.config.principals[0].principal_id.clone(),
+                    key_id: hot,
+                    policy_id: policy,
+                    policy_version: 1,
+                    expiry: 1050,
+                    max_uses: 1
+                }
+            },
+            now()
+        )
+        .is_err());
+}
+
+#[test]
+fn purpose_signing_selects_the_bound_device_key_and_refuses_other_tags() {
+    use crate::security::purpose::PurposeRequest;
+    let (mut f, device, policy) = purpose_fixture();
+    let g = new_grant(&mut f, &device, &policy);
+    let operation: String =
+        f.db.connection
+            .query_row(
+                "SELECT operation FROM grant_operations WHERE grant_id=?1",
+                [&g.grant_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+    assert_eq!(operation, "SIGN_PURPOSE");
+    let bound = PurposeRequest::from_wire("device_assertion", None, "00ff").unwrap();
+    let (_, key) =
+        f.db.authorize_purpose(&g.principal_id, &g.grant_id, &bound.purpose(), now())
+            .unwrap();
+    assert_eq!(key.key_id, device);
+    assert_eq!(key.purpose, "device_assertion");
+    // 键绑的是 device_assertion;换个标签等于换一把键,不是换一种说法。
+    let other =
+        PurposeRequest::from_wire("application_assertion", Some("chat.alpha".into()), "00ff")
+            .unwrap();
+    assert!(matches!(
+        f.db.authorize_purpose(&g.principal_id, &g.grant_id, &other.purpose(), now()),
+        Err(KeydError::Misuse(c)) if c == "KEY_ROLE_FORBIDDEN"
+    ));
+    // 这条 grant 的操作集里只有 SIGN_PURPOSE。
+    assert!(f
+        .db
+        .authorize_http(&g.principal_id, &g.grant_id, &canonical(), now())
+        .is_err());
+    verify_audit(&f.db.connection).unwrap();
+}
+
+#[test]
+fn purpose_reservations_deduplicate_and_never_share_an_id_with_another_purpose() {
+    use crate::security::purpose::PurposeRequest;
+    let (mut f, device, policy) = purpose_fixture();
+    let g = new_session(&mut f, &device, &policy, 1_900);
+    let request = PurposeRequest::from_wire("device_assertion", None, "00ff").unwrap();
+    let id = uuid();
+    let principal = g.principal_id.clone();
+    assert!(matches!(
+        f.db.reserve_purpose(&principal, &g.grant_id, &id, &request, now())
+            .unwrap(),
+        requests::Reservation::New { .. }
+    ));
+    // 同一次断言同一个 id:命中预留,不再扣配额。
+    assert!(matches!(
+        f.db.reserve_purpose(&principal, &g.grant_id, &id, &request, now())
+            .unwrap(),
+        requests::Reservation::Existing(_)
+    ));
+    let uses: i64 =
+        f.db.connection
+            .query_row(
+                "SELECT used_uses FROM grants WHERE grant_id=?1",
+                [&g.grant_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+    assert_eq!(uses, 1);
+    // 同一个 id 换了 payload,或者被别的操作借走,都是冲突而不是缓存命中。
+    let other = PurposeRequest::from_wire("device_assertion", None, "00fe").unwrap();
+    assert!(matches!(
+        f.db.reserve_purpose(&principal, &g.grant_id, &id, &other, now()),
+        Err(KeydError::Misuse(c)) if c == "REQUEST_ID_CONFLICT"
+    ));
+    assert!(matches!(
+        f.db.reserve_http(&principal, &g.grant_id, &id, &canonical(), now()),
+        Err(KeydError::Misuse(c)) if c == "REQUEST_ID_CONFLICT"
+    ));
+    let options = request.audit_options();
+    f.db.complete_purpose(
+        &principal,
+        &id,
+        &json!({"request_id":id,"signature":"00"}),
+        (1_100, 1_100_000),
+        &request.message_digest(),
+        options.clone(),
+        now(),
+    )
+    .unwrap();
+    let status = f.db.request_status(&principal, &id, now()).unwrap();
+    assert_eq!(status.state, "completed");
+    assert_eq!(status.result.unwrap()["request_id"], json!(id));
+    let reserved: String = f
+        .db
+        .connection
+        .query_row(
+            "SELECT json_extract(CAST(event_data AS TEXT),'$.purpose') FROM audit_events WHERE json_extract(CAST(event_data AS TEXT),'$.event')='SIGN_RESERVED'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(reserved, "device_assertion");
+    // 完成事件里有摘要和长度,没有 payload 字节。
+    let (purpose, digest, bytes): (String, String, i64) = f
+        .db
+        .connection
+        .query_row(
+            "SELECT json_extract(CAST(event_data AS TEXT),'$.signing.purpose'),
+                    json_extract(CAST(event_data AS TEXT),'$.signing.payload_digest'),
+                    json_extract(CAST(event_data AS TEXT),'$.signing.payload_bytes')
+             FROM audit_events WHERE json_extract(CAST(event_data AS TEXT),'$.event')='SIGN_COMPLETED'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(purpose, "device_assertion");
+    assert_eq!(digest, options["payload_digest"].as_str().unwrap());
+    assert_eq!(bytes, 2);
+    let text: String = f
+        .db
+        .connection
+        .query_row(
+            "SELECT CAST(event_data AS TEXT) FROM audit_events WHERE json_extract(CAST(event_data AS TEXT),'$.event')='SIGN_COMPLETED'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(!text.contains("00ff"));
+    verify_audit(&f.db.connection).unwrap();
 }
 
 #[test]
@@ -2276,6 +2698,7 @@ fn registration_is_exact_root_only_single_use_and_commits_audit_before_release()
         CatalogChange::ConfirmRole {
             key_id: root.key_id.clone(),
             role: KeyRole::Root,
+            purpose: String::new(),
         },
     );
     for bad in ["", "0123456789abcdef", &"a".repeat(64), &"A".repeat(32)] {
@@ -2394,6 +2817,7 @@ fn trusted_hot_rotation_retires_old_key_revokes_grants_and_recovers_approved_doc
             CatalogChange::ConfirmRole {
                 key_id: key.key_id.clone(),
                 role,
+                purpose: String::new(),
             },
         );
     }
@@ -2596,12 +3020,19 @@ fn fixed_audit_source_binds_previous_and_refuses_implicit_enrollment() {
     let mut f = Fixture::new();
     let path = f.dir.join("state.sqlite");
     let id = f.config.instance_id.clone();
-    let first = checkpoint::source(&path, &id,
-        br#"{"version":1,"enroll":true,"previous":null}"#.as_slice()).unwrap();
+    let first = checkpoint::source(
+        &path,
+        &id,
+        br#"{"version":1,"enroll":true,"previous":null}"#.as_slice(),
+    )
+    .unwrap();
     let op = f.disable();
     let request = serde_json::to_vec(&checkpoint::SourceRequest {
-        version: 1, enroll: false, previous: Some(first.checkpoint.clone()),
-    }).unwrap();
+        version: 1,
+        enroll: false,
+        previous: Some(first.checkpoint.clone()),
+    })
+    .unwrap();
     let second = checkpoint::source(&path, &id, request.as_slice()).unwrap();
     assert_eq!(second.previous, Some(first.checkpoint));
     assert!(second.checkpoint.sequence > second.previous.unwrap().sequence);
@@ -2609,10 +3040,11 @@ fn fixed_audit_source_binds_previous_and_refuses_implicit_enrollment() {
         br#"{"version":1,"enroll":false,"previous":null}"#.to_vec(),
         br#"{"version":2,"enroll":true,"previous":null}"#.to_vec(),
         br#"{"version":1,"enroll":true,"previous":null,"database":"/other"}"#.to_vec(),
-        vec![b' ';4097],
+        vec![b' '; 4097],
     ] {
         assert!(checkpoint::source(&path, &id, bad.as_slice()).is_err());
     }
     // Collection neither consumes an operation nor changes authorization state.
-    f.db.commit(1002, &op.operation_id, &op.digest, now()).unwrap();
+    f.db.commit(1002, &op.operation_id, &op.digest, now())
+        .unwrap();
 }

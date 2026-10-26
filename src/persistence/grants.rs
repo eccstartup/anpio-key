@@ -80,14 +80,16 @@ fn principal(db: &Connection, id: &str) -> Result<()> {
     Ok(())
 }
 
-/// 一个 purpose 允许用哪种角色的键。P1 只有前两个 purpose 有操作;
-/// 其余的 purpose 形已经冻结在 policy 里,但还没有键角色和操作,建 grant 会被拒。
+/// 一个 purpose 允许用哪种角色的键。P3 之前的 purpose 只有形状,没有操作:
+/// 建 grant 会被拒。
 fn role_for(purpose: super::policy::Purpose) -> Result<catalog::KeyRole> {
     use super::policy::Purpose;
     Ok(match purpose {
         Purpose::HttpAuthentication | Purpose::OriginProof => catalog::KeyRole::Hot,
-        Purpose::PurposeSigning | Purpose::ObjectProof | Purpose::DocumentProof | Purpose::Ecdh
-        | Purpose::Root => return Err(refused("GRANT_INVALID")),
+        Purpose::PurposeSigning => catalog::KeyRole::DeviceSigning,
+        Purpose::Ecdh | Purpose::ObjectProof | Purpose::DocumentProof | Purpose::Root => {
+            return Err(refused("GRANT_INVALID"))
+        }
     })
 }
 
@@ -97,11 +99,10 @@ pub(super) fn operation_for(purpose: super::policy::Purpose) -> Result<&'static 
     Ok(match purpose {
         Purpose::HttpAuthentication => "SIGN_HTTP",
         Purpose::OriginProof => "SIGN_ORIGIN_PROOF",
-        Purpose::PurposeSigning
-        | Purpose::ObjectProof
-        | Purpose::DocumentProof
-        | Purpose::Ecdh
-        | Purpose::Root => return Err(refused("GRANT_INVALID")),
+        Purpose::PurposeSigning => "SIGN_PURPOSE",
+        Purpose::ObjectProof | Purpose::DocumentProof | Purpose::Ecdh | Purpose::Root => {
+            return Err(refused("GRANT_INVALID"))
+        }
     })
 }
 
@@ -119,8 +120,15 @@ fn key_for(
         .map_err(|_| refused("KEY_ROLE_FORBIDDEN"))?;
     Ok(key)
 }
-pub(super) fn hot_key(db: &Connection, root: &Path, id: &str) -> Result<catalog::KeyRecord> {
-    key_for(db, root, id, super::policy::Purpose::HttpAuthentication)
+/// 任何角色的可用键:角色不再在这里固定,而是从记录里读回来对着文档重新验一遍。
+pub(super) fn active_key(db: &Connection, root: &Path, id: &str) -> Result<catalog::KeyRecord> {
+    let key = catalog::get_key(db, id).map_err(|_| refused("KEY_ROLE_FORBIDDEN"))?;
+    if key.state != "active" {
+        return Err(refused("KEY_ROLE_FORBIDDEN"));
+    }
+    catalog::check_key(db, root, &key.vault_id, &key.did, &key.kid)
+        .map_err(|_| refused("KEY_ROLE_FORBIDDEN"))?;
+    Ok(key)
 }
 pub(super) fn policy(db: &Connection, id: &str, version: u32) -> Result<Value> {
     let content: String = db
@@ -134,12 +142,7 @@ pub(super) fn policy(db: &Connection, id: &str, version: u32) -> Result<Value> {
         .ok_or_else(|| refused("POLICY_DENIED"))?;
     serde_json::from_str(&content).map_err(|_| unavailable())
 }
-fn validate(
-    db: &Connection,
-    root: &Path,
-    g: &Grant,
-    now: Time,
-) -> Result<super::policy::Policy> {
+fn validate(db: &Connection, root: &Path, g: &Grant, now: Time) -> Result<super::policy::Policy> {
     principal(db, &g.principal_id)?;
     let p = super::policy::parse(policy(db, &g.policy_id, g.policy_version)?)?;
     key_for(db, root, &g.key_id, p.purpose())?;
@@ -178,6 +181,7 @@ fn validate(
     }
     Ok(p)
 }
+#[allow(clippy::too_many_arguments)]
 fn fresh(
     principal_id: String,
     key_id: String,
@@ -259,8 +263,9 @@ pub(super) fn resolve(
             expiry,
             max_uses,
         } => {
-            let ceiling =
-                super::policy::parse(policy(db, &policy_id, policy_version)?)?.limits.max_renewals;
+            let ceiling = super::policy::parse(policy(db, &policy_id, policy_version)?)?
+                .limits
+                .max_renewals;
             let grant = fresh(
                 principal_id,
                 key_id,
@@ -411,7 +416,7 @@ impl Database {
             ids
         };
         ids.iter()
-            .map(|id| hot_key(&self.connection, &self.root, id))
+            .map(|id| active_key(&self.connection, &self.root, id))
             .collect()
     }
 
@@ -492,6 +497,29 @@ impl Database {
             now,
         )?;
         super::policy::evaluate_origin(content, proof)?;
+        Ok((g, key))
+    }
+
+    /// `SIGN_PURPOSE`。键上绑定的 purpose 必须就是请求里的这一个 —— 策略白名单
+    /// 只能再收窄,不能替代绑定;两个都过才放行。
+    pub fn authorize_purpose(
+        &mut self,
+        principal_id: &str,
+        id: &str,
+        purpose: &crate::security::purpose::SigningPurpose,
+        now: Time,
+    ) -> Result<(Grant, catalog::KeyRecord)> {
+        let (g, key, content) = self.authorize(
+            principal_id,
+            id,
+            super::policy::Purpose::PurposeSigning,
+            "SIGN_PURPOSE",
+            now,
+        )?;
+        if key.purpose != purpose.name() {
+            return Err(refused("KEY_ROLE_FORBIDDEN"));
+        }
+        super::policy::evaluate_signing(content, purpose.name())?;
         Ok((g, key))
     }
 

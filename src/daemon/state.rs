@@ -89,7 +89,11 @@ pub struct Vault {
 
 impl Vault {
     fn new(layout: KeydLayout) -> Self {
-        Self { layout, unlocked: BTreeMap::new(), generation: 0 }
+        Self {
+            layout,
+            unlocked: BTreeMap::new(),
+            generation: 0,
+        }
     }
 
     pub fn layout(&self) -> &KeydLayout {
@@ -162,7 +166,8 @@ impl Vault {
                     }
                     None => {
                         let prefix = format!("{did}#");
-                        self.unlocked.retain(|resident, _| !resident.starts_with(&prefix));
+                        self.unlocked
+                            .retain(|resident, _| !resident.starts_with(&prefix));
                     }
                 }
                 before - self.unlocked.len()
@@ -211,7 +216,10 @@ pub struct SigningGates {
 
 impl SigningGates {
     pub fn new(raw: bool, challenge: bool) -> Self {
-        Self { raw, challenge: raw || challenge }
+        Self {
+            raw,
+            challenge: raw || challenge,
+        }
     }
 
     /// 原始签名那条路开着没有。
@@ -374,8 +382,18 @@ impl DaemonState {
         self.unlock_using(uid, did, kid, passphrase, None, before_install)
     }
 
-    pub(crate) fn se_envelope(&self, uid: u32, did: &str, kid: &str) -> Result<(u64, crate::keystore::record::WrappedKey)> {
-        self.with_vault(uid, |vault| Ok((vault.generation, store::resolve(&vault.layout, did, Some(kid))?)))
+    pub(crate) fn se_envelope(
+        &self,
+        uid: u32,
+        did: &str,
+        kid: &str,
+    ) -> Result<(u64, crate::keystore::record::WrappedKey)> {
+        self.with_vault(uid, |vault| {
+            Ok((
+                vault.generation,
+                store::resolve(&vault.layout, did, Some(kid))?,
+            ))
+        })
     }
 
     pub(crate) fn unlock_se_guarded<G>(
@@ -387,9 +405,20 @@ impl DaemonState {
         expected_generation: u64,
         before_install: impl FnOnce() -> Result<G>,
     ) -> Result<()> {
-        let fragment = wrapped.id.kid.strip_prefix(&format!("{}#", wrapped.id.did))
-            .filter(|s| !s.is_empty() && !s.contains('#')).ok_or(KeydError::Locked)?;
-        self.unlock_using(uid, &wrapped.id.did, Some(fragment), passphrase, Some((wrapped, hs, expected_generation)), before_install)
+        let fragment = wrapped
+            .id
+            .kid
+            .strip_prefix(&format!("{}#", wrapped.id.did))
+            .filter(|s| !s.is_empty() && !s.contains('#'))
+            .ok_or(KeydError::Locked)?;
+        self.unlock_using(
+            uid,
+            &wrapped.id.did,
+            Some(fragment),
+            passphrase,
+            Some((wrapped, hs, expected_generation)),
+            before_install,
+        )
     }
 
     fn unlock_using<G>(
@@ -398,7 +427,11 @@ impl DaemonState {
         did: &str,
         kid: Option<&str>,
         passphrase: Zeroizing<String>,
-        se: Option<(&crate::keystore::record::WrappedKey, &crate::crypto::hygiene::LockedBytes, u64)>,
+        se: Option<(
+            &crate::keystore::record::WrappedKey,
+            &crate::crypto::hygiene::LockedBytes,
+            u64,
+        )>,
         before_install: impl FnOnce() -> Result<G>,
     ) -> Result<()> {
         let (generation, wrapped, device_secret) = self.with_vault(uid, |vault| {
@@ -408,10 +441,17 @@ impl DaemonState {
         })?;
         // Expensive derivation must not hold the vault mutex: LOCK can cancel it.
         let key = if let Some((expected, hs, expected_generation)) = se {
-            if generation != expected_generation || serde_json::to_vec(expected)? != serde_json::to_vec(&wrapped)? {
+            if generation != expected_generation
+                || serde_json::to_vec(expected)? != serde_json::to_vec(&wrapped)?
+            {
                 return Err(KeydError::Locked);
             }
-            crate::keystore::unwrap::unlock_with_se_hs(&wrapped, passphrase.as_bytes(), &device_secret, hs)?
+            crate::keystore::unwrap::unlock_with_se_hs(
+                &wrapped,
+                passphrase.as_bytes(),
+                &device_secret,
+                hs,
+            )?
         } else {
             crate::keystore::unwrap::unlock(&wrapped, passphrase.as_bytes(), &device_secret)?
         };
@@ -461,11 +501,18 @@ impl DaemonState {
 
     /// Protected-mode sweeping records only through the SQLite audit owner.
     pub(crate) fn sweep_protected(&self, now: Instant) -> usize {
-        let mut vaults=match self.vaults.lock(){Ok(v)=>v,Err(p)=>p.into_inner()};
-        vaults.values_mut().map(|vault|{
-            let before=vault.unlocked.len();vault.sweep(self.autolock,now);
-            before-vault.unlocked.len()
-        }).sum()
+        let mut vaults = match self.vaults.lock() {
+            Ok(v) => v,
+            Err(p) => p.into_inner(),
+        };
+        vaults
+            .values_mut()
+            .map(|vault| {
+                let before = vault.unlocked.len();
+                vault.sweep(self.autolock, now);
+                before - vault.unlocked.len()
+            })
+            .sum()
     }
 
     /// 后台清扫:把每个 vault 里空闲太久的钥匙放掉。
@@ -550,7 +597,13 @@ impl DaemonState {
         self.with_vault(uid, |vault| {
             vault.with_key(&key_record.kid, self.autolock, Instant::now(), |key| {
                 use crate::persistence::clock::Clock;
-                request.sign_profile(&document, key, crate::persistence::clock::SystemClock.now()?, expiry, deadline)
+                request.sign_profile(
+                    &document,
+                    key,
+                    crate::persistence::clock::SystemClock.now()?,
+                    expiry,
+                    deadline,
+                )
             })
         })
     }
@@ -568,6 +621,20 @@ impl DaemonState {
         self.with_vault(uid, |vault| {
             vault.with_key(&key_record.kid, self.autolock, Instant::now(), |key| {
                 proof.sign(key, created)
+            })
+        })
+    }
+
+    /// 绑定用途的断言。message 已经按 purpose 定好,这里只负责把钥匙交进闭包。
+    pub(crate) fn sign_purpose(
+        &self,
+        uid: u32,
+        key_record: &crate::persistence::catalog::KeyRecord,
+        request: &crate::security::purpose::PurposeRequest,
+    ) -> Result<crate::security::purpose::SignedPurpose> {
+        self.with_vault(uid, |vault| {
+            vault.with_key(&key_record.kid, self.autolock, Instant::now(), |key| {
+                request.sign(key)
             })
         })
     }
@@ -656,7 +723,11 @@ mod tests {
     /// 三秒钟一次,所以参数压到最小;信封里存的是这批参数,解开时照用,
     /// 所以快慢只影响测试时长,不影响被验的代码路径。
     fn fast() -> Argon2Config {
-        Argon2Config { m_cost: 1024, t_cost: 1, p_cost: 1 }
+        Argon2Config {
+            m_cost: 1024,
+            t_cost: 1,
+            p_cost: 1,
+        }
     }
 
     fn spec() -> DidDocumentSpec {
@@ -695,12 +766,9 @@ mod tests {
             // 补上 `publish` 的活。
             let wrapped = store::load(&layout, &created.wrapped.id.thumbprint).unwrap();
             let device_secret = crate::keystore::device::load(&layout).unwrap();
-            let key = crate::keystore::unwrap::unlock(
-                &wrapped,
-                PASSPHRASE.as_bytes(),
-                &device_secret,
-            )
-            .unwrap();
+            let key =
+                crate::keystore::unwrap::unlock(&wrapped, PASSPHRASE.as_bytes(), &device_secret)
+                    .unwrap();
             let document = crate::did::document::publishable(&spec(), &created.did, &key).unwrap();
             store::write_did_document(&layout, &created.did, &document).unwrap();
             drop(key);
@@ -743,8 +811,12 @@ mod tests {
 
     #[test]
     fn se_unlock_pins_snapshot_and_lock_cancels_inflight_install() {
-        use crate::keystore::{hardware::SealedHardware, record::HardwareRoot, wrap::{seal, SealRequest, seed_to_public}};
         use crate::crypto::hygiene::LockedBytes;
+        use crate::keystore::{
+            hardware::SealedHardware,
+            record::HardwareRoot,
+            wrap::{seal, seed_to_public, SealRequest},
+        };
         let f = Fixture::new(SigningGates::new(false, false));
         let layout = KeydLayout::at(f._dir.path().to_path_buf());
         let old = store::resolve(&layout, &f.did, Some("key-1")).unwrap();
@@ -752,27 +824,55 @@ mod tests {
         let hs = LockedBytes::fill(|bytes| *bytes = [29; 32]).unwrap();
         let hardware_hs = LockedBytes::fill(|bytes| *bytes = [29; 32]).unwrap();
         let wrapped = seal(SealRequest {
-            id: old.id.clone(), algorithm: old.algorithm, public_multibase: seed_to_public(&seed).1,
-            label: old.label, passphrase: PASSPHRASE.as_bytes(),
-            device_secret: &device::load(&layout).unwrap(), seed: &seed, argon: fast(),
-            hardware: Some(SealedHardware { root: HardwareRoot::SecureEnclave { tag: "anp-keyd/synthetic-session-test".into() },
-                ciphertext: vec![4; 65], hs: hardware_hs }),
-        }).unwrap();
+            id: old.id.clone(),
+            algorithm: old.algorithm,
+            public_multibase: seed_to_public(&seed).1,
+            label: old.label,
+            passphrase: PASSPHRASE.as_bytes(),
+            device_secret: &device::load(&layout).unwrap(),
+            seed: &seed,
+            argon: fast(),
+            hardware: Some(SealedHardware {
+                root: HardwareRoot::SecureEnclave {
+                    tag: "anp-keyd/synthetic-session-test".into(),
+                },
+                ciphertext: vec![4; 65],
+                hs: hardware_hs,
+            }),
+        })
+        .unwrap();
         store::write(&layout, &wrapped).unwrap();
         let pass = || Zeroizing::new(PASSPHRASE.to_string());
         let (generation, _) = f.state.se_envelope(501, &f.did, "key-1").unwrap();
-        f.state.unlock_se_guarded(501, &wrapped, pass(), &hs, generation, || Ok(())).unwrap();
+        f.state
+            .unlock_se_guarded(501, &wrapped, pass(), &hs, generation, || Ok(()))
+            .unwrap();
         f.state.lock_everything();
-        assert!(f.state.unlock_se_guarded(501, &wrapped, pass(), &hs, generation, || Ok(())).is_err(), "a pre-password lock must cancel the challenge");
+        assert!(
+            f.state
+                .unlock_se_guarded(501, &wrapped, pass(), &hs, generation, || Ok(()))
+                .is_err(),
+            "a pre-password lock must cancel the challenge"
+        );
         let (generation, _) = f.state.se_envelope(501, &f.did, "key-1").unwrap();
-        assert!(f.state.unlock_se_guarded(501, &wrapped, pass(), &hs, generation, || {
-            f.state.lock_everything(); Ok(())
-        }).is_err());
+        assert!(f
+            .state
+            .unlock_se_guarded(501, &wrapped, pass(), &hs, generation, || {
+                f.state.lock_everything();
+                Ok(())
+            })
+            .is_err());
         let mut changed = wrapped.clone();
         changed.label = "different snapshot".into();
         let (generation, _) = f.state.se_envelope(501, &f.did, "key-1").unwrap();
-        assert!(f.state.unlock_se_guarded(501, &changed, pass(), &hs, generation, || Ok(())).is_err());
-        assert!(f.state.with_vault(501, |vault| Ok(vault.unlocked.is_empty())).unwrap());
+        assert!(f
+            .state
+            .unlock_se_guarded(501, &changed, pass(), &hs, generation, || Ok(()))
+            .is_err());
+        assert!(f
+            .state
+            .with_vault(501, |vault| Ok(vault.unlocked.is_empty()))
+            .unwrap());
     }
 
     #[test]
@@ -810,13 +910,19 @@ mod tests {
         assert_eq!(keys.len(), 1);
         assert_eq!(keys[0].did, f.did);
         assert_eq!(keys[0].algorithm, KeyAlgorithm::Ed25519);
-        assert!(f.state.status(501).unwrap().is_empty(), "nothing is unlocked yet");
+        assert!(
+            f.state.status(501).unwrap().is_empty(),
+            "nothing is unlocked yet"
+        );
     }
 
     #[test]
     fn signing_a_locked_key_is_refused_rather_than_prompted() {
         let f = Fixture::new(SigningGates::new(false, false));
-        let err = f.state.sign_structured(501, &f.did, None, &f.request()).unwrap_err();
+        let err = f
+            .state
+            .sign_structured(501, &f.did, None, &f.request())
+            .unwrap_err();
         assert!(matches!(err, KeydError::Locked), "{err}");
     }
 
@@ -826,12 +932,19 @@ mod tests {
         f.unlock();
 
         assert_eq!(f.state.status(501).unwrap().len(), 1);
-        let signed = f.state.sign_structured(501, &f.did, None, &f.request()).unwrap();
+        let signed = f
+            .state
+            .sign_structured(501, &f.did, None, &f.request())
+            .unwrap();
         assert!(signed.headers.contains_key("Signature"));
 
         // 覆盖面下限照样在 —— 解锁不改变"谁来定覆盖面"这件事。
         for want in ["@method", "@target-uri", "@authority", "content-digest"] {
-            assert!(signed.covered.iter().any(|c| c == want), "{:?}", signed.covered);
+            assert!(
+                signed.covered.iter().any(|c| c == want),
+                "{:?}",
+                signed.covered
+            );
         }
     }
 
@@ -855,7 +968,9 @@ mod tests {
 
         assert!(f.state.status(501).unwrap().is_empty());
         assert!(matches!(
-            f.state.sign_structured(501, &f.did, None, &f.request()).unwrap_err(),
+            f.state
+                .sign_structured(501, &f.did, None, &f.request())
+                .unwrap_err(),
             KeydError::Locked
         ));
         // 锁第二次不是错误 —— 想要的状态已经在那儿了。
@@ -865,8 +980,14 @@ mod tests {
     #[test]
     fn locking_everything_is_a_different_request_from_locking_one_key() {
         assert_ne!(
-            Request::Lock { kid: None, did: None },
-            Request::Lock { kid: None, did: Some("d".to_string()) }
+            Request::Lock {
+                kid: None,
+                did: None
+            },
+            Request::Lock {
+                kid: None,
+                did: Some("d".to_string())
+            }
         );
     }
 
@@ -901,17 +1022,22 @@ mod tests {
         // 没有,所以 `KeyNotFound` 是这里唯一说得通、也不多嘴的答案。
         assert!(a.list_keys(501).unwrap().is_empty());
         assert!(matches!(
-            a.unlock(501, &b.did, None, Zeroizing::new(PASSPHRASE.to_string())).unwrap_err(),
+            a.unlock(501, &b.did, None, Zeroizing::new(PASSPHRASE.to_string()))
+                .unwrap_err(),
             KeydError::KeyNotFound(_)
         ));
         assert!(matches!(
-            a.sign_structured(501, &b.did, None, &b.request()).unwrap_err(),
+            a.sign_structured(501, &b.did, None, &b.request())
+                .unwrap_err(),
             KeydError::KeyNotFound(_)
         ));
 
         // 而 B 自己那把钥匙好好的,没被动过。
         b.unlock();
-        assert!(b.state.sign_structured(501, &b.did, None, &b.request()).is_ok());
+        assert!(b
+            .state
+            .sign_structured(501, &b.did, None, &b.request())
+            .is_ok());
     }
 
     #[test]
@@ -926,7 +1052,9 @@ mod tests {
 
         assert!(f.state.status(501).unwrap().is_empty());
         assert!(matches!(
-            f.state.sign_structured(501, &f.did, None, &f.request()).unwrap_err(),
+            f.state
+                .sign_structured(501, &f.did, None, &f.request())
+                .unwrap_err(),
             KeydError::Locked
         ));
     }
@@ -940,7 +1068,9 @@ mod tests {
         // 解锁在 T0。现在假装时钟走到 T0+800s 并"用"一次。
         let now = Instant::now() + Duration::from_secs(800);
         f.state
-            .with_vault(501, |vault| vault.with_key(&f.resident, f.state.autolock(), now, |_| Ok(())))
+            .with_vault(501, |vault| {
+                vault.with_key(&f.resident, f.state.autolock(), now, |_| Ok(()))
+            })
             .unwrap();
 
         // 从 T0 算早就过期了,从 T0+800s 算还没。
@@ -1017,7 +1147,9 @@ mod tests {
     fn the_challenge_switch_is_checked_before_the_lock_state() {
         let f = Fixture::new(SigningGates::new(false, false));
         assert!(matches!(
-            f.state.sign_challenge(501, &f.did, None, |_| Ok(())).unwrap_err(),
+            f.state
+                .sign_challenge(501, &f.did, None, |_| Ok(()))
+                .unwrap_err(),
             KeydError::ChallengeDisabled
         ));
     }

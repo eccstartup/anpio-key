@@ -39,30 +39,73 @@ pub struct Boundary {
 }
 
 #[cfg(all(test, target_os = "macos", feature = "hardware-se"))]
-pub(crate) fn exercise_local_se_bridge(config: ServiceConfig, database: Database, grant: crate::persistence::grants::Grant, ending: &str) -> Database {
-    use std::io::Write;
+pub(crate) fn exercise_local_se_bridge(
+    config: ServiceConfig,
+    database: Database,
+    grant: crate::persistence::grants::Grant,
+    ending: &str,
+) -> Database {
     use crate::crypto::hygiene::LockedBytes;
+    use std::io::Write;
     let catalog = database.catalog().unwrap();
-    let key = catalog.keys.iter().find(|key| key.key_id == grant.key_id).unwrap();
+    let key = catalog
+        .keys
+        .iter()
+        .find(|key| key.key_id == grant.key_id)
+        .unwrap();
     let boundary = Arc::new(Boundary::new(config.clone(), database).unwrap());
     let (server, mut helper) = UnixStream::pair().unwrap();
-    helper.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-    helper.set_write_timeout(Some(Duration::from_secs(10))).unwrap();
+    helper
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    helper
+        .set_write_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
     let worker = boundary.clone();
     let thread = std::thread::spawn(move || worker.connection(server, true));
-    protocol::write(&mut helper, &Envelope { version: VERSION, request: AdminRequest::StartSeSession {
-        vault_id: key.vault_id.clone(), did: key.did.clone(), kid: key.kid.clone() } }).unwrap();
+    protocol::write(
+        &mut helper,
+        &Envelope {
+            version: VERSION,
+            request: AdminRequest::StartSeSession {
+                vault_id: key.vault_id.clone(),
+                did: key.did.clone(),
+                kid: key.kid.clone(),
+            },
+        },
+    )
+    .unwrap();
     let challenge: Reply = protocol::read(&mut helper).unwrap();
     assert_eq!(challenge.code, "OK");
-    assert_eq!(challenge.instance_id.as_deref(), Some(config.instance_id.as_str()));
-    let session_id = challenge.data.as_ref().unwrap()["session_id"].as_str().unwrap().to_string();
-    let wrapped: crate::keystore::record::WrappedKey = serde_json::from_value(challenge.data.unwrap()["envelope"].clone()).unwrap();
+    assert_eq!(
+        challenge.instance_id.as_deref(),
+        Some(config.instance_id.as_str())
+    );
+    let session_id = challenge.data.as_ref().unwrap()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let wrapped: crate::keystore::record::WrappedKey =
+        serde_json::from_value(challenge.data.unwrap()["envelope"].clone()).unwrap();
     assert_eq!(wrapped.id.kid, key.kid);
     // Fixture-only HS stands in for the signed helper's SE call. The actual
     // management stream, kernel audit session, console observer, KDF, signing,
     // transactions, and disconnect cleanup are exercised without OS mocks.
-    protocol::write_hs(&mut helper, &LockedBytes::fill(|bytes| *bytes = [if ending == "bad-hs" { 30 } else { 29 }; 32]).unwrap()).unwrap();
-    protocol::write_secret(&mut helper, if ending == "bad-pass" { "wrong-pass" } else { "test-pass" }).unwrap();
+    protocol::write_hs(
+        &mut helper,
+        &LockedBytes::fill(|bytes| *bytes = [if ending == "bad-hs" { 30 } else { 29 }; 32])
+            .unwrap(),
+    )
+    .unwrap();
+    protocol::write_secret(
+        &mut helper,
+        if ending == "bad-pass" {
+            "wrong-pass"
+        } else {
+            "test-pass"
+        },
+    )
+    .unwrap();
     let ready: Reply = protocol::read(&mut helper).unwrap();
     if ending == "bad-pass" || ending == "bad-hs" {
         assert_eq!(ready.code, "SE_SESSION_REFUSED");
@@ -70,32 +113,89 @@ pub(crate) fn exercise_local_se_bridge(config: ServiceConfig, database: Database
         thread.join().unwrap().unwrap();
         assert!(boundary.se_session.lock().unwrap().is_none());
         assert!(!boundary.stopped.load(Ordering::SeqCst));
-        assert_eq!(boundary.vaults[&key.vault_id].lock(config.service_uid, None, None).unwrap(), 0);
-        return Arc::try_unwrap(boundary).ok().unwrap().database.into_inner().unwrap();
+        assert_eq!(
+            boundary.vaults[&key.vault_id]
+                .lock(config.service_uid, None, None)
+                .unwrap(),
+            0
+        );
+        return Arc::try_unwrap(boundary)
+            .ok()
+            .unwrap()
+            .database
+            .into_inner()
+            .unwrap();
     }
     assert_eq!(ready.code, "OK");
-    assert_eq!(ready.instance_id.as_deref(), Some(config.instance_id.as_str()));
-    protocol::write(&mut helper, &protocol::SeHeartbeat { session_id, sequence: 1 }).unwrap();
+    assert_eq!(
+        ready.instance_id.as_deref(),
+        Some(config.instance_id.as_str())
+    );
+    protocol::write(
+        &mut helper,
+        &protocol::SeHeartbeat {
+            session_id,
+            sequence: 1,
+        },
+    )
+    .unwrap();
     let beat: Reply = protocol::read(&mut helper).unwrap();
     assert_eq!(beat.code, "OK");
-    assert_eq!(beat.instance_id.as_deref(), Some(config.instance_id.as_str()));
+    assert_eq!(
+        beat.instance_id.as_deref(),
+        Some(config.instance_id.as_str())
+    );
     let request_id = "12345678-1234-4234-8234-123456789012".to_string();
-    let http = super::http::HttpRequest { method: "GET".into(), url: "https://service.example.com/v1/orders".into(),
-        headers: Default::default(), body: super::http::Body::Absent {}, nonce: None };
-    let signed = boundary.data(1005, &grant.principal_id, DataRequest::SignHttp {
-        grant_id: grant.grant_id.clone(), request_id: request_id.clone(), http });
+    let http = super::http::HttpRequest {
+        method: "GET".into(),
+        url: "https://service.example.com/v1/orders".into(),
+        headers: Default::default(),
+        body: super::http::Body::Absent {},
+        nonce: None,
+    };
+    let signed = boundary.data(
+        1005,
+        &grant.principal_id,
+        DataRequest::SignHttp {
+            grant_id: grant.grant_id.clone(),
+            request_id: request_id.clone(),
+            http,
+        },
+    );
     assert_eq!(signed.code, "OK");
     let signed = signed.data.unwrap();
-    let headers: BTreeMap<String, String> = serde_json::from_value(signed["result"]["headers"].clone()).unwrap();
-    assert!(headers.keys().any(|name| name.eq_ignore_ascii_case("signature")));
-    let (document, _) = boundary.vaults[&key.vault_id].get_document(config.service_uid, &key.did).unwrap();
+    let headers: BTreeMap<String, String> =
+        serde_json::from_value(signed["result"]["headers"].clone()).unwrap();
+    assert!(headers
+        .keys()
+        .any(|name| name.eq_ignore_ascii_case("signature")));
+    let (document, _) = boundary.vaults[&key.vault_id]
+        .get_document(config.service_uid, &key.did)
+        .unwrap();
     let document = serde_json::from_slice(&document).unwrap();
-    anp::authentication::verify_http_message_signature(&document, "GET", "https://service.example.com/v1/orders", &headers, None).unwrap();
-    assert!(anp::authentication::verify_http_message_signature(&document, "GET", "https://service.example.com/other", &headers, None).is_err());
+    anp::authentication::verify_http_message_signature(
+        &document,
+        "GET",
+        "https://service.example.com/v1/orders",
+        &headers,
+        None,
+    )
+    .unwrap();
+    assert!(anp::authentication::verify_http_message_signature(
+        &document,
+        "GET",
+        "https://service.example.com/other",
+        &headers,
+        None
+    )
+    .is_err());
     // Disconnect must lock the real loaded key, revoke the grant, and hide the
     // previously committed result before the next successful data response.
     if ending == "replay" {
-        let challenge = protocol::SeHeartbeat { session_id: "wrong-session".into(), sequence: 1 };
+        let challenge = protocol::SeHeartbeat {
+            session_id: "wrong-session".into(),
+            sequence: 1,
+        };
         protocol::write(&mut helper, &challenge).unwrap();
         assert!(protocol::read::<_, Reply>(&mut helper).is_err());
     } else if ending == "silence" {
@@ -110,12 +210,33 @@ pub(crate) fn exercise_local_se_bridge(config: ServiceConfig, database: Database
     thread.join().unwrap().unwrap();
     assert!(boundary.se_session.lock().unwrap().is_none());
     assert!(!boundary.stopped.load(Ordering::SeqCst));
-    assert_eq!(boundary.database.lock().unwrap().grant_status(&grant.principal_id, &grant.grant_id, SystemClock.now().unwrap()).unwrap().state, "revoked");
-    let status = boundary.data(1005, &grant.principal_id, DataRequest::RequestStatus { request_id });
+    assert_eq!(
+        boundary
+            .database
+            .lock()
+            .unwrap()
+            .grant_status(
+                &grant.principal_id,
+                &grant.grant_id,
+                SystemClock.now().unwrap()
+            )
+            .unwrap()
+            .state,
+        "revoked"
+    );
+    let status = boundary.data(
+        1005,
+        &grant.principal_id,
+        DataRequest::RequestStatus { request_id },
+    );
     assert_eq!(status.code, "OK");
     assert!(status.data.unwrap().get("result").is_none());
     let state = &boundary.vaults[&key.vault_id];
-    assert_eq!(state.lock(config.service_uid, None, None).unwrap(), 0, "disconnect already removed the loaded key");
+    assert_eq!(
+        state.lock(config.service_uid, None, None).unwrap(),
+        0,
+        "disconnect already removed the loaded key"
+    );
     let boundary = Arc::try_unwrap(boundary).ok().unwrap();
     boundary.database.into_inner().unwrap()
 }
@@ -200,14 +321,24 @@ impl Boundary {
         if session.as_ref().is_some_and(|lease| lease.id == id) {
             let lease = session.take().expect("present lease");
             self.lock_all();
-            self.database.lock().map_err(|_| KeydError::Locked)?.end_se_session(lease.actor, id)?;
+            self.database
+                .lock()
+                .map_err(|_| KeydError::Locked)?
+                .end_se_session(lease.actor, id)?;
         }
         Ok(())
     }
 
-    fn se_connection(&self, actor: u32, io: &mut DeadlineStream, vault: &str, did: &str, kid: &str) -> Result<()> {
-        use crate::keystore::record::HardwareRoot;
+    fn se_connection(
+        &self,
+        actor: u32,
+        io: &mut DeadlineStream,
+        vault: &str,
+        did: &str,
+        kid: &str,
+    ) -> Result<()> {
         use super::se_session;
+        use crate::keystore::record::HardwareRoot;
         if self.config.limits.admin_connections < 2 {
             return protocol::write(io, &Reply::code("RESOURCE_BUSY"));
         }
@@ -226,21 +357,36 @@ impl Boundary {
         let id: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
         let setup = (|| -> Result<()> {
             let state = self.vaults.get(vault).ok_or(KeydError::Locked)?;
-            let fragment = kid.strip_prefix(&format!("{did}#"))
-                .filter(|s| !s.is_empty() && !s.contains('#')).ok_or(KeydError::Locked)?;
+            let fragment = kid
+                .strip_prefix(&format!("{did}#"))
+                .filter(|s| !s.is_empty() && !s.contains('#'))
+                .ok_or(KeydError::Locked)?;
             let (wrapped, epoch, generation) = {
                 let _guard = self.admin_gate.enter(true)?;
-                if self.stopped.load(Ordering::SeqCst) { return Err(KeydError::Locked); }
-                if self.se_session.lock().map_err(|_| KeydError::Locked)?.is_some() {
+                if self.stopped.load(Ordering::SeqCst) {
+                    return Err(KeydError::Locked);
+                }
+                if self
+                    .se_session
+                    .lock()
+                    .map_err(|_| KeydError::Locked)?
+                    .is_some()
+                {
                     return Err(KeydError::Locked);
                 }
                 let db = self.database.lock().map_err(|_| KeydError::Locked)?;
                 db.check_key(vault, did, kid)?;
-                if !db.catalog()?.keys.iter().any(|key| key.vault_id == vault && key.did == did && key.kid == kid
-                    && key.role == crate::persistence::catalog::KeyRole::Hot && key.state == "active") {
+                if !db.catalog()?.keys.iter().any(|key| {
+                    key.vault_id == vault
+                        && key.did == did
+                        && key.kid == kid
+                        && key.role == crate::persistence::catalog::KeyRole::Hot
+                        && key.state == "active"
+                }) {
                     return Err(KeydError::Locked);
                 }
-                let (generation, wrapped) = state.se_envelope(self.config.service_uid, did, fragment)?;
+                let (generation, wrapped) =
+                    state.se_envelope(self.config.service_uid, did, fragment)?;
                 wrapped.validate()?;
                 wrapped.verify_aad()?;
                 if !matches!(wrapped.hardware, Some(HardwareRoot::SecureEnclave { .. })) {
@@ -250,7 +396,9 @@ impl Boundary {
             };
             let mut challenge = Reply::code("OK");
             challenge.instance_id = Some(self.config.instance_id.clone());
-            challenge.data = Some(json!({"session_id":id,"envelope":wrapped,"max_seconds":se_session::MAX_SECONDS}));
+            challenge.data = Some(
+                json!({"session_id":id,"envelope":wrapped,"max_seconds":se_session::MAX_SECONDS}),
+            );
             io.reset(Duration::from_secs(30));
             protocol::write(io, &challenge)?;
             let hs = protocol::read_hs(io)?;
@@ -281,13 +429,20 @@ impl Boundary {
         })();
         drop(_kdf);
         if setup.is_err() {
-            if self.finish_se_session(&id).is_err() { self.emergency(); }
+            if self.finish_se_session(&id).is_err() {
+                self.emergency();
+            }
             let audited = self.record(json!({"event":"SE_SESSION_REFUSED","actor":actor,
                 "session_id":id,"vault_id":vault,"kid":kid}));
             io.reset(Duration::from_secs(5));
-            return protocol::write(io, &Reply::code(if !audited || self.stopped.load(Ordering::SeqCst) {
-                "AUDIT_UNAVAILABLE"
-            } else { "SE_SESSION_REFUSED" }));
+            return protocol::write(
+                io,
+                &Reply::code(if !audited || self.stopped.load(Ordering::SeqCst) {
+                    "AUDIT_UNAVAILABLE"
+                } else {
+                    "SE_SESSION_REFUSED"
+                }),
+            );
         }
         loop {
             io.reset(Duration::from_secs(se_session::HEARTBEAT_SECONDS));
@@ -297,16 +452,31 @@ impl Boundary {
             };
             let outcome = (|| -> Result<()> {
                 let _guard = self.admin_gate.enter(true)?;
-                if self.stopped.load(Ordering::SeqCst) { return Err(KeydError::Locked); }
+                if self.stopped.load(Ordering::SeqCst) {
+                    return Err(KeydError::Locked);
+                }
                 let mut session = self.se_session.lock().map_err(|_| KeydError::Locked)?;
-                let lease = session.as_mut().filter(|lease| lease.id == id).ok_or(KeydError::Locked)?;
-                if !lease.live() { return Err(KeydError::Locked); }
-                lease.heartbeat(&heartbeat.session_id, heartbeat.sequence, se_session::now()?)?;
+                let lease = session
+                    .as_mut()
+                    .filter(|lease| lease.id == id)
+                    .ok_or(KeydError::Locked)?;
+                if !lease.live() {
+                    return Err(KeydError::Locked);
+                }
+                lease.heartbeat(
+                    &heartbeat.session_id,
+                    heartbeat.sequence,
+                    se_session::now()?,
+                )?;
                 Ok(())
             })();
-            if outcome.is_err() || protocol::write(io, &self.capabilities(None)).is_err() { break; }
+            if outcome.is_err() || protocol::write(io, &self.capabilities(None)).is_err() {
+                break;
+            }
         }
-        if self.finish_se_session(&id).is_err() { self.emergency(); }
+        if self.finish_se_session(&id).is_err() {
+            self.emergency();
+        }
         Ok(())
     }
 
@@ -397,7 +567,11 @@ impl Boundary {
                 Ok(request) => match self.admin_gate.enter(false) {
                     Ok(guard) => {
                         delivery_guard = Some(guard);
-                        self.data_locked(peer.uid, principal.as_deref().expect("authenticated principal"), request.request)
+                        self.data_locked(
+                            peer.uid,
+                            principal.as_deref().expect("authenticated principal"),
+                            request.request,
+                        )
                     }
                     Err(_) => Reply::code("RESOURCE_BUSY"),
                 },
@@ -405,11 +579,18 @@ impl Boundary {
             }
         };
         if delivery_guard.is_some() {
-            let check = self.database.lock().map_err(|_| KeydError::Locked)
+            let check = self
+                .database
+                .lock()
+                .map_err(|_| KeydError::Locked)
                 .and_then(|mut db| self.check_se_session(&mut db));
             if let Err(error) = check {
-                reply = if matches!(error, KeydError::Misuse(_)) { Reply::code("SE_SESSION_ENDED") }
-                    else { self.emergency(); Reply::code("AUDIT_UNAVAILABLE") };
+                reply = if matches!(error, KeydError::Misuse(_)) {
+                    Reply::code("SE_SESSION_ENDED")
+                } else {
+                    self.emergency();
+                    Reply::code("AUDIT_UNAVAILABLE")
+                };
             }
         }
         if reply.code == "OK" {
@@ -426,7 +607,9 @@ impl Boundary {
 
     #[cfg(all(test, target_os = "macos", feature = "hardware-se"))]
     fn data(&self, uid: u32, principal: &str, request: DataRequest) -> Reply {
-        let Ok(_guard) = self.admin_gate.enter(false) else { return Reply::code("RESOURCE_BUSY"); };
+        let Ok(_guard) = self.admin_gate.enter(false) else {
+            return Reply::code("RESOURCE_BUSY");
+        };
         self.data_locked(uid, principal, request)
     }
 
@@ -477,8 +660,13 @@ impl Boundary {
                         operations.push("SIGN_ORIGIN_PROOF");
                         purposes.push("origin-proof");
                     }
+                    let signing_purposes = self.config.features.sign_purpose.enabled_names();
+                    if !signing_purposes.is_empty() {
+                        operations.push("SIGN_PURPOSE");
+                        purposes.push("purpose-signing");
+                    }
                     reply.data = Some(
-                        json!({"protocol_version":2,"profile":"anp-http-v2","max_body_bytes":16384,"transaction_executor_available":true,"audit_projection_healthy":self.projection_healthy.load(Ordering::SeqCst),"capability_schema":1,"operations":operations,"purposes":purposes,"grant_kinds":["request","session"]}),
+                        json!({"protocol_version":2,"profile":"anp-http-v2","max_body_bytes":16384,"transaction_executor_available":true,"audit_projection_healthy":self.projection_healthy.load(Ordering::SeqCst),"capability_schema":1,"operations":operations,"purposes":purposes,"signing_purposes":signing_purposes,"grant_kinds":["request","session"]}),
                     );
                 }
                 DataRequest::ListAuthorizedKeys {} => {
@@ -524,8 +712,13 @@ impl Boundary {
                         &canonical,
                         &SystemClock,
                         |key, expiry, deadline| {
-                            if self.se_session.lock().map_err(|_| KeydError::Locked)?
-                                .as_ref().is_some_and(|lease| !lease.live()) {
+                            if self
+                                .se_session
+                                .lock()
+                                .map_err(|_| KeydError::Locked)?
+                                .as_ref()
+                                .is_some_and(|lease| !lease.live())
+                            {
                                 return Err(KeydError::Locked);
                             }
                             let state = self.vaults.get(&key.vault_id).ok_or_else(|| {
@@ -562,29 +755,73 @@ impl Boundary {
                         &proof,
                         &SystemClock,
                         |key, proof, created| {
-                            if self.se_session.lock().map_err(|_| KeydError::Locked)?
-                                .as_ref().is_some_and(|lease| !lease.live()) {
+                            if self
+                                .se_session
+                                .lock()
+                                .map_err(|_| KeydError::Locked)?
+                                .as_ref()
+                                .is_some_and(|lease| !lease.live())
+                            {
                                 return Err(KeydError::Locked);
                             }
                             let state = self.vaults.get(&key.vault_id).ok_or_else(|| {
                                 KeydError::Protocol("missing managed vault".into())
                             })?;
-                            state.sign_origin_proof(
-                                self.config.service_uid,
-                                key,
-                                proof,
-                                created,
-                            )                        },
+                            state.sign_origin_proof(self.config.service_uid, key, proof, created)
+                        },
+                    )?;
+                    reply.data = Some(serde_json::to_value(status)?);
+                }
+                DataRequest::SignPurpose {
+                    grant_id,
+                    request_id,
+                    purpose,
+                    domain,
+                    payload,
+                } => {
+                    // 未知标签永远是 PURPOSE_INVALID,和开关状态无关;已知但没开
+                    // 的那一路是 OPERATION_DISABLED,调用方据此决定要不要降级。
+                    let purpose = super::purpose::SigningPurpose::parse(&purpose)?;
+                    if !self.config.features.sign_purpose.enabled(purpose) {
+                        return Err(KeydError::Misuse("OPERATION_DISABLED".into()));
+                    }
+                    if !crate::principal::validate_uuid(&request_id) {
+                        return Err(KeydError::Misuse("REQUEST_ID_INVALID".into()));
+                    }
+                    let request = super::purpose::PurposeRequest::from_wire(
+                        purpose.name(),
+                        domain,
+                        &payload,
+                    )?;
+                    let status = super::executor::execute_purpose(
+                        &mut db,
+                        principal,
+                        &grant_id,
+                        &request_id,
+                        &request,
+                        &SystemClock,
+                        |key, request| {
+                            if self
+                                .se_session
+                                .lock()
+                                .map_err(|_| KeydError::Locked)?
+                                .as_ref()
+                                .is_some_and(|lease| !lease.live())
+                            {
+                                return Err(KeydError::Locked);
+                            }
+                            let state = self.vaults.get(&key.vault_id).ok_or_else(|| {
+                                KeydError::Protocol("missing managed vault".into())
+                            })?;
+                            state.sign_purpose(self.config.service_uid, key, request)
+                        },
                     )?;
                     reply.data = Some(serde_json::to_value(status)?);
                 }
                 DataRequest::RenewGrant { grant_id, expiry } => {
-                    reply.data = Some(serde_json::to_value(db.renew_grant(
-                        principal,
-                        &grant_id,
-                        expiry,
-                        now,
-                    )?)?);
+                    reply.data = Some(serde_json::to_value(
+                        db.renew_grant(principal, &grant_id, expiry, now)?,
+                    )?);
                 }
                 DataRequest::RequestStatus { request_id } => {
                     if !crate::principal::validate_uuid(&request_id) {
@@ -619,11 +856,18 @@ impl Boundary {
         let Ok(_permit) = self.admin_gate.enter(false) else {
             return;
         };
-        let session_check = self.database.lock().map_err(|_| KeydError::Locked)
+        let session_check = self
+            .database
+            .lock()
+            .map_err(|_| KeydError::Locked)
             .and_then(|mut db| self.check_se_session(&mut db));
         if let Err(error) = session_check {
-            if !matches!(error, KeydError::Misuse(_)) { self.emergency(); }
-            if self.stopped.load(Ordering::SeqCst) { return; }
+            if !matches!(error, KeydError::Misuse(_)) {
+                self.emergency();
+            }
+            if self.stopped.load(Ordering::SeqCst) {
+                return;
+            }
         }
         let count: usize = self
             .vaults
@@ -704,10 +948,15 @@ impl Boundary {
             return Reply::code("AUDIT_UNAVAILABLE");
         }
         if !unlocking {
-            let result = self.database.lock().map_err(|_| KeydError::Locked)
+            let result = self
+                .database
+                .lock()
+                .map_err(|_| KeydError::Locked)
                 .and_then(|mut db| self.check_se_session(&mut db));
             if let Err(error) = result {
-                if matches!(error, KeydError::Misuse(_)) { return Reply::code("SE_SESSION_ENDED"); }
+                if matches!(error, KeydError::Misuse(_)) {
+                    return Reply::code("SE_SESSION_ENDED");
+                }
                 self.emergency();
                 return Reply::code("AUDIT_UNAVAILABLE");
             }
@@ -1085,7 +1334,13 @@ pub async fn serve(config: ServiceConfig, mut stop: watch::Receiver<bool>) -> Re
     }
     let mut database = Database::recover(&config, SystemClock.now()?)?;
     // 开关状态必须在链上留一行:事后能回答"这版服务开过哪些签名路"。
-    database.record(json!({"event":"FEATURES","sign_origin_proof":config.features.sign_origin_proof}))?;
+    // 每个 purpose 单独一条,不走 FEATURES 的布尔位。
+    database.record(
+        json!({"event":"FEATURES","sign_origin_proof":config.features.sign_origin_proof}),
+    )?;
+    for purpose in config.features.sign_purpose.enabled_names() {
+        database.record(json!({"event":"SIGN_PURPOSE_ENABLED","purpose":purpose}))?;
+    }
     let (sign, _sign_guard) = bind(&config.sign_socket, config.service_uid, config.agent_gid)?;
     let (admin, _admin_guard) = bind(&config.admin_socket, config.service_uid, config.admin_gid)?;
     let boundary = Arc::new(Boundary::new(config, database)?);

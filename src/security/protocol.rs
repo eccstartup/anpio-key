@@ -38,6 +38,19 @@ pub enum DataRequest {
         request_id: String,
         origin: super::origin::OriginProofRequest,
     },
+    /// 绑定用途的断言签名。键由 purpose 决定,调用方给不了 key 相关字段。
+    #[serde(rename = "SIGN_PURPOSE")]
+    SignPurpose {
+        grant_id: String,
+        request_id: String,
+        /// `device_assertion` 或 `application_assertion`;必须和键上绑定的一致。
+        purpose: String,
+        /// 只有 `application_assertion` 给,其余给了就是非法。
+        #[serde(default)]
+        domain: Option<String>,
+        /// 小写 hex,≤4096 字节。
+        payload: String,
+    },
     /// 长生命周期 grant 续期。只能往上顶到策略给的天花板。
     #[serde(rename = "RENEW_GRANT")]
     RenewGrant { grant_id: String, expiry: i64 },
@@ -50,7 +63,11 @@ pub enum DataRequest {
 #[serde(tag = "operation", deny_unknown_fields)]
 pub enum AdminRequest {
     #[serde(rename = "START_SE_SESSION")]
-    StartSeSession { vault_id: String, did: String, kid: String },
+    StartSeSession {
+        vault_id: String,
+        did: String,
+        kid: String,
+    },
     #[serde(rename = "COMPLETE_SECRET_OPERATION")]
     CompleteSecretOperation {
         operation_id: String,
@@ -92,7 +109,10 @@ pub(crate) fn read_hs(reader: &mut impl Read) -> Result<crate::crypto::hygiene::
     crate::crypto::hygiene::LockedBytes::new(&mut bytes)
 }
 
-pub(crate) fn write_hs(writer: &mut impl Write, hs: &crate::crypto::hygiene::LockedBytes) -> Result<()> {
+pub(crate) fn write_hs(
+    writer: &mut impl Write,
+    hs: &crate::crypto::hygiene::LockedBytes,
+) -> Result<()> {
     hs.expose(|bytes| writer.write_all(bytes))?;
     writer.flush()?;
     Ok(())
@@ -229,7 +249,9 @@ mod tests {
         let mut frame = Zeroizing::new(Vec::new());
         write_hs(&mut *frame, &hs).unwrap();
         assert_eq!(frame.len(), 32);
-        read_hs(&mut &frame[..]).unwrap().expose(|bytes| assert_eq!(*bytes, [29; 32]));
+        read_hs(&mut &frame[..])
+            .unwrap()
+            .expose(|bytes| assert_eq!(*bytes, [29; 32]));
         assert!(read_hs(&mut &frame[..31]).is_err());
         assert!(parse::<Envelope<AdminRequest>>(r#"{"version":2,"request":{"operation":"START_SE_SESSION","vault_id":"v","did":"d","kid":"k","hs":"secret"}}"#).is_err());
     }
@@ -308,5 +330,41 @@ mod v2_tests {
             decode(&renew).unwrap().request,
             DataRequest::RenewGrant { expiry: 1000, .. }
         ));
+    }
+
+    /// purpose 签名是扁平的:用途、可选的域、hex payload。没有域之外的嵌套,
+    /// 也就没有地方夹带密钥或公钥。
+    #[test]
+    fn purpose_signing_takes_a_tag_and_payload_only() {
+        let base = serde_json::json!({"version":2,"request":{"operation":"SIGN_PURPOSE",
+            "grant_id":"g","request_id":"r","purpose":"device_assertion","payload":"00ff"}});
+        let decode = |v: &serde_json::Value| {
+            let payload = serde_json::to_vec(v).unwrap();
+            let mut frame = (payload.len() as u32).to_be_bytes().to_vec();
+            frame.extend(payload);
+            read::<_, Envelope<DataRequest>>(&mut &frame[..])
+        };
+        assert!(matches!(
+            decode(&base).unwrap().request,
+            DataRequest::SignPurpose { domain: None, .. }
+        ));
+        let mut with_domain = base.clone();
+        with_domain["request"]["purpose"] = serde_json::json!("application_assertion");
+        with_domain["request"]["domain"] = serde_json::json!("chat.alpha");
+        assert!(matches!(
+            decode(&with_domain).unwrap().request,
+            DataRequest::SignPurpose {
+                domain: Some(_),
+                ..
+            }
+        ));
+        for field in ["did", "kid", "key_id", "payload_digest", "passphrase"] {
+            let mut bad = base.clone();
+            bad["request"][field] = serde_json::json!("override");
+            assert!(decode(&bad).is_err(), "{field}");
+        }
+        let mut bad = base.clone();
+        bad["request"].as_object_mut().unwrap().remove("payload");
+        assert!(decode(&bad).is_err());
     }
 }

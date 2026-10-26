@@ -82,6 +82,34 @@ fn disposable_linux_fixture() {
         next,
     )
     .unwrap();
+    // A device signing key sits under both relationships; classifying it also
+    // binds one purpose, so the fixture has to publish the shape the catalog
+    // verifies against.
+    let (_, device_sign) = create::create_extra(
+        &layout,
+        &created.did,
+        "device-sign",
+        vec![
+            anp::authentication::DidVerificationRelationship::Authentication,
+            anp::authentication::DidVerificationRelationship::AssertionMethod,
+        ],
+        "disposable-device",
+        pass,
+        Argon2Config {
+            m_cost: 1024,
+            t_cost: 1,
+            p_cost: 1,
+        },
+        HardwareChoice::None,
+    )
+    .unwrap();
+    let unsigned = anpio_key::did::lifecycle::with_extra_key(
+        &unsigned,
+        &created.did,
+        &key.verifying_key(),
+        device_sign,
+    )
+    .unwrap();
     let doc = document::sign_document(&unsigned, &key, &wrapped.id.kid).unwrap();
     store::write_did_document(&layout, &created.did, &doc).unwrap();
     std::fs::write(

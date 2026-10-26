@@ -1,5 +1,5 @@
 CREATE TABLE service_meta (
- singleton INTEGER PRIMARY KEY CHECK(singleton=1), schema_version INTEGER NOT NULL CHECK(schema_version=4),
+ singleton INTEGER PRIMARY KEY CHECK(singleton=1), schema_version INTEGER NOT NULL CHECK(schema_version=5),
  instance_id TEXT NOT NULL, boot_epoch INTEGER NOT NULL CHECK(boot_epoch>=0),
  mutation_epoch INTEGER NOT NULL CHECK(mutation_epoch>=0)
 ) STRICT;
@@ -12,9 +12,11 @@ CREATE UNIQUE INDEX enabled_uid ON principals(uid) WHERE state='enabled';
 CREATE TABLE vaults (vault_id TEXT PRIMARY KEY, relative_path TEXT UNIQUE NOT NULL, state TEXT NOT NULL CHECK(state IN ('active','maintenance','retired'))) STRICT;
 CREATE TABLE keys (
  key_id TEXT PRIMARY KEY, vault_id TEXT NOT NULL REFERENCES vaults(vault_id), did TEXT NOT NULL, kid TEXT NOT NULL,
- role TEXT NOT NULL DEFAULT 'unclassified' CHECK(role IN ('unclassified','root','hot','recovery','challenge')),
+ role TEXT NOT NULL DEFAULT 'unclassified' CHECK(role IN ('unclassified','root','hot','recovery','challenge','device_signing','key_agreement')),
+ purpose TEXT NOT NULL DEFAULT '' CHECK(purpose IN ('','device_assertion','application_assertion')),
  envelope_digest TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('active','maintenance','retired')),
- identity_epoch INTEGER NOT NULL CHECK(identity_epoch>=0), generation INTEGER NOT NULL CHECK(generation>=0), document_digest TEXT NOT NULL, UNIQUE(vault_id,kid)
+ identity_epoch INTEGER NOT NULL CHECK(identity_epoch>=0), generation INTEGER NOT NULL CHECK(generation>=0), document_digest TEXT NOT NULL, UNIQUE(vault_id,kid),
+ CHECK((role='device_signing') = (purpose<>''))
 ) STRICT;
 CREATE TABLE policies (
  policy_id TEXT NOT NULL, version INTEGER NOT NULL CHECK(version>0), content TEXT NOT NULL, digest TEXT NOT NULL,

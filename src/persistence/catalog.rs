@@ -11,6 +11,8 @@ pub enum KeyRole {
     Hot,
     Recovery,
     Challenge,
+    DeviceSigning,
+    KeyAgreement,
 }
 impl KeyRole {
     fn name(&self) -> &'static str {
@@ -20,7 +22,17 @@ impl KeyRole {
             Self::Hot => "hot",
             Self::Recovery => "recovery",
             Self::Challenge => "challenge",
+            Self::DeviceSigning => "device_signing",
+            Self::KeyAgreement => "key_agreement",
         }
+    }
+}
+/// A device signing key is bound to exactly one purpose when it is classified;
+/// every other role carries none.
+pub(super) fn purpose_valid(role: &KeyRole, purpose: &str) -> bool {
+    match role {
+        KeyRole::DeviceSigning => matches!(purpose, "device_assertion" | "application_assertion"),
+        _ => purpose.is_empty(),
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,6 +44,9 @@ pub enum CatalogChange {
     ConfirmRole {
         key_id: String,
         role: KeyRole,
+        /// Present only for `device_signing`; omitted or empty otherwise.
+        #[serde(default)]
+        purpose: String,
     },
     PublishPolicy {
         policy_id: String,
@@ -51,6 +66,10 @@ pub struct KeyRecord {
     pub did: String,
     pub kid: String,
     pub role: KeyRole,
+    /// Non-empty only for `device_signing`; the purpose the key was bound to
+    /// when it was classified.
+    #[serde(default)]
+    pub purpose: String,
     pub envelope_digest: String,
     pub document_digest: String,
     pub state: String,
@@ -180,6 +199,14 @@ fn verify_role(wrapped: &WrappedKey, doc: &Value, role: &KeyRole) -> Result<()> 
         KeyRole::Root => root,
         KeyRole::Hot | KeyRole::Challenge => !root && authorized("authentication"),
         KeyRole::Recovery => !root && authorized("assertionMethod"),
+        // A device key asserts on behalf of the device and speaks for the group;
+        // the DID document must carry it under both relationships.
+        KeyRole::DeviceSigning => {
+            !root && authorized("authentication") && authorized("assertionMethod")
+        }
+        // No X25519 key exists yet, so nothing may be classified this way; the
+        // role is admitted by the schema ahead of P3.
+        KeyRole::KeyAgreement => false,
     };
     if !valid {
         return Err(invalid());
@@ -205,6 +232,7 @@ fn snapshot(root: &Path, vault: &str, wrapped: &WrappedKey) -> Result<KeyRecord>
         did: wrapped.id.did.clone(),
         kid: wrapped.id.kid.clone(),
         role: KeyRole::Unclassified,
+        purpose: String::new(),
         envelope_digest: digest(wrapped)?,
         document_digest: digest(&doc)?,
         state: "active".into(),
@@ -213,10 +241,10 @@ fn snapshot(root: &Path, vault: &str, wrapped: &WrappedKey) -> Result<KeyRecord>
     })
 }
 pub(super) fn get_key(db: &Connection, key: &str) -> Result<KeyRecord> {
-    db.query_row("SELECT key_id,vault_id,did,kid,role,envelope_digest,document_digest,state,identity_epoch,generation FROM keys WHERE key_id=?1", [key], |r| {
+    db.query_row("SELECT key_id,vault_id,did,kid,role,purpose,envelope_digest,document_digest,state,identity_epoch,generation FROM keys WHERE key_id=?1", [key], |r| {
         let role: String = r.get(4)?;
-        let role = match role.as_str() { "root" => KeyRole::Root, "hot" => KeyRole::Hot, "recovery" => KeyRole::Recovery, "challenge" => KeyRole::Challenge, "unclassified" => KeyRole::Unclassified, _ => return Err(rusqlite::Error::InvalidQuery) };
-        Ok(KeyRecord { key_id:r.get(0)?,vault_id:r.get(1)?,did:r.get(2)?,kid:r.get(3)?,role,envelope_digest:r.get(5)?,document_digest:r.get(6)?,state:r.get(7)?,identity_epoch:r.get(8)?,generation:r.get(9)? })
+        let role = match role.as_str() { "root" => KeyRole::Root, "hot" => KeyRole::Hot, "recovery" => KeyRole::Recovery, "challenge" => KeyRole::Challenge, "device_signing" => KeyRole::DeviceSigning, "key_agreement" => KeyRole::KeyAgreement, "unclassified" => KeyRole::Unclassified, _ => return Err(rusqlite::Error::InvalidQuery) };
+        Ok(KeyRecord { key_id:r.get(0)?,vault_id:r.get(1)?,did:r.get(2)?,kid:r.get(3)?,role,purpose:r.get(5)?,envelope_digest:r.get(6)?,document_digest:r.get(7)?,state:r.get(8)?,identity_epoch:r.get(9)?,generation:r.get(10)? })
     }).optional().map_err(db_error)?.ok_or_else(invalid)
 }
 pub(super) fn validate_key(root: &Path, record: &KeyRecord) -> Result<()> {
@@ -278,15 +306,25 @@ pub(super) fn resolve(
                 legacy_audit,
             }
         }
-        CatalogChange::ConfirmRole { key_id, role } => {
+        CatalogChange::ConfirmRole {
+            key_id,
+            role,
+            purpose,
+        } => {
             let before = get_key(tx, &key_id)?;
             active_vault(tx, &before.vault_id)?;
-            if before.state != "active" {
+            if before.state != "active" || !purpose_valid(&role, &purpose) {
+                return Err(invalid());
+            }
+            // The binding is set once. Re-stating it is not a way to re-key a
+            // device signing key to another purpose under the same grants.
+            if before.role == KeyRole::DeviceSigning && before.purpose != purpose {
                 return Err(invalid());
             }
             validate_key(root, &before)?;
             let mut after = before.clone();
             after.role = role;
+            after.purpose = purpose;
             validate_key(root, &after)?;
             CatalogEffect::ConfirmRole {
                 before: Box::new(before),
@@ -360,7 +398,7 @@ pub(super) fn resolve(
                     .ok_or_else(invalid)?;
                 let wrapped = store::resolve(&l, &did, Some(fragment))?;
                 if !crate::did::lifecycle::is_deactivated(&doc) {
-                    if key.role == KeyRole::Hot
+                    if matches!(key.role, KeyRole::Hot | KeyRole::DeviceSigning)
                         && anp::authentication::find_verification_method(&doc, &key.kid).is_none()
                     {
                         continue;
@@ -409,7 +447,7 @@ pub(super) fn apply(
             tx.execute("UPDATE grants SET state='revoked' WHERE key_id IN (SELECT key_id FROM keys WHERE vault_id=?1) AND state='active'",[&vault_id]).map_err(db_error)?;
             for key in keys {
                 validate_key(root, &key)?;
-                tx.execute("INSERT INTO keys(key_id,vault_id,did,kid,role,envelope_digest,state,identity_epoch,generation,document_digest) VALUES(?1,?2,?3,?4,'unclassified',?5,'active',?7,?8,?6) ON CONFLICT(vault_id,kid) DO UPDATE SET role='unclassified',envelope_digest=excluded.envelope_digest,document_digest=excluded.document_digest,state='active',identity_epoch=excluded.identity_epoch,generation=excluded.generation", params![key.key_id,key.vault_id,key.did,key.kid,key.envelope_digest,key.document_digest,key.identity_epoch,key.generation]).map_err(db_error)?;
+                tx.execute("INSERT INTO keys(key_id,vault_id,did,kid,role,purpose,envelope_digest,state,identity_epoch,generation,document_digest) VALUES(?1,?2,?3,?4,'unclassified','',?5,'active',?7,?8,?6) ON CONFLICT(vault_id,kid) DO UPDATE SET role='unclassified',purpose='',envelope_digest=excluded.envelope_digest,document_digest=excluded.document_digest,state='active',identity_epoch=excluded.identity_epoch,generation=excluded.generation", params![key.key_id,key.vault_id,key.did,key.kid,key.envelope_digest,key.document_digest,key.identity_epoch,key.generation]).map_err(db_error)?;
             }
         }
         CatalogEffect::ConfirmRole { before, after } => {
@@ -418,7 +456,7 @@ pub(super) fn apply(
             }
             active_vault(tx, &before.vault_id)?;
             validate_key(root, &after)?;
-            tx.execute("UPDATE keys SET role=?1,generation=generation+1,identity_epoch=identity_epoch+1 WHERE key_id=?2",params![after.role.name(),after.key_id]).map_err(db_error)?;
+            tx.execute("UPDATE keys SET role=?1,purpose=?2,generation=generation+1,identity_epoch=identity_epoch+1 WHERE key_id=?3",params![after.role.name(),after.purpose,after.key_id]).map_err(db_error)?;
             tx.execute(
                 "UPDATE grants SET state='revoked' WHERE key_id=?1 AND state='active'",
                 [after.key_id],
@@ -579,11 +617,11 @@ pub(super) fn recover_files(db: &mut Connection, root: &Path) -> Result<()> {
             .map_err(db_error)?;
         tx.execute("UPDATE keys SET document_digest=?1,identity_epoch=identity_epoch+1 WHERE vault_id=?2 AND did=?3",params![after,vault,did]).map_err(db_error)?;
         tx.execute("UPDATE keys SET state=CASE WHEN did=?1 AND ?2 THEN 'retired' ELSE 'active' END WHERE vault_id=?3 AND state='maintenance'",params![did,crate::did::lifecycle::is_deactivated(&target),vault]).map_err(db_error)?;
-        for key in list(&tx)?
-            .keys
-            .into_iter()
-            .filter(|k| k.vault_id == vault && k.did == did && k.role == KeyRole::Hot)
-        {
+        for key in list(&tx)?.keys.into_iter().filter(|k| {
+            k.vault_id == vault
+                && k.did == did
+                && matches!(k.role, KeyRole::Hot | KeyRole::DeviceSigning)
+        }) {
             if anp::authentication::find_verification_method(&target, &key.kid).is_none() {
                 tx.execute(
                     "UPDATE keys SET state='retired' WHERE key_id=?1",

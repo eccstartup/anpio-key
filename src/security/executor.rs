@@ -1,11 +1,16 @@
 //! Single coordinated signing operation, with injectable clock and backend.
 use super::http::CanonicalHttpRequest;
 use super::origin::{audit_options, OriginProof, SignedOrigin};
+use super::purpose::{PurposeRequest, SignedPurpose};
 use crate::error::{KeydError, Result};
 use crate::persistence::{
     catalog::KeyRecord, clock::Clock, requests::RequestStatus, requests::Reservation, Database,
 };
 use serde_json::{json, Value};
+
+/// Purpose 签名的结果能取多久。签名本身不过期,这个数只限制缓存窗口,
+/// 和 `run()` 的 profile 寿命上限对齐。
+const PURPOSE_CACHE_SECONDS: i64 = 300;
 
 /// 一次签名的产物,由各自的 backend 填好;写库和收尾是共用的一段。
 struct Produced {
@@ -13,8 +18,8 @@ struct Produced {
     created_at: i64,
     expires_at: i64,
     signature_base_digest: String,
-    /// 只有 origin proof 有:审计里那一段 proof options。
-    audit: Option<Value>,
+    /// 有它才有额外的审计段:origin proof 的 proof options,或 purpose 的标签。
+    audit: Option<(&'static str, Value)>,
 }
 
 /// Caller holds the coordinator through both transactions and the backend call.
@@ -30,33 +35,40 @@ pub(crate) fn execute(
 ) -> Result<RequestStatus> {
     let start = clock.now()?;
     let reservation = db.reserve_http(principal, grant_id, request_id, canonical, start)?;
-    run(db, principal, request_id, reservation, clock, |key, _, expiry, deadline| {
-        let signed = backend(key, expiry, deadline)?;
-        let expiry = signed
-            .expires_at
-            .ok_or_else(|| KeydError::Protocol("missing profile expiry".into()))?;
-        let created_at = signed
-            .created_at
-            .ok_or_else(|| KeydError::Protocol("missing profile creation time".into()))?;
-        // Upstream returns generated headers only. Preserve the profile's covered
-        // content-type so transports cannot replace it with their default. Do not
-        // persist arbitrary caller headers (which may carry API credentials).
-        let mut headers = signed.headers;
-        if let Some(value) = canonical.signing_request().headers.get("content-type") {
-            headers.insert("content-type".into(), value.clone());
-        }
-        Ok(Produced {
-            result: json!({"request_id":request_id,"url":canonical.signing_request().url,"headers":headers,"covered":signed.covered,"expires_at":expiry}),
-            created_at,
-            expires_at: expiry,
-            signature_base_digest: signed
-                .signature_base_digest
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect(),
-            audit: None,
-        })
-    })
+    run(
+        db,
+        principal,
+        request_id,
+        reservation,
+        clock,
+        |key, _, expiry, deadline| {
+            let signed = backend(key, expiry, deadline)?;
+            let expiry = signed
+                .expires_at
+                .ok_or_else(|| KeydError::Protocol("missing profile expiry".into()))?;
+            let created_at = signed
+                .created_at
+                .ok_or_else(|| KeydError::Protocol("missing profile creation time".into()))?;
+            // Upstream returns generated headers only. Preserve the profile's covered
+            // content-type so transports cannot replace it with their default. Do not
+            // persist arbitrary caller headers (which may carry API credentials).
+            let mut headers = signed.headers;
+            if let Some(value) = canonical.signing_request().headers.get("content-type") {
+                headers.insert("content-type".into(), value.clone());
+            }
+            Ok(Produced {
+                result: json!({"request_id":request_id,"url":canonical.signing_request().url,"headers":headers,"covered":signed.covered,"expires_at":expiry}),
+                created_at,
+                expires_at: expiry,
+                signature_base_digest: signed
+                    .signature_base_digest
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect(),
+                audit: None,
+            })
+        },
+    )
 }
 
 /// ANP origin proof:签名基由 `anp` 拼,`created` 用 daemon 的钟。
@@ -74,26 +86,72 @@ pub(crate) fn execute_origin(
 ) -> Result<RequestStatus> {
     let start = clock.now()?;
     let reservation = db.reserve_origin(principal, grant_id, request_id, proof, start)?;
-    run(db, principal, request_id, reservation, clock, |key, created, _, _| {
-        let signed = backend(key, proof, created)?;
-        let expires_at = signed
-            .expires_at
-            .unwrap_or(created.saturating_add(super::origin::MAX_LIFETIME_SECONDS));
-        Ok(Produced {
-            result: json!({
-                "request_id":request_id,
-                "content_digest":signed.content_digest,
-                "signature_input":signed.signature_input,
-                "signature":signed.signature,
-                "created":signed.created_at,
-                "expires":signed.expires_at,
-            }),
-            created_at: signed.created_at,
-            expires_at,
-            signature_base_digest: signed.signature_base_digest,
-            audit: Some(audit_options(proof, signed.created_at)),
-        })
-    })
+    run(
+        db,
+        principal,
+        request_id,
+        reservation,
+        clock,
+        |key, created, _, _| {
+            let signed = backend(key, proof, created)?;
+            let expires_at = signed
+                .expires_at
+                .unwrap_or(created.saturating_add(super::origin::MAX_LIFETIME_SECONDS));
+            Ok(Produced {
+                result: json!({
+                    "request_id":request_id,
+                    "content_digest":signed.content_digest,
+                    "signature_input":signed.signature_input,
+                    "signature":signed.signature,
+                    "created":signed.created_at,
+                    "expires":signed.expires_at,
+                }),
+                created_at: signed.created_at,
+                expires_at,
+                signature_base_digest: signed.signature_base_digest,
+                audit: Some(("origin", audit_options(proof, signed.created_at))),
+            })
+        },
+    )
+}
+
+/// `SIGN_PURPOSE`:签调用方给的字节,daemon 只按 purpose 加冻结的前缀。
+///
+/// 结果没有到期时刻 —— 断言不是凭证,它的有效性由使用方按用途自己判断;
+/// `expires_at` 只决定缓存能取多久。
+pub(crate) fn execute_purpose(
+    db: &mut Database,
+    principal: &str,
+    grant_id: &str,
+    request_id: &str,
+    request: &PurposeRequest,
+    clock: &dyn Clock,
+    backend: impl FnOnce(&KeyRecord, &PurposeRequest) -> Result<SignedPurpose>,
+) -> Result<RequestStatus> {
+    let start = clock.now()?;
+    let reservation = db.reserve_purpose(principal, grant_id, request_id, request, start)?;
+    run(
+        db,
+        principal,
+        request_id,
+        reservation,
+        clock,
+        |key, created, _, _| {
+            let signed = backend(key, request)?;
+            Ok(Produced {
+                result: json!({
+                    "request_id":request_id,
+                    "signature":signed.signature,
+                    "public_multibase":signed.public_multibase,
+                    "purpose":signed.purpose,
+                }),
+                created_at: created,
+                expires_at: created.saturating_add(PURPOSE_CACHE_SECONDS),
+                signature_base_digest: request.message_digest(),
+                audit: Some(("signing", request.audit_options())),
+            })
+        },
+    )
 }
 
 fn run(
@@ -143,7 +201,7 @@ fn run(
         deadline.min(before.monotonic_ms.saturating_add(lifetime * 1000)),
     );
     let completed = match &produced.audit {
-        Some(options) => db.complete_origin(
+        Some(("origin", options)) => db.complete_origin(
             principal,
             request_id,
             &produced.result,
@@ -152,6 +210,16 @@ fn run(
             options.clone(),
             clock.now()?,
         ),
+        Some(("signing", options)) => db.complete_purpose(
+            principal,
+            request_id,
+            &produced.result,
+            validity,
+            &produced.signature_base_digest,
+            options.clone(),
+            clock.now()?,
+        ),
+        Some(_) => return Err(KeydError::Protocol("unknown audit section".into())),
         None => db.complete_http(
             principal,
             request_id,

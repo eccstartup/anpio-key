@@ -76,8 +76,13 @@ def apply_migration(source, recovery):
     _, status = os.waitpid(pid, 0)
     os.close(terminal)
     assert os.waitstatus_to_exitcode(status) == 0, output.decode(errors='replace')
-    assert sent == 3, output
-    return json.loads((recovery / 'migration.json').read_text())
+    # 每个密钥一次口令提示;钥匙列表在 inspection JSON 里,recovery 目录的
+    # migration.json 只写 apply 报告。
+    text = output.decode(errors='replace')
+    inspection, _ = json.JSONDecoder().raw_decode(text[text.index('{'):])
+    assert sent == len(inspection['keys']), output
+    migration = json.loads((recovery / 'migration.json').read_text())
+    return migration
 
 migration = apply_migration(source, recovery)
 assert migration['phase'] == 'installed_locked_unclassified'
@@ -293,6 +298,12 @@ except ConnectionResetError:pass  # Early refusal closes with unread request byt
     # M3 uses actual OS subjects, signed root/hot documents and typed v2 frames.
     hot_key = next(k for k in catalog['keys'] if k['kid'].endswith('#http-hot'))
     commit_change({'kind':'Catalog','change':{'action':'ConfirmRole','key_id':hot_key['key_id'],'role':'hot'}})
+    device_key = next(k for k in catalog['keys'] if k['kid'].endswith('#device-sign'))
+    source.write_text(json.dumps({'kind':'Catalog','change':{'action':'ConfirmRole','key_id':device_key['key_id'],'role':'device_signing'}})); source.chmod(0o644)
+    check(command('boundary-admin','admin','prepare','--file',str(source)).returncode != 0, 'device signing role without a purpose binding is refused')
+    commit_change({'kind':'Catalog','change':{'action':'ConfirmRole','key_id':device_key['key_id'],'role':'device_signing','purpose':'device_assertion'}})
+    source.write_text(json.dumps({'kind':'Catalog','change':{'action':'ConfirmRole','key_id':device_key['key_id'],'role':'device_signing','purpose':'application_assertion'}})); source.chmod(0o644)
+    check(command('boundary-admin','admin','prepare','--file',str(source)).returncode != 0, 'a device key purpose binding is set once')
     def data_as(name, operation):
         script = admin_call.replace("secret=b'temporary-boundary-test-secret';", "secret=b'';").replace("+struct.pack('!I',len(secret))+secret", "")
         result = subprocess.run([sys.executable,'-c',script,config['sign_socket'],json.dumps({'version':2,'request':operation})],preexec_fn=identity(name),capture_output=True,text=True,timeout=12)
@@ -312,10 +323,12 @@ except ConnectionResetError:pass  # Early refusal closes with unread request byt
     check(data_as('boundary-agent-a',{'operation':'GET_DOCUMENT','key_id':hot_key['key_id']})['data']['document']['id']==fixture['did'], 'authorized public document returned')
     http={'method':'GET','url':'https://EXAMPLE.com:443/test','headers':{},'body':{'state':'absent'},'nonce':None}
     signing={'operation':'SIGN_HTTP','grant_id':grant_id,'request_id':str(uuid.uuid4()),'http':http}
-    def unlock_hot():
-        op={'version':2,'request':{'operation':'UNLOCK_KEY','vault_id':vault_id,'did':fixture['did'],'kid':hot_key['kid']}}
+    def unlock_key(kid):
+        op={'version':2,'request':{'operation':'UNLOCK_KEY','vault_id':vault_id,'did':fixture['did'],'kid':kid}}
         result=subprocess.run([sys.executable,'-c',admin_call,config['admin_socket'],json.dumps(op)],preexec_fn=identity('boundary-admin'),capture_output=True,text=True,timeout=12)
         assert result.returncode==0 and json.loads(result.stdout)['code']=='OK', result.stdout+result.stderr
+    def unlock_hot():
+        unlock_key(hot_key['kid'])
     unlock_hot()
     if os.environ.get('ANPIO_KEY_TEST_SDK'):
         sdk_policy_id = str(uuid.uuid4())
@@ -347,8 +360,11 @@ except ConnectionResetError:pass  # Early refusal closes with unread request byt
         check(data_as('boundary-agent-a',{'operation':operation})['code']=='PROTOCOL_INVALID','v2 excludes '+operation)
     origin={'method':'direct.send','meta':{'profile':'anp.direct.base.v1','sender_did':fixture['did'],'target':{'kind':'agent','did':fixture['did']},'message_id':'msg-p1'},'body':{'text':'hi'}}
     check(data_as('boundary-agent-a',{'operation':'SIGN_ORIGIN_PROOF','grant_id':grant_id,'request_id':str(uuid.uuid4()),'origin':origin})['code']=='OPERATION_DISABLED','origin proof path is off until the deployment switch is on')
+    check(data_as('boundary-agent-a',{'operation':'SIGN_PURPOSE','grant_id':grant_id,'request_id':str(uuid.uuid4()),'purpose':'device_assertion','payload':'00ff'})['code']=='OPERATION_DISABLED','purpose signing is off until its own switch is on')
+    check(data_as('boundary-agent-a',{'operation':'SIGN_PURPOSE','grant_id':grant_id,'request_id':str(uuid.uuid4()),'purpose':'authentication','payload':'00ff'})['code']=='PURPOSE_INVALID','an unknown purpose is refused before any switch is consulted')
     caps_off=data_as('boundary-agent-a',{'operation':'GET_CAPABILITIES'})['data']
     check('SIGN_ORIGIN_PROOF' not in caps_off['operations'] and 'RENEW_GRANT' in caps_off['operations'] and caps_off['grant_kinds']==['request','session'],'capabilities hide a disabled signing path but still announce renewal')
+    check('SIGN_PURPOSE' not in caps_off['operations'] and caps_off['signing_purposes']==[],'capabilities hide every disabled signing purpose')
     root_grant={**create_grant,'key_id':root_key['key_id']}
     source.write_text(json.dumps({'kind':'Grant','change':root_grant}));source.chmod(0o644)
     check(command('boundary-admin','admin','prepare','--file',str(source)).returncode!=0, 'root role cannot enter an Agent grant')
@@ -401,7 +417,8 @@ except ConnectionResetError:pass  # Early refusal closes with unread request byt
         time.sleep(.02)
     check(recovered['data']['state']=='completed' and recovered['data'].get('result') is not None,'disconnect after send preserves completed result for explicit recovery')
     # P1: the origin-proof path only exists once the deployment switch is on.
-    config['features']={'sign_origin_proof':True}
+    # P2: every signing purpose has its own switch, and only its own.
+    config['features']={'sign_origin_proof':True,'sign_purpose':{'device_assertion':True}}
     config_path.write_text(json.dumps(config))
     stop(process); process=start()
     check(data_as('boundary-agent-a',{'operation':'GET_GRANT_STATUS','grant_id':lost})['data']['state'] in ['revoked_restart','exhausted'],'restart never revives consumed grants')
@@ -445,9 +462,47 @@ except ConnectionResetError:pass  # Early refusal closes with unread request byt
     check(data_as('boundary-agent-a',{'operation':'RENEW_GRANT','grant_id':backwards['grant_id'],'expiry':backwards['expiry']-10})['code']=='GRANT_INVALID','renewal never shortens a grant')
     one_shot=commit_change({'kind':'Grant','change':{'action':'Create','principal_id':principal_a,'key_id':hot_key['key_id'],'policy_id':origin_policy_id,'policy_version':1,'expiry':int(time.time())+300,'max_uses':2}})['effect']['effect']['grant']
     check(one_shot['max_renewals']==0 and data_as('boundary-agent-a',{'operation':'RENEW_GRANT','grant_id':one_shot['grant_id'],'expiry':int(time.time())+600})['code']=='GRANT_INVALID','a one-shot request grant cannot be renewed')
+    # P2: one purpose, one dedicated key, one switch. The key is bound when it is
+    # classified; the policy can only narrow further.
+    purpose_policy_id=str(uuid.uuid4())
+    purpose_policy={'schema_version':2,'name':'mls-device-assertion','purpose':'purpose-signing',
+                    'limits':{'max_duration_seconds':600,'max_uses':1000,'max_lifetime_seconds':3600,'max_renewals':1},
+                    'content':{'purposes':['device_assertion']}}
+    commit_change({'kind':'Catalog','change':{'action':'PublishPolicy','policy_id':purpose_policy_id,'version':1,'content':purpose_policy}})
+    purpose_grant=commit_change({'kind':'Grant','change':{'action':'CreateSession','principal_id':principal_a,'key_id':device_key['key_id'],'policy_id':purpose_policy_id,'policy_version':1,'expiry':int(time.time())+300,'max_uses':50}})['effect']['effect']['grant']
+    unlock_key(device_key['kid'])
+    caps=data_as('boundary-agent-a',{'operation':'GET_CAPABILITIES'})['data']
+    check('SIGN_PURPOSE' in caps['operations'] and 'purpose-signing' in caps['purposes'] and caps['signing_purposes']==['device_assertion'],'capabilities announce exactly the enabled signing purpose')
+    purpose_payload=b'anp-device-assertion'
+    purpose_op={'operation':'SIGN_PURPOSE','grant_id':purpose_grant['grant_id'],'request_id':str(uuid.uuid4()),'purpose':'device_assertion','payload':purpose_payload.hex()}
+    signed_purpose=data_as('boundary-agent-a',purpose_op)
+    check(signed_purpose['code']=='OK' and signed_purpose['data']['state']=='completed','device assertion signs over the real v2 socket')
+    assertion=signed_purpose['data']['result']
+    check(set(assertion)=={'request_id','signature','public_multibase','purpose'} and len(assertion['signature'])==128 and assertion['public_multibase'].startswith('z') and assertion['purpose']=={'purpose':'device_assertion'},'device assertion returns raw signature bytes and a public multibase only')
+    published=data_as('boundary-agent-a',{'operation':'GET_DOCUMENT','key_id':device_key['key_id']})['data']['document']
+    check(assertion['public_multibase'] in json.dumps(published),'the assertion came from the key the DID document publishes')
+    check(data_as('boundary-agent-a',purpose_op)['data']==signed_purpose['data'],'same assertion request ID returns the identical cached signature')
+    check(data_as('boundary-agent-a',{'operation':'GET_REQUEST_STATUS','request_id':purpose_op['request_id']})['data']==signed_purpose['data'],'assertion result is recoverable by request status')
+    check(data_as('boundary-agent-a',{**purpose_op,'payload':b'other'.hex()})['code']=='REQUEST_ID_CONFLICT','assertion ID cannot be rebound to another payload')
+    check(data_as('boundary-agent-b',purpose_op)['code']=='GRANT_INVALID','assertion stays bound to its principal')
+    check(data_as('boundary-agent-a',{**purpose_op,'request_id':str(uuid.uuid4()),'purpose':'application_assertion'})['code']=='OPERATION_DISABLED','a sibling purpose switch that is off stays off')
+    check(data_as('boundary-agent-a',{**purpose_op,'request_id':str(uuid.uuid4()),'purpose':'authentication'})['code']=='PURPOSE_INVALID','unknown purposes never reach a key')
+    check(data_as('boundary-agent-a',{**purpose_op,'request_id':str(uuid.uuid4()),'domain':'chat.alpha'})['code']=='PURPOSE_INVALID','a domain belongs to application assertions only')
+    check(data_as('boundary-agent-a',{**purpose_op,'request_id':str(uuid.uuid4()),'payload':'AB'})['code']=='PURPOSE_INVALID','assertion payload must be strict lowercase hex')
+    check(data_as('boundary-agent-a',{**purpose_op,'request_id':str(uuid.uuid4()),'key_id':hot_key['key_id']})['code']=='PROTOCOL_INVALID','assertion caller cannot bring its own exact key')
+    narrower_policy_id=str(uuid.uuid4())
+    commit_change({'kind':'Catalog','change':{'action':'PublishPolicy','policy_id':narrower_policy_id,'version':1,'content':{**purpose_policy,'name':'mls-app-only','content':{'purposes':['application_assertion']}}}})
+    narrower_grant=commit_change({'kind':'Grant','change':{'action':'Create','principal_id':principal_a,'key_id':device_key['key_id'],'policy_id':narrower_policy_id,'policy_version':1,'expiry':int(time.time())+55,'max_uses':2}})['effect']['effect']['grant']['grant_id']
+    check(data_as('boundary-agent-a',{**purpose_op,'grant_id':narrower_grant,'request_id':str(uuid.uuid4())})['code']=='POLICY_DENIED','a policy that does not list the purpose denies it even for the bound key')
+    check(data_as('boundary-agent-a',{'operation':'GET_GRANT_STATUS','grant_id':purpose_grant['grant_id']})['data']['used_uses']==1,'assertion retries and denials do not consume extra quota')
     with sqlite3.connect(Path(config['state_dir'])/'state.sqlite') as database:
-        events=''.join(row[0].decode() for row in database.execute('SELECT event_data FROM audit_events')).replace(' ','')
+        audit_rows=[row[0].decode() for row in database.execute('SELECT event_data FROM audit_events')]
+    events=''.join(audit_rows).replace(' ','')
     check('"GRANT_RENEWED"' in events and '"event":"FEATURES"' in events and '"sign_origin_proof":true' in events,'renewals and the enabled switch are both on the audit chain')
+    check('"event":"SIGN_PURPOSE_ENABLED","purpose":"device_assertion"' in events,'the enabled signing purpose has its own audit line')
+    signed_events=[json.loads(row) for row in audit_rows if 'SIGN_COMPLETED' in row]
+    check(any(event.get('signing',{}).get('purpose')=='device_assertion' for event in signed_events),'the audit chain records the bound purpose, not just the grant')
+    check(purpose_payload.hex() not in events,'signed assertion bytes never reach the audit chain')
     with sqlite3.connect(Path(config['state_dir'])/'state.sqlite') as database:
         check(database.execute("SELECT count(*) FROM audit_events WHERE CAST(event_data AS TEXT) LIKE '%LEGACY_AUDIT_LINKED%'").fetchone()[0]>=1,'SQLite history links verified legacy audit without rewriting it')
     policy['unexpected'] = True

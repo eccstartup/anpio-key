@@ -22,7 +22,8 @@
 - [x] 强对接 P0：契约冻结（`docs/ADAPTER.md` §11、`0x03 = X25519`、能力字段名）已完成；`anpio_key::client::v2` 覆盖全部六个数据操作并按“不支持/未授权/过期/耗尽/锁定/冲突/缺失/忙/停服/策略”分类拒绝；`benches/sign_throughput.rs` 基线在本机（release，Apple Silicon）：规范化 1.07 µs、结构化签名 99.1 µs、文档 proof 106.0 µs，即签名核心约 1 万次/秒/核 —— 瓶颈不在 Ed25519，而在这条上游拼基路径与 socket/DB。socket 往返与 SQLite 预留/提交的代价要在跑着守护进程的 Linux 上量，bench 文件头写明了这一点。
 - [x] 强对接 P1：`SIGN_ORIGIN_PROOF`（事实 `{method,meta,body,expires?,nonce?}`，签名基由 daemon 用上游 `anp::proof` 拼）、`RENEW_GRANT`（夹到 `min(now+max_duration, created_at+max_lifetime)`，次数耗尽 `GRANT_RENEWALS_EXHAUSTED`）、schema-4 session grant（`kind`/`created_at`/`max_renewals`/`renewals` 与 `grant_operations` 表）、`GET_CAPABILITIES` 的 `capability_schema`/`operations`/`purposes`/`grant_kinds`、策略 `schema_version: 2` 的七个 purpose 与各自 content、`features.sign_origin_proof`（默认关，启动落一条 `FEATURES` 审计）。`SIGN_HTTP` 的输出与审计形状不变。
 - [ ] 强对接 P1 收尾：在 Docker/Linux 上用真守护进程跑 awiki did-auth 全链路（socket 往返、`SIGN_ORIGIN_PROOF` 与上游 `anp` 验签逐字节一致）；今天只有单元与协议层覆盖。
-- [ ] 强对接 P2：`device_signing` 角色与专用键、`SIGN_PURPOSE`（每 purpose 一把键、一个开关，默认关）。验收：MLS KeyPackage 的设备断言由 daemon 出，客户端不再持 `{device}-sign`。
+- [x] 强对接 P2（daemon 侧）：`device_signing` 角色与专用键（`ConfirmRole` 同时绑 purpose，绑一次定死）、`SIGN_PURPOSE`（每 purpose 一把键、一个开关，默认关）、schema 5 重建 `keys` 保住既有 grant 与 FK、审计只记 purpose/域/长度/摘要。Docker/Linux 验收：真 socket 上出设备断言、未知用途与未开用途分开拒绝、策略只能收窄、重试与拒绝不重复扣配额、断言字节不进审计链。
+- [ ] 强对接 P2 收尾：awiki-cli-rs2 的 `sign_device_assertion` 改走 `SIGN_PURPOSE`，MLS KeyPackage 的设备断言由 daemon 出，客户端不再持 `{device}-sign`。
 - [ ] 强对接 P3：X25519 密钥（`keyAgreement` 文档支持）、`ECDH` 与 peer 白名单（默认关）。验收：secure-direct 建会话由 daemon 出共享密钥，客户端不再持 `{device}-agreement`；审计记 peer 指纹不记共享密钥。
 - [ ] 强对接 P4：管理平面导入既有四类密钥、签发新设备密钥、重发 DID 文档；`import-mnemonic` 用一个 24 词助记词恢复四类键（`bip39-entropy-v2`，`key-1` 字节与 v1 相同）；`keygen` 当场显示一次 24 词（只写 tty）；发布构建断言无导出路径。验收：客户端目录里不再有任何私钥，登录/发消息/建会话三条路都正常；换台机器只用助记词完整恢复。
 - [ ] 强对接 P5：`SIGN_OBJECT_PROOF`、`SIGN_DOCUMENT_PROOF` 与管理平面的根操作（在场/租约）。验收：换设备、轮换根密钥不需要把 root 私钥交给客户端。

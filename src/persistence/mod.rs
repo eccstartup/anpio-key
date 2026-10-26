@@ -25,7 +25,7 @@ use crate::principal::Principal;
 use crate::security::config::ServiceConfig;
 use clock::Time;
 
-const SCHEMA: i64 = 4;
+const SCHEMA: i64 = 5;
 const APPLICATION: i64 = 0x414e504b;
 const GENESIS: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
@@ -330,6 +330,40 @@ impl Database {
                 &json!({"event":"SCHEMA_MIGRATED","from":3,"to":4,"at":now.wall}),
             )?;
             tx.commit().map_err(db_error)?;
+        }
+        if version < 5 {
+            // The keys rebuild drops a table that grants reference, so the guard
+            // has to be off outside the transaction; it is restored before the
+            // next statement and the result is checked, not trusted.
+            self.connection
+                .pragma_update(None, "foreign_keys", false)
+                .map_err(db_error)?;
+            let migrated = (|| -> Result<()> {
+                let tx = self
+                    .connection
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(db_error)?;
+                tx.execute_batch(include_str!("migration-v5.sql"))
+                    .map_err(db_error)?;
+                append(
+                    &tx,
+                    &json!({"event":"SCHEMA_MIGRATED","from":4,"to":5,"at":now.wall}),
+                )?;
+                tx.commit().map_err(db_error)
+            })();
+            self.connection
+                .pragma_update(None, "foreign_keys", true)
+                .map_err(db_error)?;
+            migrated?;
+            if self
+                .connection
+                .prepare("PRAGMA foreign_key_check")
+                .map_err(db_error)?
+                .exists([])
+                .map_err(db_error)?
+            {
+                return Err(unavailable());
+            }
         }
         catalog::recover_files(&mut self.connection, &self.root)?;
         let tx = self
@@ -844,12 +878,26 @@ impl Database {
     /// Invalidate prepared approvals as well, so an old approval cannot recreate
     /// authority after a fresh login/unlock.
     pub(crate) fn end_se_session(&mut self, actor: u32, session_id: &str) -> Result<()> {
-        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(db_error)?;
-        tx.execute("UPDATE grants SET state='revoked' WHERE state IN ('active','exhausted')", []).map_err(db_error)?;
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(db_error)?;
+        tx.execute(
+            "UPDATE grants SET state='revoked' WHERE state IN ('active','exhausted')",
+            [],
+        )
+        .map_err(db_error)?;
         // Every prepared approval is pinned to this epoch. Advancing it expires
         // those approvals without changing the existing on-disk schema/states.
-        tx.execute("UPDATE service_meta SET mutation_epoch=mutation_epoch+1 WHERE singleton=1", []).map_err(db_error)?;
-        append(&tx, &json!({"event":"SE_SESSION_ENDED","actor":actor,"session_id":session_id}))?;
+        tx.execute(
+            "UPDATE service_meta SET mutation_epoch=mutation_epoch+1 WHERE singleton=1",
+            [],
+        )
+        .map_err(db_error)?;
+        append(
+            &tx,
+            &json!({"event":"SE_SESSION_ENDED","actor":actor,"session_id":session_id}),
+        )?;
         tx.commit().map_err(db_error)
     }
 }

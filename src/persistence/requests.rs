@@ -71,18 +71,30 @@ impl Database {
         now: Time,
     ) -> Result<Reservation> {
         let digest = proof.digest();
-        self.reserve(
-            principal,
-            grant_id,
-            id,
-            digest,
-            "origin-proof",
-            now,
-            |db| db.authorize_origin(principal, grant_id, proof, now),
-        )
+        self.reserve(principal, grant_id, id, digest, "origin-proof", now, |db| {
+            db.authorize_origin(principal, grant_id, proof, now)
+        })
+    }
+
+    /// 同一份 purpose 签名用同一个 request_id 重放:命中缓存,不再签第二次。
+    /// 摘要里带 purpose 标签,所以两个 purpose 的同名 payload 不会撞车。
+    pub fn reserve_purpose(
+        &mut self,
+        principal: &str,
+        grant_id: &str,
+        id: &str,
+        request: &crate::security::purpose::PurposeRequest,
+        now: Time,
+    ) -> Result<Reservation> {
+        let digest = request.digest();
+        let purpose = request.purpose();
+        self.reserve(principal, grant_id, id, digest, purpose.name(), now, |db| {
+            db.authorize_purpose(principal, grant_id, &purpose, now)
+        })
     }
 
     /// 两种签名共用的预留:先看是不是老请求,再判权,再扣配额。
+    #[allow(clippy::too_many_arguments)]
     fn reserve(
         &mut self,
         principal: &str,
@@ -155,6 +167,7 @@ impl Database {
         self.complete(principal, id, result, validity, signature_digest, None, now)
     }
     /// origin proof 的完成事件多一段 proof options,和 HTTP 的字段并存不互斥。
+    #[allow(clippy::too_many_arguments)]
     pub fn complete_origin(
         &mut self,
         principal: &str,
@@ -171,10 +184,33 @@ impl Database {
             result,
             validity,
             signature_digest,
-            Some(options),
+            Some(("origin", options)),
             now,
         )
     }
+    /// purpose 签名的完成事件记下 purpose/domain/摘要,不记 payload 字节。
+    #[allow(clippy::too_many_arguments)]
+    pub fn complete_purpose(
+        &mut self,
+        principal: &str,
+        id: &str,
+        result: &Value,
+        validity: (i64, i64),
+        signature_digest: &str,
+        options: Value,
+        now: Time,
+    ) -> Result<()> {
+        self.complete(
+            principal,
+            id,
+            result,
+            validity,
+            signature_digest,
+            Some(("signing", options)),
+            now,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
     fn complete(
         &mut self,
         principal: &str,
@@ -182,7 +218,7 @@ impl Database {
         result: &Value,
         validity: (i64, i64),
         signature_digest: &str,
-        options: Option<Value>,
+        options: Option<(&'static str, Value)>,
         now: Time,
     ) -> Result<()> {
         let (expiry, monotonic_expiry) = validity;
@@ -194,8 +230,8 @@ impl Database {
             .map_err(db_error)?;
         if tx.execute("UPDATE requests SET state='completed',result=?3,result_expiry=?4 WHERE principal_id=?1 AND request_id=?2 AND state='reserved'",params![principal,id,bytes,expiry]).map_err(db_error)? != 1 { return Err(unavailable()); }
         let mut event = json!({"event":"SIGN_COMPLETED","principal_id":principal,"request_id":id,"signature_base_digest":signature_digest,"delivery":"not_observed","at":now.wall});
-        if let Some(options) = options {
-            event["origin"] = options;
+        if let Some((field, options)) = options {
+            event[field] = options;
         }
         append(&tx, &event)?;
         tx.commit().map_err(db_error)
@@ -257,7 +293,8 @@ impl Database {
             && deadline.is_some_and(|d| now.monotonic_ms < d)
             && expiry.is_some_and(|e| now.wall < e);
         let result = if allowed && state == "completed" {
-            grants::hot_key(&self.connection, &self.root, &g.key_id)?;
+            // 角色不再写死:轮换、撤角色、文档变更都会在这里让缓存的结果作废。
+            grants::active_key(&self.connection, &self.root, &g.key_id)?;
             stored.map(|v| v["response"].clone())
         } else {
             None
