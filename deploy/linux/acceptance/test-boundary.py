@@ -365,6 +365,9 @@ except ConnectionResetError:pass  # Early refusal closes with unread request byt
     caps_off=data_as('boundary-agent-a',{'operation':'GET_CAPABILITIES'})['data']
     check('SIGN_ORIGIN_PROOF' not in caps_off['operations'] and 'RENEW_GRANT' in caps_off['operations'] and caps_off['grant_kinds']==['request','session'],'capabilities hide a disabled signing path but still announce renewal')
     check('SIGN_PURPOSE' not in caps_off['operations'] and caps_off['signing_purposes']==[],'capabilities hide every disabled signing purpose')
+    check(data_as('boundary-agent-a',{'operation':'SIGN_OBJECT_PROOF','grant_id':grant_id,'request_id':str(uuid.uuid4()),'object':{'@type':'Probe'}})['code']=='OPERATION_DISABLED','object proof is off until its own switch is on')
+    check(data_as('boundary-agent-a',{'operation':'SIGN_DOCUMENT_PROOF','grant_id':grant_id,'request_id':str(uuid.uuid4()),'document':{'id':fixture['did']}})['code']=='OPERATION_DISABLED','document proof has its own switch, not the object one')
+    check('SIGN_OBJECT_PROOF' not in caps_off['operations'] and 'SIGN_DOCUMENT_PROOF' not in caps_off['operations'] and 'object-proof' not in caps_off['purposes'] and 'document-proof' not in caps_off['purposes'],'capabilities hide both disabled proof paths and their purposes')
     root_grant={**create_grant,'key_id':root_key['key_id']}
     source.write_text(json.dumps({'kind':'Grant','change':root_grant}));source.chmod(0o644)
     check(command('boundary-admin','admin','prepare','--file',str(source)).returncode!=0, 'root role cannot enter an Agent grant')
@@ -505,6 +508,65 @@ except ConnectionResetError:pass  # Early refusal closes with unread request byt
     check(purpose_payload.hex() not in events,'signed assertion bytes never reach the audit chain')
     with sqlite3.connect(Path(config['state_dir'])/'state.sqlite') as database:
         check(database.execute("SELECT count(*) FROM audit_events WHERE CAST(event_data AS TEXT) LIKE '%LEGACY_AUDIT_LINKED%'").fetchone()[0]>=1,'SQLite history links verified legacy audit without rewriting it')
+    # P5: object and document proofs over the same socket. Each returns the input
+    # with its proof folded in; neither ever hands the key to the caller.
+    config['features']={'sign_origin_proof':True,'sign_purpose':{'device_assertion':True},
+                        'sign_object_proof':True,'sign_document_proof':True}
+    config_path.write_text(json.dumps(config))
+    stop(process); process=start()
+    object_policy_id=str(uuid.uuid4())
+    object_policy={'schema_version':2,'name':'device-object-proof','purpose':'object-proof',
+                   'limits':{'max_duration_seconds':600,'max_uses':1000,'max_lifetime_seconds':3600,'max_renewals':1},
+                   'content':{'proof_purposes':['assertionMethod']}}
+    commit_change({'kind':'Catalog','change':{'action':'PublishPolicy','policy_id':object_policy_id,'version':1,'content':object_policy}})
+    source.write_text(json.dumps({'kind':'Catalog','change':{'action':'PublishPolicy','policy_id':str(uuid.uuid4()),'version':1,'content':{**object_policy,'content':{'proof_purposes':['authentication']}}}})); source.chmod(0o644)
+    check(command('boundary-admin','admin','prepare','--file',str(source)).returncode!=0,'an object-proof policy cannot promise a purpose that path cannot produce')
+    document_policy_id=str(uuid.uuid4())
+    document_policy={'schema_version':2,'name':'identity-document-proof','purpose':'document-proof',
+                     'limits':{'max_duration_seconds':600,'max_uses':1000,'max_lifetime_seconds':3600,'max_renewals':1},
+                     'content':{'proof_purposes':['assertionMethod','authentication']}}
+    commit_change({'kind':'Catalog','change':{'action':'PublishPolicy','policy_id':document_policy_id,'version':1,'content':document_policy}})
+    source.write_text(json.dumps({'kind':'Catalog','change':{'action':'PublishPolicy','policy_id':str(uuid.uuid4()),'version':1,'content':{**document_policy,'content':{'proof_purposes':['capabilityInvocation']}}}})); source.chmod(0o644)
+    check(command('boundary-admin','admin','prepare','--file',str(source)).returncode!=0,'a document-proof policy only declares W3C proof purposes')
+    object_grant=commit_change({'kind':'Grant','change':{'action':'Create','principal_id':principal_a,'key_id':device_key['key_id'],'policy_id':object_policy_id,'policy_version':1,'expiry':int(time.time())+300,'max_uses':5}})['effect']['effect']['grant']
+    document_grant=commit_change({'kind':'Grant','change':{'action':'Create','principal_id':principal_a,'key_id':root_key['key_id'],'policy_id':document_policy_id,'policy_version':1,'expiry':int(time.time())+300,'max_uses':5}})['effect']['effect']['grant']
+    source.write_text(json.dumps({'kind':'Grant','change':{'action':'Create','principal_id':principal_a,'key_id':device_key['key_id'],'policy_id':document_policy_id,'policy_version':1,'expiry':int(time.time())+300,'max_uses':1}})); source.chmod(0o644)
+    check(command('boundary-admin','admin','prepare','--file',str(source)).returncode!=0,'the document-proof policy refuses every key that is not the root')
+    unlock_key(device_key['kid']); unlock_key(root_key['kid'])
+    caps=data_as('boundary-agent-a',{'operation':'GET_CAPABILITIES'})['data']
+    check('SIGN_OBJECT_PROOF' in caps['operations'] and 'SIGN_DOCUMENT_PROOF' in caps['operations'] and 'object-proof' in caps['purposes'] and 'document-proof' in caps['purposes'],'capabilities announce both proof paths once their switches are on')
+    device_object={'@type':'AnpDeviceAssertion','device':fixture['did'],'nonce':'p5-object-nonce'}
+    object_op={'operation':'SIGN_OBJECT_PROOF','grant_id':object_grant['grant_id'],'request_id':str(uuid.uuid4()),'object':device_object}
+    signed_object=data_as('boundary-agent-a',object_op)
+    check(signed_object['code']=='OK' and signed_object['data']['state']=='completed','object proof signs over the real v2 socket')
+    folded=signed_object['data']['result']
+    check(set(folded)=={'request_id','value','proof'} and folded['value']['@type']=='AnpDeviceAssertion' and folded['proof']==folded['value']['proof'],'an object proof returns the object with its proof folded in and nothing else')
+    object_proof=folded['value']['proof']
+    check(object_proof['proofValue'].startswith('z') and object_proof['type']=='DataIntegrityProof' and object_proof['cryptosuite']=='eddsa-jcs-2022' and object_proof['proofPurpose']=='assertionMethod' and object_proof['verificationMethod']==device_key['kid'],'object proof is multibase base58btc, a fixed cryptosuite, and the granted key')
+    check('created' in object_proof and data_as('boundary-agent-a',{**object_op,'request_id':str(uuid.uuid4()),'created':1})['code']=='PROTOCOL_INVALID','the daemon chooses the proof timestamp; a caller-supplied one is not a field')
+    check(data_as('boundary-agent-a',object_op)['data']==signed_object['data'],'same object proof ID returns the identical cached proof without a second use')
+    check(data_as('boundary-agent-a',{**object_op,'object':{**device_object,'nonce':'other'}})['code']=='REQUEST_ID_CONFLICT','object proof ID cannot be rebound to another object')
+    check(data_as('boundary-agent-b',object_op)['code']=='GRANT_INVALID','object proof stays bound to its principal')
+    published_document=json.loads(next((vault/'dids').glob('*.json')).read_text())
+    document_op={'operation':'SIGN_DOCUMENT_PROOF','grant_id':document_grant['grant_id'],'request_id':str(uuid.uuid4()),'document':published_document}
+    signed_document=data_as('boundary-agent-a',document_op)
+    check(signed_document['code']=='OK' and signed_document['data']['state']=='completed','document proof signs the published identity document over the real v2 socket')
+    signed_identity=signed_document['data']['result']['value']
+    check(signed_identity['id']==fixture['did'] and signed_identity['proof']['proofValue'].startswith('z') and signed_identity['proof']['proofPurpose']=='assertionMethod' and signed_identity['proof']['verificationMethod']==root_key['kid'] and signed_identity['proof']['type']=='DataIntegrityProof' and signed_identity['proof']['cryptosuite']=='eddsa-jcs-2022','the root key signs its own document in the published multibase alphabet')
+    authentication=data_as('boundary-agent-a',{**document_op,'request_id':str(uuid.uuid4()),'proof_purpose':'authentication'})
+    check(authentication['code']=='OK' and authentication['data']['result']['value']['proof']['proofPurpose']=='authentication','the document takes the second declared purpose too')
+    check(data_as('boundary-agent-a',{**document_op,'request_id':str(uuid.uuid4()),'proof_purpose':'capabilityInvocation'})['code']=='PROOF_INVALID','a purpose outside the vocabulary never reaches a key')
+    stranger=json.loads(json.dumps(published_document));stranger['id']='did:wba:example.com:someone-else'
+    spent=data_as('boundary-agent-a',{'operation':'GET_GRANT_STATUS','grant_id':document_grant['grant_id']})['data']['used_uses']
+    check(data_as('boundary-agent-a',{**document_op,'request_id':str(uuid.uuid4()),'document':stranger})['code']=='PROOF_INVALID','a document bound to another identity is refused')
+    check(data_as('boundary-agent-a',{'operation':'GET_GRANT_STATUS','grant_id':document_grant['grant_id']})['data']['used_uses']==spent,'a refused binding never spends quota')
+    with sqlite3.connect(Path(config['state_dir'])/'state.sqlite') as database:
+        audit_rows=[row[0].decode() for row in database.execute('SELECT event_data FROM audit_events')]
+    proof_events=''.join(audit_rows).replace(' ','')
+    check('"event":"SIGN_OBJECT_PROOF_ENABLED"' in proof_events and '"event":"SIGN_DOCUMENT_PROOF_ENABLED"' in proof_events,'each proof path records its own switch on the audit chain')
+    completions=[json.loads(row) for row in audit_rows if 'SIGN_COMPLETED' in row]
+    check(any(event.get('proof',{}).get('purpose')=='assertionMethod' and event.get('proof',{}).get('document_digest') for event in completions),'the completion audit records the proof shape and the input digest')
+    check('p5-object-nonce' not in proof_events and json.dumps(device_object) not in proof_events,'neither proof body reaches the audit chain')
     policy['unexpected'] = True
     source.write_text(json.dumps({'kind':'Catalog','change':{'action':'PublishPolicy','policy_id':policy_id,'version':2,'content':policy}}))
     check(command('boundary-admin','admin','prepare','--file',str(source)).returncode != 0, 'policy schema rejects unknown fields')

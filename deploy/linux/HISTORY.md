@@ -203,3 +203,49 @@ requests then returned `SIGNING_UNAVAILABLE`; M4 subsequently supplied transacti
 reservation, idempotency, signing and durable result delivery.
 At that historical checkpoint `protected_supported` remained false. The later M5 systemd-host acceptance below supersedes that release status.
 
+## Strong-integration P1-P5 container acceptance recorded on 2026-10-26
+
+Scope: the three-layer interface in `docs/ADAPTER.md` §11 (`anpio_key::client`, the
+v2 socket, CLI `--json`) against a real daemon, a real socket and independent UIDs.
+This run answers whether the daemon side of P1-P5 works on Linux. It does not
+accept the systemd host sandbox, physical TPM/SE, release artifacts, or the client
+half of P1-P5, which lives in the awiki and anpio-cli repositories.
+
+Baseline `6227350` plus this working tree's `test-boundary.py` and `docs/ADAPTER.md`
+§7.5. Environment: Docker 29.5.2 (colima), `rust:1.90-bookworm`, Ubuntu 24.04.4,
+container mode (not systemd), `--allow-development-build`; the harness creates four
+disposable UIDs and installs the service itself. Re-run with:
+
+```sh
+docker run --rm -v "$PWD:/src:ro" -w /src rust:1.90-bookworm \
+  bash deploy/linux/acceptance/test-container.sh
+```
+
+One run, exit code 0: 3 migration/recovery checks; `cargo test --locked` 597 passed,
+0 failed, 1 ignored by design (physical hardware) — 514 lib tests, the disposable
+fixture, 41 multi-UID boundary checks, and the remaining integration targets;
+`acceptance/test-boundary.py` reported `{"passed": 190, "protected_supported":
+false, "systemd": false}`. `protected_supported=false` is expected here: the
+container built a development binary and made no protected-mode declaration, so the
+Linux release gate still requires a release build on a declared deployment.
+
+Twenty of those 190 checks are new and cover P5 on the same daemon and socket:
+both proof paths are `OPERATION_DISABLED` and absent from capabilities until their
+own switch is on; enabling origin and purpose signing does not enable them; an
+object-proof policy cannot declare a purpose that path cannot produce and a
+document-proof policy only takes W3C proof purposes; the document-proof grant is
+refused for any key that is not the root. Both paths then return the input with the
+proof folded in, in the published multibase base58btc alphabet, naming the key the
+grant chose, timestamped by the daemon (a caller-supplied `created` is not a field).
+Replay returns the identical result without a second use, a changed payload is
+`REQUEST_ID_CONFLICT`, another principal is `GRANT_INVALID`, and a document whose
+`id` names another DID is `PROOF_INVALID` with `used_uses` unchanged — the binding
+check really does run before quota. The audit chain carries one switch line per
+path, the proof shape and the input digest, and neither body.
+
+Not accepted by this run: systemd host sandbox and `systemd-checks.py` (container
+mode skips them), the Linux release build and its protected-mode declaration,
+physical TPM, all of macOS (frozen this cycle), and the awiki-cli-rs2 / anpio-cli
+adapters — those remain the P1-P5 收尾 items in `TODO.md`.
+
+
