@@ -1,13 +1,12 @@
 //! 对象/文档 proof(P5):调用方给对象或完整文档,daemon 用托管键把 proof 拼出来。
 //!
-//! 两条路各有自己**冻结的编码**,都是上游 `anp::proof` 的产物,不是这里定的:
-//!
 //! - 对象 proof 走 [`anp::proof::prepare_object_proof`] /
 //!   [`anp::proof::complete_object_proof`]:purpose 固定 `assertionMethod`
 //!   (上游常量),`proofValue` 是 base58btc(`z` 前缀)。
-//! - 文档 proof 走 [`anp::proof::prepare_w3c_proof`] /
-//!   [`anp::proof::complete_w3c_proof`]:`proofValue` 是 base64url,purpose 由
-//!   调用方在 [`ProofPurpose`] 里选。`type` 与 `cryptosuite` 由 daemon 定死
+//! - 文档 proof 走 [`crate::did::proof`]:`proofValue` 是 `z` + base58btc,
+//!   文档的 `@context`(有的话)并进 proof configuration 再签 —— W3C
+//!   `vc-di-eddsa` 那一版签名基,和上游 1.0.6 的验签、和对端都一致。purpose
+//!   由调用方在 [`ProofPurpose`] 里选;`type` 与 `cryptosuite` 由 daemon 定死
 //!   (DataIntegrityProof / eddsa-jcs-2022)—— 这两个值一改,验签方看到的就是
 //!   另一种 proof,不能让调用方按请求换。
 //!
@@ -276,30 +275,23 @@ impl DocumentProofRequest {
         let created = stamp(created_at)?;
         let verification_method = verification_method.to_owned();
         let public = key.anp_public_key()?;
-        let prepared = anp::proof::prepare_w3c_proof(
+        let prepared = crate::did::proof::prepare(
             &self.document,
             &public,
-            &verification_method,
-            anp::proof::ProofGenerationOptions {
-                proof_purpose: Some(self.purpose.name().to_owned()),
-                proof_type: Some(anp::proof::PROOF_TYPE_DATA_INTEGRITY.to_owned()),
-                cryptosuite: Some(anp::proof::CRYPTOSUITE_EDDSA_JCS_2022.to_owned()),
-                created: Some(created.clone()),
-                domain: self.domain.clone(),
-                challenge: self.challenge.clone(),
+            crate::did::proof::Facts {
+                verification_method: &verification_method,
+                purpose: self.purpose.name(),
+                created: &created,
+                domain: self.domain.as_deref(),
+                challenge: self.challenge.as_deref(),
             },
         )
         .map_err(|_| invalid())?;
         let signature_base_digest = hex_of(&Sha256::digest(prepared.signing_input()));
         let signature = key.sign(prepared.signing_input())?;
-        let mut value =
-            anp::proof::complete_w3c_proof(prepared, &signature).map_err(|_| invalid())?;
-        // 上游交出来的是裸 base64url,而发布出去的文档、以及所有对端认的是
-        // `z` + base58btc。换的是同一批字节(见 [`crate::did::proof_value`]),
-        // 所以这里不重签,只换字母表 —— 不换的话,客户端拿到手的 proof 与它
-        // 自己文档上的那一条对不上。
-        crate::did::proof_value::into_multibase(&mut value).map_err(|_| invalid())?;
-        let proof = value.get("proof").cloned().ok_or_else(invalid)?;
+        let signed = crate::did::proof::complete(prepared, &signature).map_err(|_| invalid())?;
+        let value = signed.document;
+        let proof = signed.proof;
         Ok(SignedProof {
             options: json!({
                 "purpose": self.purpose.name(),
@@ -368,15 +360,7 @@ fn digest_of(domain: &[u8], material: &[u8]) -> String {
 fn stamp(unix_seconds: i64) -> Result<String> {
     let at = time::OffsetDateTime::from_unix_timestamp(unix_seconds)
         .map_err(|_| KeydError::Protocol("PROOF_TIME_INVALID".into()))?;
-    Ok(format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        at.year(),
-        u8::from(at.month()),
-        at.day(),
-        at.hour(),
-        at.minute(),
-        at.second()
-    ))
+    Ok(crate::did::proof::timestamp(at))
 }
 
 #[cfg(test)]
@@ -454,7 +438,7 @@ mod tests {
         let signed = request.sign(&key, &format!("{DID}#key-1"), 1_700_000_000).unwrap();
 
         assert!(anp::proof::verify_w3c_proof(
-            &upstream(&signed.value),
+            &signed.value,
             &key.anp_public_key().unwrap(),
             anp::proof::ProofVerificationOptions {
                 expected_purpose: Some("authentication".into()),
@@ -464,7 +448,7 @@ mod tests {
         ));
         // 换了其中任何一项都验不过 —— 这三项都在签名基里。
         assert!(!anp::proof::verify_w3c_proof(
-            &upstream(&signed.value),
+            &signed.value,
             &key.anp_public_key().unwrap(),
             anp::proof::ProofVerificationOptions {
                 expected_purpose: Some("assertionMethod".into()),
@@ -475,7 +459,7 @@ mod tests {
         assert_eq!(signed.proof["proofPurpose"], json!("authentication"));
         assert_eq!(signed.proof["created"], json!("2023-11-14T22:13:20Z"));
         assert_eq!(signed.value["id"], json!(DID));
-        // 与发布出去的文档同一种字母表:裸 base64url 对端不认。
+        // 规范要的字母表:`z` + base58btc,不是上游那个裸 base64url。
         assert!(signed.proof["proofValue"].as_str().unwrap().starts_with('z'));
 
         // 缺省 purpose 是 assertionMethod,和不给 domain/challenge 一样验得过。
@@ -483,7 +467,7 @@ mod tests {
         assert_eq!(plain.purpose(), ProofPurpose::AssertionMethod);
         let signed = plain.sign(&key, &format!("{DID}#key-1"), 1_700_000_000).unwrap();
         assert!(anp::proof::verify_w3c_proof(
-            &upstream(&signed.value),
+            &signed.value,
             &key.anp_public_key().unwrap(),
             anp::proof::ProofVerificationOptions {
                 expected_purpose: Some("assertionMethod".into()),
@@ -493,9 +477,35 @@ mod tests {
         ));
     }
 
-    /// 上游那版验签只读 base64url;这里交出去的是 multibase。
-    fn upstream(document: &Value) -> Value {
-        crate::did::proof_value::as_upstream_reads_it(document).unwrap()
+    /// 文档带 `@context` 时,它必须进 proof configuration。
+    ///
+    /// 上游读到 `z` 会把文档的 `@context` 补进 proof options 再算签名基;
+    /// 这一步验得过,就说明我们签的正是带 `@context` 的那一条 —— 反过来,
+    /// "签完再换字母表"那种产物在这里一定失败。
+    #[test]
+    fn a_document_with_context_is_signed_over_that_context() {
+        let key = key();
+        let mut document = issuer_document(&key);
+        document["@context"] = json!([
+            "https://www.w3.org/ns/did/v1",
+            "https://w3id.org/security/multikey/v1",
+        ]);
+        let context = document["@context"].clone();
+        let request = DocumentProofRequest::from_wire(document, None).unwrap();
+        let signed = request.sign(&key, &format!("{DID}#key-1"), 1_700_000_000).unwrap();
+
+        assert!(anp::proof::verify_w3c_proof(
+            &signed.value,
+            &key.anp_public_key().unwrap(),
+            anp::proof::ProofVerificationOptions {
+                expected_purpose: Some("assertionMethod".into()),
+                expected_domain: None,
+                expected_challenge: None,
+            },
+        ));
+        // `@context` 进的是签名基,不是产出的 proof 对象。
+        assert!(signed.proof.get("@context").is_none());
+        assert_eq!(signed.value["@context"], context);
     }
 
     #[test]
@@ -558,7 +568,7 @@ mod tests {
         request.verify_binding(&did, &verification_method).unwrap();
         let signed = request.sign(&key, &verification_method, 1_700_000_000).unwrap();
         assert!(anp::proof::verify_w3c_proof(
-            &upstream(&signed.value),
+            &signed.value,
             &key.anp_public_key().unwrap(),
             anp::proof::ProofVerificationOptions {
                 expected_purpose: Some("assertionMethod".into()),

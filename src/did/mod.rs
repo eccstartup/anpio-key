@@ -4,6 +4,7 @@ pub mod document;
 pub mod lifecycle;
 pub mod migrate;
 pub mod parse;
+pub(crate) mod proof;
 pub mod proof_value;
 pub mod spec;
 

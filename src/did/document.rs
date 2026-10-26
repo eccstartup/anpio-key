@@ -199,41 +199,33 @@ pub fn build_unsigned_with(
 
 /// 用守护进程里的私钥给文档盖上 `DataIntegrityProof`。
 ///
-/// 私钥只在 `Signer::sign` 里露一次面,而且是借出去的;`complete_w3c_proof`
-/// 会**自己拿公钥验一遍**我们刚签出来的签名,所以"签错钥匙"这种事在这里
-/// 就会当场炸掉,不会流到磁盘上。
+/// 私钥只在 `Signer::sign` 里露一次面,而且是借出去的;
+/// [`crate::did::proof::complete`] 会**自己拿公钥验一遍**我们刚签出来的签名,
+/// 所以"签错钥匙"这种事在这里就会当场炸掉,不会流到磁盘上。
 ///
-/// **交出去之前换一次 `proofValue` 的字母表。** 上游给的是裸 base64url,
-/// 而对端(awiki-open-server、anp-sdk)只认 ANP-03 §2.5.5 那个 multibase
-/// base58btc —— 换的是同一批字节,不是重签,理由在
-/// [`crate::did::proof_value`] 的头一段。这条不换,发布出去的东西在注册
-/// 那一步会被对端原样拒掉。
+/// 形状由 [`crate::did::proof`] 定:规范的 `z` + base58btc,文档的 `@context`
+/// 进 proof configuration 再签。对端(awiki-open-server、anp-sdk)和 `anp`
+/// 1.0.6 的验签读的都是这一条,见那个模块的头。
 pub fn sign_document(
     document: &Value,
     key: &LockedSigningKey,
     verification_method: &str,
 ) -> Result<Value> {
-    let prepared = anp::proof::prepare_w3c_proof(
+    let created = crate::did::proof::timestamp(time::OffsetDateTime::now_utc());
+    let prepared = crate::did::proof::prepare(
         document,
         &key.anp_public_key()?,
-        verification_method,
-        anp::proof::ProofGenerationOptions {
-            proof_purpose: Some("assertionMethod".into()),
-            proof_type: Some(anp::proof::PROOF_TYPE_DATA_INTEGRITY.into()),
-            cryptosuite: Some(anp::proof::CRYPTOSUITE_EDDSA_JCS_2022.into()),
-            created: None,
+        crate::did::proof::Facts {
+            verification_method,
+            purpose: "assertionMethod",
+            created: &created,
             domain: None,
             challenge: None,
         },
-    )
-    .map_err(|e| KeydError::Upstream(format!("preparing the DID document proof failed: {e}")))?;
+    )?;
 
     let signature = key.sign(prepared.signing_input())?;
-
-    let mut signed = anp::proof::complete_w3c_proof(prepared, &signature)
-        .map_err(|e| KeydError::Upstream(format!("completing the DID document proof failed: {e}")))?;
-    proof_value::into_multibase(&mut signed)?;
-    Ok(signed)
+    Ok(crate::did::proof::complete(prepared, &signature)?.document)
 }
 
 /// 从 DID 字符串 + 公钥**重建**出那份文档。
@@ -329,13 +321,35 @@ pub fn verify_path_binding(did: &str, document: &Value) -> Result<()> {
         )));
     }
 
-    if !anp::authentication::validate_did_document_binding(&proof_value::as_upstream_reads_it(document)?, true)
-    {
+    if !upstream_accepts_the_proof(document)? {
         return Err(KeydError::Did(format!(
             "the document for {did} failed the normative did:wba binding check"
         )));
     }
     Ok(())
+}
+
+/// 上游的规范性检查,两种 `proofValue` 方言都认。
+///
+/// 原样的文档先过一遍:这覆盖规范那条(`z` + `@context` 进签名基)和裸
+/// base64url。不成立再把 `z` 换成 base64url 字母表过一遍 —— 有的文档的 `z`
+/// 是换字母表得来的,签名基里没有 `@context`,上游对这条旧写法另有一条分支。
+/// 换字母表不动签名,`proofValue` 本来就不进签名输入。
+fn upstream_accepts_the_proof(document: &Value) -> Result<bool> {
+    if anp::authentication::validate_did_document_binding(document, true) {
+        return Ok(true);
+    }
+    if !document
+        .get("proof")
+        .and_then(|proof| proof.get("proofValue"))
+        .and_then(Value::as_str)
+        .is_some_and(proof_value::is_multibase)
+    {
+        return Ok(false);
+    }
+    let mut legacy = document.clone();
+    proof_value::into_base64url(&mut legacy)?;
+    Ok(anp::authentication::validate_did_document_binding(&legacy, true))
 }
 
 /// 找回一份文档里被 `authentication` 授权的那把验证方法。
@@ -420,12 +434,9 @@ mod tests {
         assert_eq!(proof["proofPurpose"], "assertionMethod");
         assert_eq!(proof["verificationMethod"], format!("{did}#{ROOT_FRAGMENT}"));
 
-        // 上游的规范性检查会连 proof 一起验 —— 但它只读得懂裸 base64url,
-        // 而我们发的是 multibase,所以要先把字母表换回去。
-        assert!(anp::authentication::validate_did_document_binding(
-            &proof_value::as_upstream_reads_it(&doc).unwrap(),
-            true
-        ));
+        // 上游的规范性检查会连 proof 一起验,而且读的就是规范那条:文档的
+        // `@context` 并进 proof configuration 之后再算签名基。
+        assert!(anp::authentication::validate_did_document_binding(&doc, true));
         assert!(verify_path_binding(&did, &doc).is_ok());
     }
 
