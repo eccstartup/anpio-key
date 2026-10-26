@@ -263,6 +263,59 @@ pub(super) fn reissue(
     })
 }
 
+/// `IssueDeviceKeys` 准备出来的东西:根记录,和给新设备挑好的两个名字。
+pub(super) struct Issue {
+    pub root: KeyRecord,
+    pub sign: String,
+    pub agreement: String,
+}
+
+/// 给一台新设备挑两个还没用过的名字。
+///
+/// 名字在批准时就定下,完成时要求**一模一样**:管理员批准的是"铸
+/// `device-sign-2` 与 `device-agreement-2` 这一对",不是"铸某个空闲名字"。
+/// 两者中间的 120 秒里,别人可能刚给另一台设备铸过同名的一对。
+///
+/// 这里不铸:铸要口令,而口令只在完成那一步的凭据帧里。
+pub(super) fn issue_plan(
+    tx: &Connection,
+    root_path: &Path,
+    root_key_id: &str,
+) -> Result<Issue> {
+    let root_key = get_key(tx, root_key_id)?;
+    active_vault(tx, &root_key.vault_id)?;
+    validate_key(root_path, &root_key)?;
+    if root_key.state != "active" || root_key.role != KeyRole::Root {
+        return Err(invalid());
+    }
+    let layout = layout(root_path, &root_key.vault_id)?;
+    let did = root_key.did.clone();
+    let doc = document(&layout, &did).map_err(|_| invalid())?;
+    if crate::did::lifecycle::is_deactivated(&doc) {
+        return Err(invalid());
+    }
+    let used = crate::keystore::store::envelope_fragments(&layout, &did).map_err(|_| invalid())?;
+    let sign = crate::did::lifecycle::next_suffix_fragment(
+        &doc,
+        &did,
+        crate::did::document::DEVICE_SIGN_FRAGMENT,
+        &used,
+    )
+    .map_err(|_| invalid())?;
+    let agreement = crate::did::lifecycle::next_suffix_fragment(
+        &doc,
+        &did,
+        crate::did::document::DEVICE_AGREEMENT_FRAGMENT,
+        &used,
+    )
+    .map_err(|_| invalid())?;
+    Ok(Issue {
+        root: root_key,
+        sign,
+        agreement,
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct KeyRecord {

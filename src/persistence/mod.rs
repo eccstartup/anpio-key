@@ -48,6 +48,16 @@ pub enum Change {
         #[serde(default)]
         remove: Vec<String>,
     },
+    /// Mint a device-signing and a key-agreement key for a device that has none.
+    ///
+    /// The two envelopes are sealed with the passphrase that comes with the
+    /// completion, so the same credential that unlocks root for `ReissueDocument`
+    /// also decides how the new keys are wrapped. Nothing is published here:
+    /// the pair joins the document through `ReissueDocument`, and only then
+    /// gets a catalog row and a role.
+    IssueDeviceKeys {
+        root_key_id: String,
+    },
     /// Exact awiki registration proof, authorized only through management.
     RegistrationChallenge {
         key_id: String,
@@ -81,6 +91,11 @@ enum Resolved {
         add: Vec<catalog::Addition>,
         remove: Vec<String>,
         unsigned: Value,
+    },
+    IssueDeviceKeys {
+        root: Box<catalog::KeyRecord>,
+        sign: String,
+        agreement: String,
     },
     RegistrationChallenge {
         key: Box<catalog::KeyRecord>,
@@ -606,6 +621,14 @@ impl Database {
                     unsigned: reissue.unsigned,
                 }
             }
+            Change::IssueDeviceKeys { root_key_id } => {
+                let issue = catalog::issue_plan(&tx, &root, &root_key_id)?;
+                Resolved::IssueDeviceKeys {
+                    root: Box::new(issue.root),
+                    sign: issue.sign,
+                    agreement: issue.agreement,
+                }
+            }
             Change::RegisterPrincipal { uid } => {
                 if uid == 0 || uid == u32::MAX || tx.query_row("SELECT EXISTS(SELECT 1 FROM principals WHERE uid=?1 AND state='enabled')", [uid], |r| r.get::<_,bool>(0)).map_err(db_error)? { return Err(invalid()); }
                 let generation: u32 = tx
@@ -694,6 +717,7 @@ impl Database {
                 Resolved::Catalog { .. }
                     | Resolved::RotateHotKey { .. }
                     | Resolved::ReissueDocument { .. }
+                    | Resolved::IssueDeviceKeys { .. }
             ),
             None => false,
         })
@@ -769,6 +793,7 @@ impl Database {
                 Resolved::RegistrationChallenge { .. }
                     | Resolved::RotateHotKey { .. }
                     | Resolved::ReissueDocument { .. }
+                    | Resolved::IssueDeviceKeys { .. }
             )
         {
             return Err(invalid());
@@ -859,6 +884,82 @@ impl Database {
                     "added": add.iter().map(|addition| addition.kid.clone()).collect::<Vec<_>>(),
                     "removed": remove,
                     "publication_required": true,
+                }));
+            }
+            Resolved::IssueDeviceKeys {
+                root,
+                sign,
+                agreement,
+            } => {
+                if catalog::get_key(&tx, &root.key_id)? != *root {
+                    return Err(invalid());
+                }
+                // 名字在批准时定下了,这里只认那一对。中间有人刚铸过同名的一
+                // 对时,重算出来的名字会往后挪 —— 于是这条批准作废,而不是铸
+                // 一对名字和批准的不一样的钥匙。
+                let plan = catalog::issue_plan(&tx, &self.root, &root.key_id)?;
+                if plan.sign != sign || plan.agreement != agreement {
+                    return Err(invalid());
+                }
+                let layout = crate::keystore::layout::KeydLayout::at(
+                    self.root.join("vaults").join(&root.vault_id),
+                );
+                let fragment = root
+                    .kid
+                    .strip_prefix(&format!("{}#", root.did))
+                    .ok_or_else(invalid)?;
+                let wrapped = crate::keystore::store::resolve(&layout, &root.did, Some(fragment))?;
+                let secret = secret.ok_or_else(invalid)?;
+                // 先解开根,再铸:口令错了不该留下半套信封。
+                crate::keystore::unwrap::unlock(
+                    &wrapped,
+                    secret.as_bytes(),
+                    &crate::keystore::device::load(&layout)?,
+                )
+                .map_err(|_| invalid())?;
+                let device_secret = crate::keystore::device::load(&layout)?;
+                // 两把都先算出来,再一起落盘:硬件根不可用这类失败因此什么都
+                // 不留,而不是留下"签名键进去了、协商键没有"的半套设备。
+                let (sign_wrapped, _) = crate::keystore::create::generate_extra(
+                    &root.did,
+                    &sign,
+                    vec![
+                        anp::authentication::DidVerificationRelationship::Authentication,
+                        anp::authentication::DidVerificationRelationship::AssertionMethod,
+                    ],
+                    "device-sign",
+                    secret.as_bytes(),
+                    &device_secret,
+                    crate::crypto::kdf::Argon2Config::default(),
+                    crate::keystore::hardware::HardwareChoice::None,
+                )
+                .map_err(|_| invalid())?;
+                let (agreement_wrapped, _) = crate::keystore::create::generate_agreement(
+                    &root.did,
+                    &agreement,
+                    "device-agreement",
+                    secret.as_bytes(),
+                    &device_secret,
+                    crate::crypto::kdf::Argon2Config::default(),
+                    crate::keystore::hardware::HardwareChoice::None,
+                )
+                .map_err(|_| invalid())?;
+                for issued in [&sign_wrapped, &agreement_wrapped] {
+                    crate::keystore::store::save_new(&layout, issued).map_err(|_| invalid())?;
+                }
+                let issued: Vec<Value> = [&sign_wrapped, &agreement_wrapped]
+                    .iter()
+                    .map(|envelope| {
+                        json!({
+                            "kid": envelope.id.kid,
+                            "algorithm": envelope.algorithm,
+                            "public_multibase": envelope.public_multibase,
+                        })
+                    })
+                    .collect();
+                result = Some(json!({
+                    "keys": issued,
+                    "next": "reissue_document",
                 }));
             }
             Resolved::RegistrationChallenge {

@@ -135,7 +135,12 @@ pub fn add_agreement_key(root: Option<&Path>, args: AddAgreementKey) -> Result<(
     let (document, expected) = session.current_document(&args.did)?;
 
     let used = crate::keystore::store::envelope_fragments(session.layout(), &args.did)?;
-    let fragment = next_agreement_fragment(&document, &args.did, &used)?;
+    let fragment = lifecycle::next_suffix_fragment(
+        &document,
+        &args.did,
+        crate::did::document::DEVICE_AGREEMENT_FRAGMENT,
+        &used,
+    )?;
 
     let binding_passphrase = session.ask_secret(&binding_prompt(&args.did))?;
     let (_, binding) = session.unlock_with(&args.did, None, binding_passphrase.as_bytes())?;
@@ -182,32 +187,6 @@ pub fn add_agreement_key(root: Option<&Path>, args: AddAgreementKey) -> Result<(
         session.layout().key_path(&wrapped.id.thumbprint)?.display()
     );
     hosting_notice(&args.did)
-}
-
-/// 协商密钥的名字:第一把 `device-agreement`,之后 `device-agreement-2`、`-3`…
-///
-/// 不复用编号,理由和热密钥一样 —— 一份缓存过的文档写着这个名字,而钥匙换了
-/// 名字没换,那份缓存就成了旧钥匙的通行证。这里和 `next_fragment` 不同的
-/// 只是前缀没有连字符编号:设备名本身要稳定,调用方按 kid 找键。
-fn next_agreement_fragment(
-    document: &serde_json::Value,
-    did: &str,
-    used: &std::collections::BTreeSet<String>,
-) -> Result<String> {
-    let base: &str = crate::did::document::DEVICE_AGREEMENT_FRAGMENT;
-    let listed: Vec<String> = lifecycle::extra_keys(document, did)?
-        .into_iter()
-        .map(|key| key.fragment)
-        .collect();
-    let taken =
-        |name: &str| listed.iter().any(|f| f == name) || used.contains(name);
-    if !taken(base) {
-        return Ok(base.to_string());
-    }
-    (2u32..)
-        .map(|n| format!("{base}-{n}"))
-        .find(|name| !taken(name))
-        .ok_or_else(|| crate::error::KeydError::Did("no free agreement fragment".into()))
 }
 
 /// 轮换热密钥:新的一把进 `authentication`,旧的那把出文档。

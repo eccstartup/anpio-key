@@ -228,6 +228,32 @@ pub fn next_fragment(
     Ok(format!("{prefix}{}", highest.max(floor) + 1))
 }
 
+/// 同一条"不复用编号"的规则,但名字是"基名 + 后缀":`device-sign`、
+/// `device-sign-2`、`device-sign-3`……
+///
+/// 设备钥匙的名字里带连字符,拼不出 [`next_fragment`] 那种"前缀 + 数字"的
+/// 形状。规则本身一样:取"文档里的"和 `also_used`(本机信封里的)的并集,
+/// 第一把用基名,之后接 `-2`、`-3`。
+pub fn next_suffix_fragment(
+    document: &Value,
+    did: &str,
+    base: &str,
+    also_used: &BTreeSet<String>,
+) -> Result<String> {
+    let listed: Vec<String> = extra_keys(document, did)?
+        .into_iter()
+        .map(|key| key.fragment)
+        .collect();
+    let taken = |name: &str| listed.iter().any(|fragment| fragment == name) || also_used.contains(name);
+    if !taken(base) {
+        return Ok(base.to_string());
+    }
+    (2u32..)
+        .map(|number| format!("{base}-{number}"))
+        .find(|name| !taken(name))
+        .ok_or_else(|| KeydError::Did(format!("no free fragment for {base}")))
+}
+
 /// 把文档标记成已注销,可选指向后继。
 ///
 /// 规范的两条硬要求落在这里:

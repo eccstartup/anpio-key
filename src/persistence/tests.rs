@@ -3418,6 +3418,141 @@ fn reissue_refuses_a_document_that_moved_after_approval() {
         .is_err());
 }
 
+/// 新设备的两把钥匙由 daemon 自己铸,不接受客户端交进来的私钥 —— 交进来的
+/// 那一份已经过客户端的手,"托管"要的恰恰是它没经过。
+///
+/// 铸出来的这一对**不进文档**:签名键要先进文档(`ReissueDocument`)才能被
+/// `EnrollVault` 认出来,这是顺序,不是遗漏。所以这里同时钉住:文档与目录
+/// 一动不动,而盘上多了两个信封。
+#[test]
+fn issue_device_keys_mints_a_pair_without_publishing_it() {
+    let mut f = Fixture::new();
+    let (_vault, did, layout, root_key_id, _old, _kept) = reissue_fixture(&mut f);
+    let document_before = crate::keystore::store::read_did_document(&layout, &did).unwrap();
+    let keys_before = f.db.catalog().unwrap().keys;
+
+    let p = f
+        .db
+        .prepare(
+            1002,
+            Change::IssueDeviceKeys {
+                root_key_id: root_key_id.clone(),
+            },
+            now(),
+        )
+        .unwrap();
+    assert_eq!(p.effect["kind"], "IssueDeviceKeys");
+    assert_eq!(p.effect["sign"], "device-sign");
+    assert_eq!(p.effect["agreement"], "device-agreement");
+    // 口令在**另一个**帧里,所以不带凭据的那次提交必须被挡下 —— 否则批准
+    // 和用根签名之间就没有"人按那一下"了。
+    assert!(f
+        .db
+        .commit(1002, &p.operation_id, &p.digest, now())
+        .is_err());
+
+    let result = f
+        .db
+        .commit_secret(1002, &p.operation_id, &p.digest, now(), Some("test-pass"))
+        .unwrap()
+        .unwrap();
+    let issued = result["keys"].as_array().unwrap();
+    assert_eq!(issued.len(), 2);
+    let fragments = crate::keystore::store::envelope_fragments(&layout, &did).unwrap();
+    for fragment in ["device-sign", "device-agreement"] {
+        assert!(fragments.contains(fragment), "{fragment} was not sealed");
+    }
+    for entry in issued {
+        let kid = entry["kid"].as_str().unwrap();
+        let fragment = kid.strip_prefix(&format!("{did}#")).unwrap();
+        assert!(fragments.contains(fragment));
+        // 公钥给了调用方,下一对名字才是它要做的下一步。
+        assert_eq!(
+            entry["public_multibase"].as_str().unwrap(),
+            crate::keystore::store::resolve(&layout, &did, Some(fragment))
+                .unwrap()
+                .public_multibase
+        );
+    }
+    assert_eq!(result["next"], "reissue_document");
+
+    assert_eq!(
+        crate::keystore::store::read_did_document(&layout, &did).unwrap(),
+        document_before
+    );
+    assert_eq!(f.db.catalog().unwrap().keys, keys_before);
+    verify_audit(&f.db.connection).unwrap();
+}
+
+/// 名字不复用:第一对占了基名,第二对往后数。已经被摘掉、文档忘掉了的
+/// 编号也仍然被信封占着 —— 一台被撤销的设备再回来时不该拿到别人的旧名字。
+#[test]
+fn issue_device_keys_moves_to_suffixed_names_on_the_second_pair() {
+    let mut f = Fixture::new();
+    let (_vault, _did, _layout, root_key_id, _old, _kept) = reissue_fixture(&mut f);
+    let issue = |f: &mut Fixture| {
+        let p = f
+            .db
+            .prepare(
+                1002,
+                Change::IssueDeviceKeys {
+                    root_key_id: root_key_id.clone(),
+                },
+                now(),
+            )
+            .unwrap();
+        f.db.complete_secret_operation(1002, &p.operation_id, &p.digest, now(), "test-pass")
+            .unwrap()
+    };
+    issue(&mut f);
+    let second = issue(&mut f);
+    let kids: Vec<&str> = second["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["kid"].as_str().unwrap())
+        .collect();
+    assert!(kids.iter().any(|kid| kid.ends_with("#device-sign-2")), "{kids:?}");
+    assert!(
+        kids.iter().any(|kid| kid.ends_with("#device-agreement-2")),
+        "{kids:?}"
+    );
+}
+
+/// 口令错 → 一个信封都不留。铸两把、存两把是一个动作:留下"签名键进去了、
+/// 协商键没有"的半套设备,下一对名字还会跳到 `-2`,而设备根本不完整。
+#[test]
+fn issue_device_keys_leaves_nothing_behind_when_the_passphrase_is_wrong() {
+    let mut f = Fixture::new();
+    let (_vault, did, layout, root_key_id, _old, _kept) = reissue_fixture(&mut f);
+    let before = crate::keystore::store::envelope_fragments(&layout, &did).unwrap();
+    let p = f
+        .db
+        .prepare(
+            1002,
+            Change::IssueDeviceKeys {
+                root_key_id: root_key_id.clone(),
+            },
+            now(),
+        )
+        .unwrap();
+    assert!(f
+        .db
+        .commit_secret(1002, &p.operation_id, &p.digest, now(), Some("wrong-pass"))
+        .is_err());
+    assert_eq!(
+        crate::keystore::store::envelope_fragments(&layout, &did).unwrap(),
+        before
+    );
+    // 名字没被占,重来一次还是那对基名。
+    let retry = f
+        .db
+        .prepare(1002, Change::IssueDeviceKeys { root_key_id }, now())
+        .unwrap();
+    assert_eq!(retry.effect["sign"], "device-sign");
+    assert_eq!(retry.effect["agreement"], "device-agreement");
+}
+
 #[test]
 fn durable_http_result_preserves_covered_type_but_not_private_application_headers() {
     let (mut f, key, policy) = grant_fixture();
