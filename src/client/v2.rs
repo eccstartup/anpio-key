@@ -44,6 +44,9 @@ pub struct Capabilities {
     pub operations: Vec<String>,
     #[serde(default)]
     pub purposes: Vec<String>,
+    /// `SIGN_PURPOSE` 这一路开了哪几个 purpose。空 = 这一路整体没开。
+    #[serde(default)]
+    pub signing_purposes: Vec<String>,
     #[serde(default)]
     pub grant_kinds: Vec<String>,
 }
@@ -105,6 +108,16 @@ pub struct SignedOriginProof {
     pub expires: Option<i64>,
 }
 
+/// 一次绑定用途的断言签名。签名是 hex,公钥是 multibase —— 都不含私钥。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SignedPurpose {
+    pub request_id: String,
+    pub signature: String,
+    pub public_multibase: String,
+    /// 服务端回显的用途标签:`{"purpose":...}` 或再加 `domain`。
+    pub purpose: Value,
+}
+
 /// 被服务端明确拒绝的类别。
 ///
 /// 只分到"该做什么"这一层:该等(忙)、该找管理员(没授权)、该停(过期、
@@ -151,7 +164,7 @@ impl Refusal {
             "RESOURCE_BUSY" => Self::Busy,
             "AUDIT_UNAVAILABLE" | "PERSISTENCE_UNAVAILABLE" => Self::Stopped,
             "POLICY_DENIED" | "KEY_ROLE_FORBIDDEN" | "PRINCIPAL_DISABLED" => Self::Policy,
-            "OUTCOME_UNKNOWN" | "ORIGIN_INVALID" | "REQUEST_ID_INVALID" => {
+            "OUTCOME_UNKNOWN" | "ORIGIN_INVALID" | "PURPOSE_INVALID" | "REQUEST_ID_INVALID" => {
                 Self::Other(code.into())
             }
             _ => return None,
@@ -219,7 +232,7 @@ impl Client {
             request_id: request_id.to_owned(),
             http,
         })?;
-        from_data(data, "signed request")
+        from_signed(data, "signed request")
     }
 
     /// ANP origin proof。`origin` 只是事实,签名基由 daemon 拼。
@@ -237,7 +250,29 @@ impl Client {
             request_id: request_id.to_owned(),
             origin,
         })?;
-        from_data(data, "origin proof")
+        from_signed(data, "origin proof")
+    }
+
+    /// 绑定用途的断言。`payload` 是原始字节,hex 编码由这里做。
+    ///
+    /// 用途必须和 grant 上那把键注册时绑定的那一个一致;服务端没开这一路时拒绝。
+    /// 先看 `capabilities().signing_purposes`,别让用户看到莫名其妙的拒绝。
+    pub fn sign_purpose(
+        &self,
+        grant_id: &str,
+        request_id: &str,
+        purpose: &str,
+        domain: Option<&str>,
+        payload: &[u8],
+    ) -> Result<SignedPurpose> {
+        let data = self.call(DataRequest::SignPurpose {
+            grant_id: grant_id.to_owned(),
+            request_id: request_id.to_owned(),
+            purpose: purpose.to_owned(),
+            domain: domain.map(str::to_owned),
+            payload: payload.iter().map(|b| format!("{b:02x}")).collect(),
+        })?;
+        from_signed(data, "purpose signature")
     }
 
     /// 续期一条 session grant。服务端会把到期日夹到策略天花板以内。
@@ -278,6 +313,17 @@ fn from_data<T: serde::de::DeserializeOwned>(data: Value, what: &str) -> Result<
         .map_err(|error| KeydError::Protocol(format!("unexpected {what} reply: {error}")))
 }
 
+/// 签名类操作的应答是 `RequestStatus`:真正的结果在 `result` 里,外层是状态机。
+/// 数据面一条连接一个请求,能回来就只可能是 `completed`;别的状态当协议错误。
+fn from_signed<T: serde::de::DeserializeOwned>(data: Value, what: &str) -> Result<T> {
+    if data.get("state").and_then(Value::as_str) != Some("completed") {
+        return Err(KeydError::Protocol(format!(
+            "unexpected {what} state: {data}"
+        )));
+    }
+    from_data(data.get("result").cloned().unwrap_or(Value::Null), what)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,6 +338,7 @@ mod tests {
             capability_schema: None,
             operations,
             purposes: vec![],
+            signing_purposes: vec![],
             grant_kinds: vec![],
         }
     }
@@ -351,12 +398,66 @@ mod tests {
         }
         // 不是拒绝的错误(比如本地 IO)不硬塞进某一类。
         assert_eq!(Refusal::of(&KeydError::Locked), None);
-        assert_eq!(Refusal::of(&KeydError::Permission("SOMETHING_NEW".into())), None);
+        assert_eq!(
+            Refusal::of(&KeydError::Permission("SOMETHING_NEW".into())),
+            None
+        );
     }
 
     #[test]
     fn a_connected_client_remembers_which_config_it_uses() {
         let client = Client::new("/etc/anpio-key/service.json");
-        assert_eq!(client.config(), std::path::Path::new("/etc/anpio-key/service.json"));
+        assert_eq!(
+            client.config(),
+            std::path::Path::new("/etc/anpio-key/service.json")
+        );
+    }
+
+    /// 签名类应答的外层是 `RequestStatus`,结果在 `result` 里 —— 不是顶层的。
+    #[test]
+    fn signed_replies_are_unwrapped_from_the_request_status() {
+        let data = serde_json::json!({
+            "request_id": "5d0a0c1e-0000-4000-8000-000000000001",
+            "state": "completed",
+            "result": {
+                "request_id": "5d0a0c1e-0000-4000-8000-000000000001",
+                "url": "https://service.example.com/v1/orders",
+                "headers": {"signature": "sig1=:AA==:"},
+                "covered": ["@method", "@target-uri"],
+                "expires_at": 42
+            }
+        });
+        let signed: SignedHttp = from_signed(data, "signed request").unwrap();
+        assert_eq!(signed.url, "https://service.example.com/v1/orders");
+        assert_eq!(signed.headers["signature"], "sig1=:AA==:");
+        assert_eq!(signed.covered, ["@method", "@target-uri"]);
+        assert_eq!(signed.expires_at, 42);
+    }
+
+    #[test]
+    fn a_purpose_reply_keeps_its_tag_after_unwrapping() {
+        let data = serde_json::json!({
+            "request_id": "5d0a0c1e-0000-4000-8000-000000000002",
+            "state": "completed",
+            "result": {
+                "request_id": "5d0a0c1e-0000-4000-8000-000000000002",
+                "signature": "ab".repeat(64),
+                "public_multibase": "z6Mkexample",
+                "purpose": {"purpose": "device_assertion"}
+            }
+        });
+        let signed: SignedPurpose = from_signed(data, "purpose signature").unwrap();
+        assert_eq!(signed.public_multibase, "z6Mkexample");
+        assert_eq!(signed.purpose["purpose"], "device_assertion");
+    }
+
+    #[test]
+    fn a_status_that_did_not_complete_is_not_a_signature() {
+        let data = serde_json::json!({
+            "request_id": "5d0a0c1e-0000-4000-8000-000000000003",
+            "state": "reserved"
+        });
+        let error = from_signed::<SignedHttp>(data, "signed request").unwrap_err();
+        assert!(matches!(error, KeydError::Protocol(_)));
     }
 }
