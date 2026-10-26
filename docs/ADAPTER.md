@@ -16,7 +16,7 @@
 | 外部 SDK 高层热密钥解析 | `@connectx-sdk/core` 0.4.2 起兼容 | 更早版本仍不兼容；最低兼容版本 0.4.2 |
 | awiki JSON-RPC | Node v2 client 可按实际 RPC body 签名 | SDK 原生 ANP-02 body 不能直接当作 RPC envelope |
 
-awiki-cli-rs2 的 Rust 侧（`IdentitySigner`）**没有适配器**，今天能对上的只有结构化那两条：`http_signature_headers` ↔ `SIGN` 的 `Structured` 变体，`did_document`/`optional_did_document` ↔ `GET_DOCUMENT`。其余接缝没有对应能力：`sign`/`sign_root`/`sign_device_assertion` 只能落到默认关闭的 `Raw` 或 `Challenge`；`sign_object_proof`/`sign_document_proof` 在 socket 上没有请求类型（`REQUEST_TYPES` 不含）；`ecdh` 要 `keyAgreement` 的 X25519 私钥，本工具只造 Ed25519，进程里也没有这条协议路径。登录/RPC 签名可以走 CLI 接缝，端到端加密那半接不了。补齐这些缺口的接口形状已冻结在 §11，**尚未实现**。
+awiki-cli-rs2 的 Rust 侧（`IdentitySigner`）**没有适配器**，今天能对上的只有结构化那两条：`http_signature_headers` ↔ `SIGN` 的 `Structured` 变体，`did_document`/`optional_did_document` ↔ `GET_DOCUMENT`。其余接缝没有对应能力：`sign`/`sign_root`/`sign_device_assertion` 只能落到默认关闭的 `Raw` 或 `Challenge`；`sign_object_proof`/`sign_document_proof` 在 socket 上没有请求类型（`REQUEST_TYPES` 不含）；`ecdh` 要 `keyAgreement` 的 X25519 私钥，本工具只造 Ed25519，进程里也没有这条协议路径。登录/RPC 签名可以走 CLI 接缝，端到端加密那半接不了。补齐这些缺口的接口形状已冻结在 §11：P1 的两条（`SIGN_ORIGIN_PROOF`、`RENEW_GRANT`）已经实现，其余仍在规划。
 
 正式 Linux release 且配置显式为 `linux-protected-v1` 时支持保护声明。调试、preview、macOS、软件硬件替身及 seed-export 不在声明内。同 UID 不受限 Agent 之间没有隔离。
 
@@ -347,9 +347,9 @@ anpio-key mcp --config /etc/anpio-key/service.json
 
 新增对端、SDK 版本、平台或策略形态时重新验证相应路径，不能沿用历史记录扩大支持范围。
 
-## 11. 强对接契约（规划中，尚未实现）
+## 11. 强对接契约（P1 已实现，P2–P5 规划中）
 
-本节冻结与 awiki-cli-rs2、anpio-cli 强对接的接口形状。**今天一条都没有实现**：现役能力仍是 §3 那六条。实现按 P1–P5 分阶段，每阶段结束更新本节的状态列和 §1 的兼容表。已冻结的名字、字节和版本号不再改；新增能力只能追加新名字。
+本节冻结与 awiki-cli-rs2、anpio-cli 强对接的接口形状。**P1 已实现**：`SIGN_ORIGIN_PROOF`、`RENEW_GRANT`、session grant、策略 v2、能力协商；P2–P5 的部分仍只有形状。每阶段结束更新本节的状态列和 §1 的兼容表。已冻结的名字、字节和版本号不再改；新增能力只能追加新名字。
 
 ### 11.1 三层接口
 
@@ -363,38 +363,48 @@ anpio-key mcp --config /etc/anpio-key/service.json
 
 ### 11.2 能力协商
 
-`GET_CAPABILITIES` 的 `data` 追加四个字段，现有五个字段不动：
+`GET_CAPABILITIES` 的 `data` 追加四个字段，现有五个字段不动。下面是一个打开了 `features.sign_origin_proof` 的服务端的实际应答：
 
 ```json
 {"capability_schema":1,
- "operations":["GET_CAPABILITIES","LIST_AUTHORIZED_KEYS","GET_GRANT_STATUS","GET_DOCUMENT","SIGN_HTTP","GET_REQUEST_STATUS"],
- "purposes":["http-authentication"],
- "grant_kinds":["request"]}
+ "operations":["GET_CAPABILITIES","LIST_AUTHORIZED_KEYS","GET_GRANT_STATUS","GET_DOCUMENT","SIGN_HTTP","GET_REQUEST_STATUS","SIGN_ORIGIN_PROOF","RENEW_GRANT"],
+ "purposes":["http-authentication","origin-proof"],
+ "grant_kinds":["request","session"]}
 ```
 
-`capability_schema` 是这组字段自己的版本。开头列出的是今天的六个操作，新操作按阶段追加。客户端按 `operations` 里有没有某个名字决定能不能用，不按 `protocol_version` 或构建版本猜；名字不在列表里就是该项不支持，不能降级到别的操作。列表只增不减。
+`capability_schema` 是这组字段自己的版本。`operations` 里必有基线六个和 `RENEW_GRANT`；`SIGN_ORIGIN_PROOF` 只在开关打开时出现（关着时发这个操作会收到 `OPERATION_DISABLED`）。P2–P5 的操作按阶段追加。客户端按 `operations` 里有没有某个名字决定能不能用，不按 `protocol_version` 或构建版本猜；名字不在列表里就是该项不支持，不能降级到别的操作。列表只增不减。
+
+`RENEW_GRANT` 与 session grant 不是签名路，不受开关控制，所以总在列表里；能不能真用还取决于手上那条 grant 是不是 session 类型（§11.4）。
 
 ### 11.3 新增数据面操作
 
-二进制字段（payload、peer 公钥、signature、共享密钥）在新操作里一律**小写 hex**；`http.body` 保持现有字节数组形状不变。新操作都带 `grant_id` 与 `request_id`，去重与状态查询沿用 §8。
+二进制字段（payload、peer 公钥、signature、共享密钥）在新操作里一律**小写 hex**；`http.body` 保持现有字节数组形状不变。
 
-| 操作 | 输入 | 输出 `reply.data` | 阶段 |
+| 操作 | 输入 | 输出 `reply.data` | 状态 |
 |---|---|---|---|
-| `SIGN_ORIGIN_PROOF` | `origin` = `{method,url,headers,body,nonce}`（与 `http` 同形） | `{signature_input, signature, content_digest}` | P1 |
-| `RENEW_GRANT` | `grant_id`、`expiry` | 新期限与新次数上限 | P1 |
+| `SIGN_ORIGIN_PROOF` | `grant_id`、`request_id`、`origin` = `{method, meta, body, expires?, nonce?}` | `{request_id, content_digest, signature_input, signature, created, expires}` | P1 已实现 |
+| `RENEW_GRANT` | `grant_id`、`expiry` | 续期后的完整 grant（含新的 `expiry`、`renewals`） | P1 已实现 |
 | `SIGN_PURPOSE` | `purpose`、`payload`（hex，≤4096 字节） | `{signature, public_multibase, purpose}` | P2 |
 | `SIGN_OBJECT_PROOF` | `value`（对象）、`proof_purpose` | `{proof}`（整份带 proof 的对象） | P5 |
 | `SIGN_DOCUMENT_PROOF` | 完整文档、`proof_purpose` | `{document}` | P5 |
 | `ECDH` | `peer`（32 字节 hex X25519 公钥） | `{shared_secret, peer_fingerprint}` | P3 |
 
-`SIGN_ORIGIN_PROOF` 的签名基由 daemon 拼，调用方只给待签的事实；`signature_input`/`signature` 是可直接放进请求头的值。`SIGN_OBJECT_PROOF`/`SIGN_DOCUMENT_PROOF` 只接受 `id == did`、`verificationMethod == kid` 的输入，cryptosuite 固定，不接受调用方指定。
+`SIGN_ORIGIN_PROOF` 的待签事实是 `{method, meta, body}` 这个对象，**不是**一条 HTTP 请求：没有 URL、没有 header，逻辑目标 URI 由 `meta.target.{kind,did}` 决定（`kind` ∈ `agent`/`group`/`service`）。`created` 一律用 daemon 的钟；`expires` 可省，给了就必须落在 300 秒内。签名基、`signature_input`、`signature` 全由 daemon 拼，调用方只给事实，不能覆盖 `did`/`kid`/`key_id`/`signature_profile`。`expires` 在没给时就是 `null`。
+
+`SIGN_ORIGIN_PROOF` 与 `SIGN_HTTP` 共用一套 request_id 去重：同一个 ID 换了操作或换了输入一律 `REQUEST_ID_CONFLICT`，不是缓存命中。origin proof 的结果墓碑和 HTTP 一样永久保留，不随结果裁剪而清掉。
+
+`SIGN_OBJECT_PROOF`/`SIGN_DOCUMENT_PROOF` 只接受 `id == did`、`verificationMethod == kid` 的输入，cryptosuite 固定，不接受调用方指定。
 
 `ECDH` 是**唯一一个把秘密输出给调用方的操作**：单次、短到期、grant 内绑定 peer 白名单；审计记 `peer_fingerprint` 和 grant，**不记共享密钥**。没有 grant 的 `ECDH` 直接拒绝，不存在"只查公钥不协商"的路径。
 
 ### 11.4 授权模型
 
-- **request grant**：今天这一种，一个 grant 一条请求，`max_uses` 通常很小。
-- **session grant**（P1）：绑定 principal + 一组 `(key_id, operation)` + 次数上限 + 绝对寿命上限。IM 每条消息一次 origin proof，靠它而不是靠管理员反复建权。`RENEW_GRANT` 只能延长到策略给的绝对上限、不能抬高 `max_uses`、不能换 key、不能跨 `boot_epoch`；每次续期落审计。已耗尽的 grant 不能续。
+- **request grant**：一个 grant 一条请求，`max_uses` 通常很小；`max_renewals` 恒为 0，续期一律拒绝（`GRANT_INVALID`）。管理层用 `Catalog`/`Grant` 的 `Create` 变体创建。
+- **session grant**（P1 已实现）：管理平面用同一个 `Grant` 变更的 `CreateSession` 动作创建，绑定 principal + 一把 `key_id` + 一个 `(policy, operation)` + `max_uses` + 绝对寿命上限。IM 每条消息一次 origin proof，靠它而不是靠管理员反复建权。`max_renewals` 取自策略，**不能由调用方指定**。
+  - `RENEW_GRANT` 只能把到期日往上顶：实际写入的是 `min(请求的 expiry, now + max_duration_seconds, created_at + max_lifetime_seconds)` 三者的最小值。请求的 expiry 不大于当前到期日就是拒绝（`GRANT_INVALID`），不会"续短"。
+  - 续期次数用尽返回 `GRANT_RENEWALS_EXHAUSTED`；已过期、已撤销的 grant 不能续。
+  - 不能抬高 `max_uses`、不能换 key、不能跨 `boot_epoch`。
+  - 每次续期落一条 `GRANT_RENEWED` 审计；session grant 的创建另有一条 `GRANT_CREATED`（request grant 不重复记，创建已在管理操作的审计里）。
 
 grant 的构造、撤销和查看仍在管理平面（§2.1 的 prepare/commit），数据面只新增续期。
 
@@ -419,10 +429,25 @@ catalog 角色追加 `device_signing`、`key_agreement`（现有五个不变）�
 {"schema_version":2,"name":"im-origin-proof-review","purpose":"origin-proof",
  "limits":{"max_duration_seconds":900,"max_uses":1000,
            "max_lifetime_seconds":86400,"max_renewals":16},
- "content":{...}}
+ "content":{"methods":["direct.send"],
+            "target_kinds":["agent"],
+            "body":{"mode":"bounded","max_bytes":8192}}}
 ```
 
-`content` 按 `purpose` 各自一套字段，`deny_unknown_fields`：`http-authentication` 是 v1 那六个（`origin/methods/paths/query/body/signature_profile`）；`origin-proof` 为 `origin/methods/paths/body`；`purpose-signing` 为 `purposes`；`ecdh` 为 `peers`（32 字节 hex 公钥列表）；`object-proof`/`document-proof` 为 `proof_purposes`。已发布的 purpose 字段集不可改；加新 purpose 要连 `schema_version` 一起抬。`schema_version: 1` 的文档继续可读、判定不变。
+`limits` 有硬边界：`max_duration_seconds > 0`、`max_uses > 0`、`max_lifetime_seconds ≥ max_duration_seconds` 且不超过 365 天、`max_renewals ≤ 1024`。v1 文档换算过来时 `max_lifetime_seconds = max_duration_seconds`、`max_renewals = 0`，所以 v1 建出来的 grant 续不了。
+
+`content` 按 `purpose` 各自一套字段，彼此不通用，`deny_unknown_fields`：
+
+| `purpose` | `content` |
+|---|---|
+| `http-authentication` | `origin`、`methods`、`paths`、`query`、`body`、`signature_profile`（v1 那六个） |
+| `origin-proof` | `methods`、`target_kinds`、`body` |
+| `purpose-signing` | `purposes` |
+| `ecdh` | `peers`（32 字节小写 hex 公钥列表） |
+| `object-proof`、`document-proof` | `proof_purposes` |
+| `root` | 空对象 `{}` |
+
+`origin-proof` 刻意**没有** `origin`/`paths`：待签的是 `{method, meta, body}` 对象，目标由 `meta.target.{kind,did}` 给出，既没有 URL 也没有路径；能收窄的只有方法名、目标类别和 body 大小，而 `bounded` 的 `max_bytes` 必须大于 0（否则那条策略拒绝一切）。已发布的 purpose 字段集不可改；加新 purpose 要连 `schema_version` 一起抬。`schema_version: 1` 的文档继续可读、判定不变。
 
 ### 11.6 助记词：只进不出
 
@@ -434,7 +459,17 @@ catalog 角色追加 `device_signing`、`key_agreement`（现有五个不变）�
 
 ### 11.7 默认关清单
 
-每个新签名路单独一个开关，默认关，开的时候单独一条审计：`SIGN_ORIGIN_PROOF`、`SIGN_PURPOSE`（每 purpose 一个）、`SIGN_OBJECT_PROOF`、`SIGN_DOCUMENT_PROOF`、`ECDH`。`signing_available=true` 不表示这些路开着，客户端仍以 `operations` 为准。**根的管理操作**（换设备、轮换根、注册）只在管理平面，要求在场（SE 租约或等价物）。数据面唯一能用 root 键的是 `SIGN_DOCUMENT_PROOF`，且它的 grant 只能由管理平面签发——数据面自己没有任何途径造出 root 授权。
+每个新签名路单独一个开关，默认关，开的时候单独一条审计：`SIGN_PURPOSE`（每 purpose 一个）、`SIGN_OBJECT_PROOF`、`SIGN_DOCUMENT_PROOF`、`ECDH` 都是待实现的开关。
+
+`SIGN_ORIGIN_PROOF` 已经实现，开关是受保护配置里的 `features.sign_origin_proof`（缺省 `false`）：
+
+```json
+{"features":{"sign_origin_proof":true}}
+```
+
+关着时该操作不出现在 `operations` 里，发了就是 `OPERATION_DISABLED`；每次启动在审计链上追加一条 `{"event":"FEATURES","sign_origin_proof":…}`，事后能回答"这版服务开过哪些签名路"。开关只决定数据面收不收这个操作，不改变 `SIGN_HTTP` 的行为。
+
+`signing_available=true` 不表示这些路开着，客户端仍以 `operations` 为准。**根的管理操作**（换设备、轮换根、注册）只在管理平面，要求在场（SE 租约或等价物）。数据面唯一能用 root 键的是 `SIGN_DOCUMENT_PROOF`，且它的 grant 只能由管理平面签发——数据面自己没有任何途径造出 root 授权。
 
 ### 11.8 客户端对接要求
 

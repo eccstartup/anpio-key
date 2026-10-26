@@ -30,20 +30,6 @@ pub(super) enum Purpose {
     Root,
 }
 
-impl Purpose {
-    pub(super) fn as_str(self) -> &'static str {
-        match self {
-            Self::HttpAuthentication => "http-authentication",
-            Self::OriginProof => "origin-proof",
-            Self::PurposeSigning => "purpose-signing",
-            Self::Ecdh => "ecdh",
-            Self::ObjectProof => "object-proof",
-            Self::DocumentProof => "document-proof",
-            Self::Root => "root",
-        }
-    }
-}
-
 /// 授权上限。v1 只有前两个;v1 文档换算时 `max_lifetime_seconds` 取
 /// `max_duration_seconds`、`max_renewals` 取 0 —— 即 v1 的 grant 续不了。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,6 +103,9 @@ struct ProofContent {
 struct RootContent {}
 
 /// 校验过的 content。`purpose` 由它是哪个变体决定,不再单独存一份可以写错的副本。
+///
+/// `purpose-signing`/`ecdh` 的内容今天只做校验,求值要等 P2/P3 的操作落地。
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 enum Content {
     Http(HttpContent),
