@@ -463,8 +463,22 @@ impl Boundary {
             match request {
                 DataRequest::Capabilities {} => {
                     reply.boot_epoch = Some(db.boot_epoch);
+                    let mut operations = vec![
+                        "GET_CAPABILITIES",
+                        "LIST_AUTHORIZED_KEYS",
+                        "GET_GRANT_STATUS",
+                        "GET_DOCUMENT",
+                        "SIGN_HTTP",
+                        "RENEW_GRANT",
+                        "GET_REQUEST_STATUS",
+                    ];
+                    let mut purposes = vec!["http-authentication"];
+                    if self.config.features.sign_origin_proof {
+                        operations.push("SIGN_ORIGIN_PROOF");
+                        purposes.push("origin-proof");
+                    }
                     reply.data = Some(
-                        json!({"protocol_version":2,"profile":"anp-http-v2","max_body_bytes":16384,"transaction_executor_available":true,"audit_projection_healthy":self.projection_healthy.load(Ordering::SeqCst)}),
+                        json!({"protocol_version":2,"profile":"anp-http-v2","max_body_bytes":16384,"transaction_executor_available":true,"audit_projection_healthy":self.projection_healthy.load(Ordering::SeqCst),"capability_schema":1,"operations":operations,"purposes":purposes,"grant_kinds":["request","session"]}),
                     );
                 }
                 DataRequest::ListAuthorizedKeys {} => {
@@ -527,6 +541,50 @@ impl Boundary {
                         },
                     )?;
                     reply.data = Some(serde_json::to_value(status)?);
+                }
+                DataRequest::SignOriginProof { .. } if !self.config.features.sign_origin_proof => {
+                    return Err(KeydError::Misuse("OPERATION_DISABLED".into()));
+                }
+                DataRequest::SignOriginProof {
+                    grant_id,
+                    request_id,
+                    origin,
+                } => {
+                    if !crate::principal::validate_uuid(&request_id) {
+                        return Err(KeydError::Misuse("REQUEST_ID_INVALID".into()));
+                    }
+                    let proof = origin.validate(now.wall)?;
+                    let status = super::executor::execute_origin(
+                        &mut db,
+                        principal,
+                        &grant_id,
+                        &request_id,
+                        &proof,
+                        &SystemClock,
+                        |key, proof, created| {
+                            if self.se_session.lock().map_err(|_| KeydError::Locked)?
+                                .as_ref().is_some_and(|lease| !lease.live()) {
+                                return Err(KeydError::Locked);
+                            }
+                            let state = self.vaults.get(&key.vault_id).ok_or_else(|| {
+                                KeydError::Protocol("missing managed vault".into())
+                            })?;
+                            state.sign_origin_proof(
+                                self.config.service_uid,
+                                key,
+                                proof,
+                                created,
+                            )                        },
+                    )?;
+                    reply.data = Some(serde_json::to_value(status)?);
+                }
+                DataRequest::RenewGrant { grant_id, expiry } => {
+                    reply.data = Some(serde_json::to_value(db.renew_grant(
+                        principal,
+                        &grant_id,
+                        expiry,
+                        now,
+                    )?)?);
                 }
                 DataRequest::RequestStatus { request_id } => {
                     if !crate::principal::validate_uuid(&request_id) {
@@ -1025,7 +1083,9 @@ pub async fn serve(config: ServiceConfig, mut stop: watch::Receiver<bool>) -> Re
     for id in &config.vault_ids {
         paths::state_directory(&config.vault(id)?, config.service_uid)?;
     }
-    let database = Database::recover(&config, SystemClock.now()?)?;
+    let mut database = Database::recover(&config, SystemClock.now()?)?;
+    // 开关状态必须在链上留一行:事后能回答"这版服务开过哪些签名路"。
+    database.record(json!({"event":"FEATURES","sign_origin_proof":config.features.sign_origin_proof}))?;
     let (sign, _sign_guard) = bind(&config.sign_socket, config.service_uid, config.agent_gid)?;
     let (admin, _admin_guard) = bind(&config.admin_socket, config.service_uid, config.admin_gid)?;
     let boundary = Arc::new(Boundary::new(config, database)?);

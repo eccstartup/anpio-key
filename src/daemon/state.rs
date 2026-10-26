@@ -555,6 +555,23 @@ impl DaemonState {
         })
     }
 
+    /// ANP origin proof。签名基由 `anp` 在上游拼,这里只负责把钥匙交进闭包。
+    ///
+    /// 不需要读 DID 文档:公钥来自 [`LockedSigningKey`],没有路径绑定要复核。
+    pub(crate) fn sign_origin_proof(
+        &self,
+        uid: u32,
+        key_record: &crate::persistence::catalog::KeyRecord,
+        proof: &crate::security::origin::OriginProof,
+        created: i64,
+    ) -> Result<crate::security::origin::SignedOrigin> {
+        self.with_vault(uid, |vault| {
+            vault.with_key(&key_record.kid, self.autolock, Instant::now(), |key| {
+                proof.sign(key, created)
+            })
+        })
+    }
+
     /// 借出钥匙做一次原始签名(`--allow-raw-signing` 那条路)。
     ///
     /// 开关的检查**在这里**,不在 handlers —— 让"能不能走这条路"和

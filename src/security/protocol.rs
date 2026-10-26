@@ -31,6 +31,16 @@ pub enum DataRequest {
         request_id: String,
         http: super::http::HttpRequest,
     },
+    /// ANP origin proof。`origin` 是事实,签名基由 daemon 拼。
+    #[serde(rename = "SIGN_ORIGIN_PROOF")]
+    SignOriginProof {
+        grant_id: String,
+        request_id: String,
+        origin: super::origin::OriginProofRequest,
+    },
+    /// 长生命周期 grant 续期。只能往上顶到策略给的天花板。
+    #[serde(rename = "RENEW_GRANT")]
+    RenewGrant { grant_id: String, expiry: i64 },
     #[serde(rename = "GET_REQUEST_STATUS")]
     RequestStatus { request_id: String },
 }
@@ -262,5 +272,41 @@ mod v2_tests {
         let mut bad = base.clone();
         bad["request"]["http"]["body"]["bytes"] = serde_json::json!([256]);
         assert!(decode(&bad).is_err());
+    }
+
+    /// origin proof 的线上形状就是事实本身:方法、meta、body、可选的 expires/nonce。
+    /// 密钥、did、kid 一律不给 —— 那些来自 grant。
+    #[test]
+    fn origin_proof_takes_facts_only_and_rejects_key_overrides() {
+        let base = serde_json::json!({"version":2,"request":{"operation":"SIGN_ORIGIN_PROOF","grant_id":"g","request_id":"r","origin":{
+            "method":"direct.send",
+            "meta":{"profile":"anp.direct.base.v1","target":{"kind":"agent","did":"did:wba:example.com:bob"}},
+            "body":{"text":"hi"}}}});
+        let decode = |v: &serde_json::Value| {
+            let payload = serde_json::to_vec(v).unwrap();
+            let mut frame = (payload.len() as u32).to_be_bytes().to_vec();
+            frame.extend(payload);
+            read::<_, Envelope<DataRequest>>(&mut &frame[..])
+        };
+        assert!(matches!(
+            decode(&base).unwrap().request,
+            DataRequest::SignOriginProof { .. }
+        ));
+        for field in ["did", "kid", "key_id", "signature_profile", "passphrase"] {
+            let mut bad = base.clone();
+            bad["request"]["origin"][field] = serde_json::json!("override");
+            assert!(decode(&bad).is_err(), "{field}");
+        }
+        let mut bad = base.clone();
+        bad["request"]["origin"]
+            .as_object_mut()
+            .unwrap()
+            .remove("body");
+        assert!(decode(&bad).is_err());
+        let renew = serde_json::json!({"version":2,"request":{"operation":"RENEW_GRANT","grant_id":"g","expiry":1000}});
+        assert!(matches!(
+            decode(&renew).unwrap().request,
+            DataRequest::RenewGrant { expiry: 1000, .. }
+        ));
     }
 }

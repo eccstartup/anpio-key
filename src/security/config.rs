@@ -31,6 +31,18 @@ pub struct ServiceConfig {
     pub vault_ids: Vec<String>,
     #[serde(default)]
     pub limits: super::limits::Limits,
+    /// 新的签名路一律默认关。开关只决定数据平面是否接受该操作,
+    /// 不改变已有的 HTTP 签名路径。
+    #[serde(default)]
+    pub features: Features,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Features {
+    /// `SIGN_ORIGIN_PROOF`。默认关,开的时候启动审计里有一条 FEATURES。
+    #[serde(default)]
+    pub sign_origin_proof: bool,
 }
 
 impl ServiceConfig {
@@ -170,6 +182,7 @@ mod tests {
             }],
             vault_ids: vec![],
             limits: Default::default(),
+            features: Default::default(),
         }
     }
 

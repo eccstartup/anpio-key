@@ -1579,6 +1579,76 @@ fn a_one_shot_grant_cannot_be_renewed() {
 }
 
 #[test]
+fn origin_reservations_deduplicate_and_never_share_an_id_with_another_purpose() {
+    let (mut f, key, _) = grant_fixture();
+    let policy = origin_policy(&mut f, 16);
+    let g = new_session(&mut f, &key, &policy, 1_900);
+    let proof = origin_proof();
+    let id = uuid();
+    let principal = g.principal_id.clone();
+    assert!(matches!(
+        f.db.reserve_origin(&principal, &g.grant_id, &id, &proof, now())
+            .unwrap(),
+        requests::Reservation::New { .. }
+    ));
+    // 同一条事实同一个 id:命中已有预留,不再扣配额。
+    assert!(matches!(
+        f.db.reserve_origin(&principal, &g.grant_id, &id, &proof, now())
+            .unwrap(),
+        requests::Reservation::Existing(_)
+    ));
+    let uses: i64 = f
+        .db
+        .connection
+        .query_row(
+            "SELECT used_uses FROM grants WHERE grant_id=?1",
+            [&g.grant_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(uses, 1);
+    // 同一个 id 换个用途是冲突,不是缓存命中 —— 缓存不跨操作复用。
+    assert!(matches!(
+        f.db.reserve_http(&principal, &g.grant_id, &id, &canonical(), now()),
+        Err(KeydError::Misuse(c)) if c == "REQUEST_ID_CONFLICT"
+    ));
+    f.db.complete_origin(
+        &principal,
+        &id,
+        &json!({"request_id":id}),
+        (1_100, 1_100_000),
+        "aa",
+        json!({"method":"direct.send"}),
+        now(),
+    )
+    .unwrap();
+    let status = f.db.request_status(&principal, &id, now()).unwrap();
+    assert_eq!(status.state, "completed");
+    assert_eq!(status.result.unwrap()["request_id"], json!(id));
+    let reserved: String = f
+        .db
+        .connection
+        .query_row(
+            "SELECT json_extract(CAST(event_data AS TEXT),'$.purpose') FROM audit_events WHERE json_extract(CAST(event_data AS TEXT),'$.event')='SIGN_RESERVED'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(reserved, "origin-proof");
+    let completed: String = f
+        .db
+        .connection
+        .query_row(
+            "SELECT json_extract(CAST(event_data AS TEXT),'$.origin.method') FROM audit_events WHERE json_extract(CAST(event_data AS TEXT),'$.event')='SIGN_COMPLETED'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(completed, "direct.send");
+    verify_audit(&f.db.connection).unwrap();
+}
+
+#[test]
 fn missing_monotonic_deadline_stops_authorization() {
     let (mut f, key, policy) = grant_fixture();
     let g = new_grant(&mut f, &key, &policy);

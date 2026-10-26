@@ -1,6 +1,7 @@
 //! Quota and audit commit before signing; results commit before delivery.
 use super::*;
 use crate::security::http::CanonicalHttpRequest;
+use crate::security::origin::OriginProof;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestStatus {
@@ -48,10 +49,53 @@ impl Database {
         request: &CanonicalHttpRequest,
         now: Time,
     ) -> Result<Reservation> {
+        let digest = request.digest()?;
+        self.reserve(
+            principal,
+            grant_id,
+            id,
+            digest,
+            "http-authentication",
+            now,
+            |db| db.authorize_http(principal, grant_id, request, now),
+        )
+    }
+
+    /// 同一条 origin proof 用同一个 request_id 重放:命中缓存,不再签第二次。
+    pub fn reserve_origin(
+        &mut self,
+        principal: &str,
+        grant_id: &str,
+        id: &str,
+        proof: &OriginProof,
+        now: Time,
+    ) -> Result<Reservation> {
+        let digest = proof.digest();
+        self.reserve(
+            principal,
+            grant_id,
+            id,
+            digest,
+            "origin-proof",
+            now,
+            |db| db.authorize_origin(principal, grant_id, proof, now),
+        )
+    }
+
+    /// 两种签名共用的预留:先看是不是老请求,再判权,再扣配额。
+    fn reserve(
+        &mut self,
+        principal: &str,
+        grant_id: &str,
+        id: &str,
+        digest: String,
+        purpose: &str,
+        now: Time,
+        authorize: impl FnOnce(&mut Database) -> Result<(grants::Grant, catalog::KeyRecord)>,
+    ) -> Result<Reservation> {
         if !crate::principal::validate_uuid(id) {
             return Err(refused("REQUEST_ID_INVALID"));
         }
-        let digest = request.digest()?;
         let old: Option<(String,String)> = self.connection.query_row(
             "SELECT grant_id,input_digest FROM requests WHERE principal_id=?1 AND request_id=?2",
             params![principal,id], |r| Ok((r.get(0)?,r.get(1)?))).optional().map_err(db_error)?;
@@ -63,10 +107,10 @@ impl Database {
                 self.request_status(principal, id, now)?,
             ));
         }
-        let (grant, key) = match self.authorize_http(principal, grant_id, request, now) {
+        let (grant, key) = match authorize(self) {
             Ok(authorized) => authorized,
             Err(KeydError::Misuse(code)) => {
-                self.record(json!({"event":"SIGN_DENIED","principal_id":principal,"grant_id":grant_id,"request_id":id,"input_digest":digest,"reason":code,"at":now.wall}))?;
+                self.record(json!({"event":"SIGN_DENIED","principal_id":principal,"grant_id":grant_id,"request_id":id,"purpose":purpose,"input_digest":digest,"reason":code,"at":now.wall}))?;
                 return Err(refused(&code));
             }
             Err(error) => return Err(error),
@@ -90,7 +134,7 @@ impl Database {
         tx.execute("INSERT INTO requests(principal_id,request_id,grant_id,input_digest,state) VALUES(?1,?2,?3,?4,'reserved')",params![principal,id,grant_id,digest]).map_err(db_error)?;
         append(
             &tx,
-            &json!({"event":"SIGN_RESERVED","principal_id":principal,"request_id":id,"grant_id":grant_id,"key_id":key.key_id,"kid":key.kid,"policy_id":grant.policy_id,"policy_version":grant.policy_version,"purpose":"http-authentication","input_digest":digest,"at":now.wall}),
+            &json!({"event":"SIGN_RESERVED","principal_id":principal,"request_id":id,"grant_id":grant_id,"key_id":key.key_id,"kid":key.kid,"policy_id":grant.policy_id,"policy_version":grant.policy_version,"purpose":purpose,"input_digest":digest,"at":now.wall}),
         )?;
         tx.commit().map_err(db_error)?;
         Ok(Reservation::New {
@@ -108,6 +152,39 @@ impl Database {
         signature_digest: &str,
         now: Time,
     ) -> Result<()> {
+        self.complete(principal, id, result, validity, signature_digest, None, now)
+    }
+    /// origin proof 的完成事件多一段 proof options,和 HTTP 的字段并存不互斥。
+    pub fn complete_origin(
+        &mut self,
+        principal: &str,
+        id: &str,
+        result: &Value,
+        validity: (i64, i64),
+        signature_digest: &str,
+        options: Value,
+        now: Time,
+    ) -> Result<()> {
+        self.complete(
+            principal,
+            id,
+            result,
+            validity,
+            signature_digest,
+            Some(options),
+            now,
+        )
+    }
+    fn complete(
+        &mut self,
+        principal: &str,
+        id: &str,
+        result: &Value,
+        validity: (i64, i64),
+        signature_digest: &str,
+        options: Option<Value>,
+        now: Time,
+    ) -> Result<()> {
         let (expiry, monotonic_expiry) = validity;
         let bytes =
             serde_json::to_vec(&json!({"response":result,"monotonic_expiry":monotonic_expiry}))?;
@@ -116,10 +193,11 @@ impl Database {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db_error)?;
         if tx.execute("UPDATE requests SET state='completed',result=?3,result_expiry=?4 WHERE principal_id=?1 AND request_id=?2 AND state='reserved'",params![principal,id,bytes,expiry]).map_err(db_error)? != 1 { return Err(unavailable()); }
-        append(
-            &tx,
-            &json!({"event":"SIGN_COMPLETED","principal_id":principal,"request_id":id,"signature_base_digest":signature_digest,"delivery":"not_observed","at":now.wall}),
-        )?;
+        let mut event = json!({"event":"SIGN_COMPLETED","principal_id":principal,"request_id":id,"signature_base_digest":signature_digest,"delivery":"not_observed","at":now.wall});
+        if let Some(options) = options {
+            event["origin"] = options;
+        }
+        append(&tx, &event)?;
         tx.commit().map_err(db_error)
     }
     pub fn fail_reserved(

@@ -17,6 +17,7 @@ use serde_json::Value;
 use crate::error::{KeydError, Result};
 use crate::persistence::grants::Grant;
 use crate::security::http::HttpRequest;
+use crate::security::origin::OriginProofRequest;
 use crate::security::protocol::DataRequest;
 
 /// 没有 `operations` 字段的服务端只认这六个 —— v2 数据面的基线。
@@ -90,6 +91,20 @@ pub struct SignedHttp {
     pub expires_at: i64,
 }
 
+/// 一次 ANP origin proof。三段头(或等价字段)原样交给协议层。
+///
+/// `expires` 可以缺省 —— 缺省时 daemon 按 profile 上限算缓存窗口。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SignedOriginProof {
+    pub request_id: String,
+    pub content_digest: String,
+    pub signature_input: String,
+    pub signature: String,
+    pub created: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires: Option<i64>,
+}
+
 /// 被服务端明确拒绝的类别。
 ///
 /// 只分到"该做什么"这一层:该等(忙)、该找管理员(没授权)、该停(过期、
@@ -124,17 +139,21 @@ impl Refusal {
 
     pub fn from_code(code: &str) -> Option<Self> {
         Some(match code {
-            "PROTOCOL_VERSION_UNSUPPORTED" | "UNSUPPORTED_OPERATION" => Self::Unsupported,
+            "PROTOCOL_VERSION_UNSUPPORTED" | "UNSUPPORTED_OPERATION" | "OPERATION_DISABLED" => {
+                Self::Unsupported
+            }
             "GRANT_INVALID" => Self::NotGranted,
             "GRANT_EXPIRED" => Self::Expired,
-            "GRANT_EXHAUSTED" => Self::Exhausted,
+            "GRANT_EXHAUSTED" | "GRANT_RENEWALS_EXHAUSTED" => Self::Exhausted,
             "KEY_LOCKED" => Self::Locked,
             "REQUEST_ID_CONFLICT" => Self::Conflict,
             "REQUEST_NOT_FOUND" | "KEY_NOT_FOUND" => Self::Missing,
             "RESOURCE_BUSY" => Self::Busy,
             "AUDIT_UNAVAILABLE" | "PERSISTENCE_UNAVAILABLE" => Self::Stopped,
             "POLICY_DENIED" | "KEY_ROLE_FORBIDDEN" | "PRINCIPAL_DISABLED" => Self::Policy,
-            "OUTCOME_UNKNOWN" => Self::Other("OUTCOME_UNKNOWN".into()),
+            "OUTCOME_UNKNOWN" | "ORIGIN_INVALID" | "REQUEST_ID_INVALID" => {
+                Self::Other(code.into())
+            }
             _ => return None,
         })
     }
@@ -201,6 +220,33 @@ impl Client {
             http,
         })?;
         from_data(data, "signed request")
+    }
+
+    /// ANP origin proof。`origin` 只是事实,签名基由 daemon 拼。
+    ///
+    /// 服务端没开 `sign_origin_proof` 时会拒绝;先 [`Client::capabilities`]
+    /// 看 `supports("SIGN_ORIGIN_PROOF")`,别让用户看到一条莫名其妙的拒绝。
+    pub fn origin_proof(
+        &self,
+        grant_id: &str,
+        request_id: &str,
+        origin: OriginProofRequest,
+    ) -> Result<SignedOriginProof> {
+        let data = self.call(DataRequest::SignOriginProof {
+            grant_id: grant_id.to_owned(),
+            request_id: request_id.to_owned(),
+            origin,
+        })?;
+        from_data(data, "origin proof")
+    }
+
+    /// 续期一条 session grant。服务端会把到期日夹到策略天花板以内。
+    pub fn renew_grant(&self, grant_id: &str, expiry: i64) -> Result<Grant> {
+        let data = self.call(DataRequest::RenewGrant {
+            grant_id: grant_id.to_owned(),
+            expiry,
+        })?;
+        from_data(data, "renewed grant")
     }
 
     /// 查一次签名的状态。响应丢了之后用它,而不是换一个新 id 重签。
@@ -296,6 +342,9 @@ mod tests {
             ("KEY_ROLE_FORBIDDEN", Refusal::Policy),
             ("PRINCIPAL_DISABLED", Refusal::Policy),
             ("PROTOCOL_VERSION_UNSUPPORTED", Refusal::Unsupported),
+            ("OPERATION_DISABLED", Refusal::Unsupported),
+            ("GRANT_RENEWALS_EXHAUSTED", Refusal::Exhausted),
+            ("ORIGIN_INVALID", Refusal::Other("ORIGIN_INVALID".into())),
         ] {
             let error = KeydError::Permission(code.into());
             assert_eq!(Refusal::of(&error), Some(expected), "code {code}");
