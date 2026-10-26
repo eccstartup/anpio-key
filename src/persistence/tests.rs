@@ -2339,6 +2339,369 @@ fn an_ecdh_completion_keeps_the_secret_out_of_the_database() {
     verify_audit(&f.db.connection).unwrap();
 }
 
+/// P5 的夹具:一根确认过 Root 的 `#key-1`、一把绑了 `device_assertion` 的
+/// `#device-sign`,以及重新签过、两把键都挂在里面的那份文档。
+/// 返回 (fixture, device key_id, root key_id, document)。
+fn proof_fixture() -> (Fixture, String, String, Value) {
+    use crate::crypto::kdf::Argon2Config;
+    use crate::keystore::{
+        create, device, hardware::HardwareChoice, layout::KeydLayout, store, unwrap,
+    };
+    use catalog::*;
+    let mut f = Fixture::new();
+    let (vault, did, doc) = vault_fixture(&mut f);
+    let layout = KeydLayout::at(f.dir.join("vaults").join(&vault));
+    let (_, extra) = create::create_extra(
+        &layout,
+        &did,
+        "device-sign",
+        vec![
+            anp::authentication::DidVerificationRelationship::Authentication,
+            anp::authentication::DidVerificationRelationship::AssertionMethod,
+        ],
+        "test",
+        b"test-pass",
+        Argon2Config {
+            m_cost: 1024,
+            t_cost: 1,
+            p_cost: 1,
+        },
+        HardwareChoice::None,
+    )
+    .unwrap();
+    let root = store::resolve(&layout, &did, None).unwrap();
+    let secret = device::load(&layout).unwrap();
+    let key = unwrap::unlock(&root, b"test-pass", &secret).unwrap();
+    let unsigned = crate::did::lifecycle::strip_proof(&doc).unwrap();
+    let unsigned = crate::did::lifecycle::with_extra_key(
+        &unsigned,
+        &did,
+        &key.verifying_key().unwrap(),
+        extra,
+    )
+    .unwrap();
+    let signed = crate::did::document::sign_document(&unsigned, &key, &root.id.kid).unwrap();
+    store::write_did_document(&layout, &did, &signed).unwrap();
+
+    apply_change(&mut f, CatalogChange::EnrollVault { vault_id: vault });
+    let keys = f.db.catalog().unwrap().keys;
+    let device = keys
+        .iter()
+        .find(|k| k.kid.ends_with("#device-sign"))
+        .unwrap()
+        .key_id
+        .clone();
+    let root_id = keys
+        .iter()
+        .find(|k| k.kid.ends_with("#key-1"))
+        .unwrap()
+        .key_id
+        .clone();
+    apply_change(
+        &mut f,
+        CatalogChange::ConfirmRole {
+            key_id: root_id.clone(),
+            role: KeyRole::Root,
+            purpose: String::new(),
+        },
+    );
+    apply_change(
+        &mut f,
+        CatalogChange::ConfirmRole {
+            key_id: device.clone(),
+            role: KeyRole::DeviceSigning,
+            purpose: "device_assertion".into(),
+        },
+    );
+    (f, device, root_id, signed)
+}
+
+fn proof_policy(f: &mut Fixture, purpose: &str, proof_purposes: &[&str]) -> String {
+    let id = uuid();
+    apply_change(
+        f,
+        catalog::CatalogChange::PublishPolicy {
+            policy_id: id.clone(),
+            version: 1,
+            content: json!({"schema_version":2,"name":"proofs","purpose":purpose,
+              "limits":{"max_duration_seconds":900,"max_uses":100000,"max_lifetime_seconds":86400,"max_renewals":16},
+              "content":{"proof_purposes":proof_purposes}}),
+        },
+    );
+    id
+}
+
+/// 对象 proof 只落在绑了 `device_assertion` 的设备键上;同一把设备键换个
+/// purpose 绑定的不能借这条路给自己扩权。
+#[test]
+fn an_object_proof_uses_the_device_assertion_key_and_no_other() {
+    use crate::security::proofs::ObjectProofRequest;
+    let (mut f, device, root_id, _) = proof_fixture();
+    let policy = proof_policy(&mut f, "object-proof", &["assertionMethod"]);
+    let g = new_grant(&mut f, &device, &policy);
+    let operation: String =
+        f.db.connection
+            .query_row(
+                "SELECT operation FROM grant_operations WHERE grant_id=?1",
+                [&g.grant_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+    assert_eq!(operation, "SIGN_OBJECT_PROOF");
+    let (_, key) =
+        f.db.authorize_object_proof(&g.principal_id, &g.grant_id, now())
+            .unwrap();
+    assert_eq!(key.key_id, device);
+    assert_eq!(key.purpose, "device_assertion");
+    // 这条 grant 的操作集里只有 SIGN_OBJECT_PROOF。
+    assert!(f
+        .db
+        .authorize_http(&g.principal_id, &g.grant_id, &canonical(), now())
+        .is_err());
+    let object = ObjectProofRequest::new(json!({"kind":"key-package","epoch":7})).unwrap();
+    assert!(matches!(
+        f.db.reserve_object_proof(&g.principal_id, &g.grant_id, &uuid(), &object, now()),
+        Ok(requests::Reservation::New { .. })
+    ));
+    // 根键拿不到对象 proof 的 grant:角色在发权那一步就对不上。
+    assert!(f
+        .db
+        .prepare(
+            1002,
+            Change::Grant {
+                change: grants::GrantChange::Create {
+                    principal_id: f.config.principals[0].principal_id.clone(),
+                    key_id: root_id,
+                    policy_id: policy,
+                    policy_version: 1,
+                    expiry: 1050,
+                    max_uses: 1,
+                },
+            },
+            now()
+        )
+        .is_err());
+    verify_audit(&f.db.connection).unwrap();
+}
+
+/// 文档 proof 只签这把键自己的那份文档。别人的文档、或者文档里没挂着这把键,
+/// 都在扣配额之前就被拒成 `PROOF_INVALID`。
+#[test]
+fn a_document_proof_only_covers_the_root_keys_own_document() {
+    use crate::security::proofs::DocumentProofRequest;
+    let (mut f, device, root_id, doc) = proof_fixture();
+    let policy = proof_policy(
+        &mut f,
+        "document-proof",
+        &["assertionMethod", "authentication"],
+    );
+    let g = new_grant(&mut f, &root_id, &policy);
+    let operation: String =
+        f.db.connection
+            .query_row(
+                "SELECT operation FROM grant_operations WHERE grant_id=?1",
+                [&g.grant_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+    assert_eq!(operation, "SIGN_DOCUMENT_PROOF");
+    let principal = g.principal_id.clone();
+    let request = DocumentProofRequest::from_wire(doc.clone(), Some("authentication")).unwrap();
+    let (_, key) =
+        f.db.authorize_document_proof(&principal, &g.grant_id, &request, now())
+            .unwrap();
+    assert_eq!(key.key_id, root_id);
+    assert_eq!(key.role, catalog::KeyRole::Root);
+
+    // 别人的 DID:拒,而且一行配额都没动。
+    let mut stranger = doc.clone();
+    stranger["id"] = json!("did:wba:example.com:user:bob:e1_deadbeef");
+    let stranger = DocumentProofRequest::from_wire(stranger, None).unwrap();
+    assert!(matches!(
+        f.db.reserve_document_proof(&principal, &g.grant_id, &uuid(), &stranger, now()),
+        Err(KeydError::Misuse(c)) if c == "PROOF_INVALID"
+    ));
+    // 是这份文档,但要签的键没挂在里面 —— 同样不是这把身份的证明。
+    let missing = DocumentProofRequest::from_wire(doc.clone(), None).unwrap();
+    assert!(missing
+        .verify_binding(&key.did, &format!("{}#key-9", key.did))
+        .is_err());
+    let uses: i64 =
+        f.db.connection
+            .query_row(
+                "SELECT used_uses FROM grants WHERE grant_id=?1",
+                [&g.grant_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+    assert_eq!(uses, 0, "a refused document must not spend quota");
+
+    // 策略里没有列 `authentication` 的话,这个 purpose 就是拒绝,不是"尽量满足"。
+    let narrow = proof_policy(&mut f, "document-proof", &["assertionMethod"]);
+    let narrow_grant = new_grant(&mut f, &root_id, &narrow);
+    assert!(matches!(
+        f.db.authorize_document_proof(&principal, &narrow_grant.grant_id, &request, now()),
+        Err(KeydError::Misuse(c)) if c == "POLICY_DENIED"
+    ));
+    // 设备键也不能签文档 proof:身份只有根能动。
+    let device_policy = proof_policy(
+        &mut f,
+        "document-proof",
+        &["assertionMethod", "authentication"],
+    );
+    assert!(f
+        .db
+        .prepare(
+            1002,
+            Change::Grant {
+                change: grants::GrantChange::Create {
+                    principal_id: principal.clone(),
+                    key_id: device,
+                    policy_id: device_policy,
+                    policy_version: 1,
+                    expiry: 1050,
+                    max_uses: 1,
+                },
+            },
+            now()
+        )
+        .is_err());
+    verify_audit(&f.db.connection).unwrap();
+}
+
+/// 两条 proof 路的预留都一样:同输入同 id 命中缓存,换了输入(对象换了内容、
+/// 文档换了 purpose)就是冲突而不是缓存。
+#[test]
+fn proof_reservations_deduplicate_per_purpose_and_never_share_an_id() {
+    use crate::security::proofs::{DocumentProofRequest, ObjectProofRequest};
+    let (mut f, device, root_id, doc) = proof_fixture();
+    let object_policy = proof_policy(&mut f, "object-proof", &["assertionMethod"]);
+    let object_grant = new_session(&mut f, &device, &object_policy, 1_900);
+    let principal = object_grant.principal_id.clone();
+    let object = ObjectProofRequest::new(json!({"kind":"key-package","epoch":7})).unwrap();
+    let id = uuid();
+    assert!(matches!(
+        f.db.reserve_object_proof(&principal, &object_grant.grant_id, &id, &object, now())
+            .unwrap(),
+        requests::Reservation::New { .. }
+    ));
+    assert!(matches!(
+        f.db.reserve_object_proof(&principal, &object_grant.grant_id, &id, &object, now())
+            .unwrap(),
+        requests::Reservation::Existing(_)
+    ));
+    let uses: i64 =
+        f.db.connection
+            .query_row(
+                "SELECT used_uses FROM grants WHERE grant_id=?1",
+                [&object_grant.grant_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+    assert_eq!(uses, 1, "a replay must not spend a second use");
+    let other = ObjectProofRequest::new(json!({"kind":"key-package","epoch":8})).unwrap();
+    assert!(matches!(
+        f.db.reserve_object_proof(&principal, &object_grant.grant_id, &id, &other, now()),
+        Err(KeydError::Misuse(c)) if c == "REQUEST_ID_CONFLICT"
+    ));
+    assert!(matches!(
+        f.db.reserve_http(&principal, &object_grant.grant_id, &id, &canonical(), now()),
+        Err(KeydError::Misuse(c)) if c == "REQUEST_ID_CONFLICT"
+    ));
+
+    // 文档 proof:purpose 在摘要里,同一个 id 换个 purpose 是另一个请求。
+    let document_policy = proof_policy(
+        &mut f,
+        "document-proof",
+        &["assertionMethod", "authentication"],
+    );
+    let document_grant = new_session(&mut f, &root_id, &document_policy, 1_900);
+    let assertion = DocumentProofRequest::from_wire(doc.clone(), Some("assertionMethod")).unwrap();
+    let authentication =
+        DocumentProofRequest::from_wire(doc.clone(), Some("authentication")).unwrap();
+    assert_ne!(assertion.digest(), authentication.digest());
+    let document_id = uuid();
+    assert!(matches!(
+        f.db.reserve_document_proof(
+            &principal,
+            &document_grant.grant_id,
+            &document_id,
+            &assertion,
+            now()
+        )
+        .unwrap(),
+        requests::Reservation::New { .. }
+    ));
+    assert!(matches!(
+        f.db.reserve_document_proof(
+            &principal,
+            &document_grant.grant_id,
+            &document_id,
+            &authentication,
+            now()
+        ),
+        Err(KeydError::Misuse(c)) if c == "REQUEST_ID_CONFLICT"
+    ));
+
+    // 完成事件写的是证明的形状与摘要,不是对象或文档正文。
+    let options = assertion_options(&assertion);
+    f.db.complete_proof(
+        &principal,
+        &document_id,
+        &json!({"request_id":document_id,"value":doc,"proof":options}),
+        (1_100, 1_100_000),
+        &assertion.digest(),
+        options,
+        now(),
+    )
+    .unwrap();
+    let status = f.db.request_status(&principal, &document_id, now()).unwrap();
+    assert_eq!(status.state, "completed");
+    let (purpose, bytes, has_body): (String, i64, bool) = f
+        .db
+        .connection
+        .query_row(
+            "SELECT json_extract(CAST(event_data AS TEXT),'$.proof.purpose'),
+                    json_extract(CAST(event_data AS TEXT),'$.proof.document_bytes'),
+                    json_extract(CAST(event_data AS TEXT),'$.proof.document') IS NOT NULL
+             FROM audit_events WHERE json_extract(CAST(event_data AS TEXT),'$.event')='SIGN_COMPLETED'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(purpose, "assertionMethod");
+    assert!(bytes > 0);
+    assert!(!has_body, "the audit records the shape, never the document");
+    // 预留事件按各自的路打标签。
+    let reserved: Vec<String> = {
+        let mut s = f
+            .db
+            .connection
+            .prepare("SELECT json_extract(CAST(event_data AS TEXT),'$.purpose') FROM audit_events WHERE json_extract(CAST(event_data AS TEXT),'$.event')='SIGN_RESERVED' ORDER BY rowid")
+            .unwrap();
+        s.query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap()
+    };
+    assert_eq!(reserved, vec!["object-proof", "document-proof"]);
+    verify_audit(&f.db.connection).unwrap();
+}
+
+/// 手册里那一段 proof options 的形状。真跑起来由
+/// [`crate::security::proofs::SignedProof::options`] 填;这里只验库里收到什么。
+fn assertion_options(request: &crate::security::proofs::DocumentProofRequest) -> Value {
+    json!({
+        "purpose": request.purpose().name(),
+        "proof_type": "DataIntegrityProof",
+        "cryptosuite": "eddsa-jcs-2022",
+        "verification_method": "did:example:alice#key-1",
+        "created": "2023-11-14T22:13:20Z",
+        "document_bytes": 512,
+        "document_digest": request.digest(),
+    })
+}
+
 #[test]
 fn transaction_reservations_are_idempotent_and_never_refund() {
     use requests::Reservation;

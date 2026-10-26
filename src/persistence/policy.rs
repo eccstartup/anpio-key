@@ -279,7 +279,7 @@ fn parse_content(purpose: Purpose, content: Value) -> Result<Content> {
         }
         Purpose::ObjectProof | Purpose::DocumentProof => {
             let c: ProofContent = serde_json::from_value(content).map_err(|_| invalid())?;
-            validate_names(&c.proof_purposes, 8)?;
+            validate_proof_purposes(&c.proof_purposes, 8, purpose)?;
             Content::Proof((purpose, c))
         }
         Purpose::Root => {
@@ -287,6 +287,34 @@ fn parse_content(purpose: Purpose, content: Value) -> Result<Content> {
             Content::Root(RootContent {})
         }
     })
+}
+
+/// 文档 proof 能声明的 purpose。对象 proof 只用得上第一个 —— 上游把它写死成
+/// `assertionMethod`,这条路上发不出别的。
+const PROOF_PURPOSE_NAMES: [&str; 2] = ["assertionMethod", "authentication"];
+
+fn proof_purposes_for(purpose: Purpose) -> &'static [&'static str] {
+    match purpose {
+        Purpose::ObjectProof => &PROOF_PURPOSE_NAMES[..1],
+        _ => &PROOF_PURPOSE_NAMES,
+    }
+}
+
+/// `proof_purposes` 用**自己的**词表,不是 [`validate_names`] 那套小写标识符:
+/// 这些名字是 W3C 的 camelCase 术语,原样进签名基,大小写不能动。
+///
+/// 词表按 purpose 分开。对象策略里写 `authentication` 不是"更宽",而是写了
+/// 一个这条路根本发不出来的东西 —— 拒掉,免得策略说一件做不到的事。
+fn validate_proof_purposes(names: &[String], max: usize, purpose: Purpose) -> Result<()> {
+    let allowed = proof_purposes_for(purpose);
+    if names.is_empty()
+        || names.len() > max
+        || names.iter().collect::<BTreeSet<_>>().len() != names.len()
+        || names.iter().any(|name| !allowed.contains(&name.as_str()))
+    {
+        return Err(invalid());
+    }
+    Ok(())
 }
 
 fn validate_names(names: &[String], max: usize) -> Result<()> {
@@ -571,6 +599,21 @@ pub(super) fn evaluate_ecdh(content: Value, peer: &[u8; 32]) -> Result<()> {
     Ok(())
 }
 
+/// 一次对象/文档 proof 的 purpose 能不能落在这条策略里。
+///
+/// 两道都要过:策略的 purpose 得就是这一种(对象策略不能被文档请求借用),
+/// 请求的 purpose 得在策略声明的名单里。
+pub(super) fn evaluate_proof(content: Value, purpose: Purpose, requested: &str) -> Result<()> {
+    let p = parse(content)?;
+    let Content::Proof((declared, c)) = &p.content else {
+        return Err(denied());
+    };
+    if *declared != purpose || !c.proof_purposes.iter().any(|name| name == requested) {
+        return Err(denied());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -757,6 +800,57 @@ mod tests {
         assert!(normalize(v2("ecdh", json!({"peers":[]}))).is_err());
         assert!(normalize(v2("ecdh", json!({"peers":["AA".repeat(32)]}))).is_err());
         assert!(normalize(v2("ecdh", json!({"peers":["aa".repeat(31)]}))).is_err());
+    }
+
+    #[test]
+    fn proof_policies_name_w3c_purposes_and_nothing_else() {
+        // camelCase 是规范里的写法,策略原样收;小写会被拒 —— 那是另一个字符串。
+        assert!(normalize(v2("document-proof", json!({"proof_purposes":["assertionMethod"]}))).is_ok());
+        assert!(normalize(v2(
+            "document-proof",
+            json!({"proof_purposes":["authentication","assertionMethod"]})
+        ))
+        .is_ok());
+        assert!(normalize(v2("document-proof", json!({"proof_purposes":[]}))).is_err());
+        assert!(normalize(v2("document-proof", json!({"proof_purposes":["assertionmethod"]}))).is_err());
+        assert!(normalize(v2(
+            "document-proof",
+            json!({"proof_purposes":["assertionMethod","assertionMethod"]})
+        ))
+        .is_err());
+
+        // 对象 proof 只有 assertionMethod 这一种,写别的等于承诺一件做不到的事。
+        assert!(
+            normalize(v2("object-proof", json!({"proof_purposes":["assertionMethod"]}))).is_ok()
+        );
+        assert!(normalize(v2("object-proof", json!({"proof_purposes":["authentication"]}))).is_err());
+        assert!(normalize(v2(
+            "object-proof",
+            json!({"proof_purposes":["assertionMethod","authentication"]})
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn a_proof_request_must_match_both_the_purpose_and_the_list() {
+        let object = v2("object-proof", json!({"proof_purposes":["assertionMethod"]}));
+        assert!(evaluate_proof(object.clone(), Purpose::ObjectProof, "assertionMethod").is_ok());
+        assert!(evaluate_proof(object.clone(), Purpose::ObjectProof, "authentication").is_err());
+        // 对象策略不能被文档请求借用。
+        assert!(evaluate_proof(object, Purpose::DocumentProof, "assertionMethod").is_err());
+
+        let document = v2("document-proof", json!({"proof_purposes":["assertionMethod"]}));
+        assert!(
+            evaluate_proof(document.clone(), Purpose::DocumentProof, "assertionMethod").is_ok()
+        );
+        assert!(evaluate_proof(document, Purpose::DocumentProof, "authentication").is_err());
+        // 换了 purpose 但 content 形状一样的策略也不认。
+        assert!(evaluate_proof(
+            v2("origin-proof", origin_content()),
+            Purpose::DocumentProof,
+            "assertionMethod"
+        )
+        .is_err());
     }
 
     #[test]

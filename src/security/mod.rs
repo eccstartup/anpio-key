@@ -12,6 +12,7 @@ pub mod migration;
 pub mod origin;
 pub mod paths;
 pub mod protocol;
+pub mod proofs;
 pub mod purpose;
 pub(crate) mod se_session;
 pub mod server;

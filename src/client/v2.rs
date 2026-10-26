@@ -119,6 +119,16 @@ pub struct SignedPurpose {
     pub purpose: Value,
 }
 
+/// 一次对象/文档 proof 的产物:整份带 `proof` 的对象或文档。
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct SignedProof {
+    pub request_id: String,
+    /// 带上 `proof` 之后的完整内容 —— 对端验的就是这一份。
+    pub value: Value,
+    /// 同一条 `proof` 单独拿出来,方便直接嵌进别处。
+    pub proof: Value,
+}
+
 /// 一次 X25519 协商的结果:**只有这一次**,服务端不存第二份。
 ///
 /// 没有 `Debug`、没有 `Serialize`、没有把字节拷出去的访问器 —— 共享密钥在
@@ -223,6 +233,9 @@ impl Refusal {
                 Self::Other(code.into())
             }
             "ECDH_INVALID" | "ECDH_KEY_INVALID" | "ECDH_PEER_INVALID" | "ECDH_PEER_FORBIDDEN" => {
+                Self::Other(code.into())
+            }
+            "PROOF_INVALID" | "PROOF_DOMAIN_INVALID" | "PROOF_CHALLENGE_INVALID" => {
                 Self::Other(code.into())
             }
             _ => return None,
@@ -331,6 +344,50 @@ impl Client {
             payload: payload.iter().map(|b| format!("{b:02x}")).collect(),
         })?;
         from_signed(data, "purpose signature")
+    }
+
+    /// 对象 proof。`object` 是任意 JSON 对象;`proof` 的 purpose 固定是
+    /// `assertionMethod`,用的是 grant 上那把 `device_assertion` 键。
+    ///
+    /// 服务端没开 `sign_object_proof` 时拒绝;先看
+    /// `capabilities().supports("SIGN_OBJECT_PROOF")`。
+    pub fn sign_object_proof(
+        &self,
+        grant_id: &str,
+        request_id: &str,
+        object: Value,
+    ) -> Result<SignedProof> {
+        let data = self.call(DataRequest::SignObjectProof {
+            grant_id: grant_id.to_owned(),
+            request_id: request_id.to_owned(),
+            object,
+        })?;
+        from_signed(data, "object proof")
+    }
+
+    /// 文档 proof。`document` 必须**就是**这把键的文档(`id` 等于键的 DID,
+    /// 而键还挂在文档里),服务端在扣配额之前就判这一条。
+    ///
+    /// `proof_purpose` 缺省 `assertionMethod`;`domain`/`challenge` 会原样进
+    /// 签名基,给了就得在验签方那边同样给。
+    pub fn sign_document_proof(
+        &self,
+        grant_id: &str,
+        request_id: &str,
+        document: Value,
+        proof_purpose: Option<&str>,
+        domain: Option<&str>,
+        challenge: Option<&str>,
+    ) -> Result<SignedProof> {
+        let data = self.call(DataRequest::SignDocumentProof {
+            grant_id: grant_id.to_owned(),
+            request_id: request_id.to_owned(),
+            document,
+            proof_purpose: proof_purpose.map(str::to_owned),
+            domain: domain.map(str::to_owned),
+            challenge: challenge.map(str::to_owned),
+        })?;
+        from_signed(data, "document proof")
     }
 
     /// 一次 X25519 协商。`peer` 是对方的 32 字节公钥,结果只回这一次。
@@ -483,6 +540,7 @@ mod tests {
             ("OPERATION_DISABLED", Refusal::Unsupported),
             ("GRANT_RENEWALS_EXHAUSTED", Refusal::Exhausted),
             ("ORIGIN_INVALID", Refusal::Other("ORIGIN_INVALID".into())),
+            ("PROOF_INVALID", Refusal::Other("PROOF_INVALID".into())),
         ] {
             let error = KeydError::Permission(code.into());
             assert_eq!(Refusal::of(&error), Some(expected), "code {code}");
@@ -540,6 +598,23 @@ mod tests {
         let signed: SignedPurpose = from_signed(data, "purpose signature").unwrap();
         assert_eq!(signed.public_multibase, "z6Mkexample");
         assert_eq!(signed.purpose["purpose"], "device_assertion");
+    }
+
+    #[test]
+    fn a_proof_reply_carries_the_signed_value_and_the_proof() {
+        let data = serde_json::json!({
+            "request_id": "5d0a0c1e-0000-4000-8000-000000000004",
+            "state": "completed",
+            "result": {
+                "request_id": "5d0a0c1e-0000-4000-8000-000000000004",
+                "value": {"id": "did:example:alice", "proof": {"proofValue": "zabc"}},
+                "proof": {"proofValue": "zabc"}
+            }
+        });
+        let signed: SignedProof = from_signed(data, "document proof").unwrap();
+        assert_eq!(signed.value["id"], "did:example:alice");
+        assert_eq!(signed.proof["proofValue"], "zabc");
+        assert_eq!(signed.value["proof"], signed.proof);
     }
 
     #[test]

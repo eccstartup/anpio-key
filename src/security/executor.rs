@@ -3,6 +3,7 @@ use super::ecdh::{EcdhRequest, SharedSecretReply};
 use super::http::CanonicalHttpRequest;
 use super::origin::{audit_options, OriginProof, SignedOrigin};
 use super::purpose::{PurposeRequest, SignedPurpose};
+use super::proofs::{DocumentProofRequest, ObjectProofRequest, SignedProof};
 use crate::crypto::hygiene::LockedBytes;
 use crate::error::{KeydError, Result};
 use crate::persistence::{
@@ -156,6 +157,70 @@ pub(crate) fn execute_purpose(
     )
 }
 
+/// `SIGN_OBJECT_PROOF` / `SIGN_DOCUMENT_PROOF`:daemon 把 `proof` 拼进调用方给的
+/// 对象或文档,返回整份带 proof 的东西。
+///
+/// 两条共用这一段:预留、扣配额、审计、缓存窗口一模一样,差别只在授权那一步
+/// 用什么键、签的什么形状。
+fn execute_proof(
+    db: &mut Database,
+    principal: &str,
+    request_id: &str,
+    reservation: Reservation,
+    clock: &dyn Clock,
+    backend: impl FnOnce(&KeyRecord, i64) -> Result<SignedProof>,
+) -> Result<RequestStatus> {
+    run(
+        db,
+        principal,
+        request_id,
+        reservation,
+        clock,
+        |key, created, _, _| {
+            let signed = backend(key, created)?;
+            Ok(Produced {
+                result: json!({
+                    "request_id":request_id,
+                    "value":signed.value,
+                    "proof":signed.proof,
+                }),
+                created_at: signed.created_at,
+                expires_at: signed.created_at.saturating_add(super::proofs::CACHE_SECONDS),
+                signature_base_digest: signed.signature_base_digest,
+                audit: Some(("proof", signed.options)),
+            })
+        },
+    )
+}
+
+pub(crate) fn execute_object_proof(
+    db: &mut Database,
+    principal: &str,
+    grant_id: &str,
+    request_id: &str,
+    request: &ObjectProofRequest,
+    clock: &dyn Clock,
+    backend: impl FnOnce(&KeyRecord, i64) -> Result<SignedProof>,
+) -> Result<RequestStatus> {
+    let start = clock.now()?;
+    let reservation = db.reserve_object_proof(principal, grant_id, request_id, request, start)?;
+    execute_proof(db, principal, request_id, reservation, clock, backend)
+}
+
+pub(crate) fn execute_document_proof(
+    db: &mut Database,
+    principal: &str,
+    grant_id: &str,
+    request_id: &str,
+    request: &DocumentProofRequest,
+    clock: &dyn Clock,
+    backend: impl FnOnce(&KeyRecord, i64) -> Result<SignedProof>,
+) -> Result<RequestStatus> {
+    let start = clock.now()?;
+    let reservation = db.reserve_document_proof(principal, grant_id, request_id, request, start)?;
+    execute_proof(db, principal, request_id, reservation, clock, backend)
+}
+
 /// `ECDH`:算一次共享密钥,交给调用方**一次**。
 ///
 /// 和上面几条路不同,它不走 [`run`]:`run` 的结果写进 `requests.result` 再读
@@ -282,6 +347,15 @@ fn run(
             clock.now()?,
         ),
         Some(("signing", options)) => db.complete_purpose(
+            principal,
+            request_id,
+            &produced.result,
+            validity,
+            &produced.signature_base_digest,
+            options.clone(),
+            clock.now()?,
+        ),
+        Some(("proof", options)) => db.complete_proof(
             principal,
             request_id,
             &produced.result,

@@ -16,7 +16,7 @@
 | 外部 SDK 高层热密钥解析 | `@connectx-sdk/core` 0.4.2 起兼容 | 更早版本仍不兼容；最低兼容版本 0.4.2 |
 | awiki JSON-RPC | Node v2 client 可按实际 RPC body 签名 | SDK 原生 ANP-02 body 不能直接当作 RPC envelope |
 
-awiki-cli-rs2 的 Rust 侧（`IdentitySigner`）**没有适配器**，今天能对上的只有结构化那两条：`http_signature_headers` ↔ `SIGN` 的 `Structured` 变体，`did_document`/`optional_did_document` ↔ `GET_DOCUMENT`。`sign_device_assertion` 从 P2 起有对应操作 `SIGN_PURPOSE`（每用途一个开关，默认关，见 §11.3/§11.7）；`ecdh` 从 P3 起有对应操作 `ECDH`（X25519 协商键由 `add-agreement-key` 生成，见 §11.3/§11.5）。其余接缝仍没有对应能力：`sign`/`sign_root` 只能落到默认关闭的 `Raw` 或 `Challenge`；`sign_object_proof`/`sign_document_proof` 在 socket 上没有请求类型（`REQUEST_TYPES` 不含）。登录/RPC 签名可以走 CLI 接缝。补齐这些缺口的接口形状已冻结在 §11：P1 的两条（`SIGN_ORIGIN_PROOF`、`RENEW_GRANT`）、P2 的 `SIGN_PURPOSE` 与 P3 的 `ECDH` 已经实现，其余仍在规划。
+awiki-cli-rs2 的 Rust 侧（`IdentitySigner`）**没有适配器**，今天能对上的只有结构化那两条：`http_signature_headers` ↔ `SIGN` 的 `Structured` 变体，`did_document`/`optional_did_document` ↔ `GET_DOCUMENT`。`sign_device_assertion` 从 P2 起有对应操作 `SIGN_PURPOSE`（每用途一个开关，默认关，见 §11.3/§11.7）；`ecdh` 从 P3 起有对应操作 `ECDH`（X25519 协商键由 `add-agreement-key` 生成，见 §11.3/§11.5）；`sign_object_proof`/`sign_document_proof` 从 P5 起各有对应操作（`SIGN_OBJECT_PROOF`/`SIGN_DOCUMENT_PROOF`，同样默认关，见 §11.3）。其余接缝仍没有对应能力：`sign`/`sign_root` 只能落到默认关闭的 `Raw` 或 `Challenge`。登录/RPC 签名可以走 CLI 接缝。补齐这些缺口的接口形状已冻结在 §11：P1 的两条（`SIGN_ORIGIN_PROOF`、`RENEW_GRANT`）、P2 的 `SIGN_PURPOSE`、P3 的 `ECDH` 与 P5 的两条 proof 都已实现。`sign_root` 本身不单独开一路——根能做的事是 §7.4 的管理变更（重发文档、撤销设备），不走数据面。
 
 正式 Linux release 且配置显式为 `linux-protected-v1` 时支持保护声明。调试、preview、macOS、软件硬件替身及 seed-export 不在声明内。同 UID 不受限 Agent 之间没有隔离。
 
@@ -379,9 +379,9 @@ anpio-key mcp --config /etc/anpio-key/service.json
 
 新增对端、SDK 版本、平台或策略形态时重新验证相应路径，不能沿用历史记录扩大支持范围。
 
-## 11. 强对接契约（P1–P4 的管理平面已实现，P5 规划中）
+## 11. 强对接契约（P1–P5 数据面已实现）
 
-本节冻结与 awiki-cli-rs2、anpio-cli 强对接的接口形状。**P1 已实现**：`SIGN_ORIGIN_PROOF`、`RENEW_GRANT`、session grant、策略 v2、能力协商；**P2 已实现**：`device_signing` 角色与 `SIGN_PURPOSE`（每用途一个开关）；**P3 已实现**：X25519 `key_agreement` 角色、`ECDH`（默认关）、`add-agreement-key`；**P4 已实现**：一个助记词恢复四类密钥、`keygen` 一次性显示 24 词、管理平面的 `ReissueDocument` 与 `IssueDeviceKeys`（§7.4），§11.8 末尾是客户端侧还差的部分。P5 的部分仍只有形状。每阶段结束更新本节的状态列和 §1 的兼容表。已冻结的名字、字节和版本号不再改；新增能力只能追加新名字。
+本节冻结与 awiki-cli-rs2、anpio-cli 强对接的接口形状。**P1 已实现**：`SIGN_ORIGIN_PROOF`、`RENEW_GRANT`、session grant、策略 v2、能力协商；**P2 已实现**：`device_signing` 角色与 `SIGN_PURPOSE`（每用途一个开关）；**P3 已实现**：X25519 `key_agreement` 角色、`ECDH`（默认关）、`add-agreement-key`；**P4 已实现**：一个助记词恢复四类密钥、`keygen` 一次性显示 24 词、管理平面的 `ReissueDocument` 与 `IssueDeviceKeys`（§7.4）；**P5 已实现**：`SIGN_OBJECT_PROOF`、`SIGN_DOCUMENT_PROOF`（各自默认关），根的操作仍全部留在管理平面（§11.7 末尾、§7.4）。§11.8 末尾是客户端侧还差的部分。每阶段结束更新本节的状态列和 §1 的兼容表。已冻结的名字、字节和版本号不再改；新增能力只能追加新名字。
 
 ### 11.1 三层接口
 
@@ -405,7 +405,7 @@ anpio-key mcp --config /etc/anpio-key/service.json
  "grant_kinds":["request","session"]}
 ```
 
-`capability_schema` 是这组字段自己的版本。`operations` 里必有基线六个和 `RENEW_GRANT`；`SIGN_ORIGIN_PROOF`、`SIGN_PURPOSE`、`ECDH` 只在各自开关打开时出现（关着时发这些操作会收到 `OPERATION_DISABLED`）。P4–P5 的操作按阶段追加。客户端按 `operations` 里有没有某个名字决定能不能用，不按 `protocol_version` 或构建版本猜；名字不在列表里就是该项不支持，不能降级到别的操作。列表只增不减。
+`capability_schema` 是这组字段自己的版本。`operations` 里必有基线六个和 `RENEW_GRANT`；`SIGN_ORIGIN_PROOF`、`SIGN_PURPOSE`、`ECDH`、`SIGN_OBJECT_PROOF`、`SIGN_DOCUMENT_PROOF` 只在各自开关打开时出现（关着时发这些操作会收到 `OPERATION_DISABLED`）。客户端按 `operations` 里有没有某个名字决定能不能用，不按 `protocol_version` 或构建版本猜；名字不在列表里就是该项不支持，不能降级到别的操作。列表只增不减。
 
 `signing_purposes` 是 `SIGN_PURPOSE` 的细分开关（P2 起）：只有列出来的用途能签，没列的用途发过去就是 `OPERATION_DISABLED`（用途名本身不认识则是 `PURPOSE_INVALID`）。它和 `purposes` 不是一回事：后者是策略的 purpose，前者是一次 `SIGN_PURPOSE` 的用途标签。
 
@@ -420,8 +420,8 @@ anpio-key mcp --config /etc/anpio-key/service.json
 | `SIGN_ORIGIN_PROOF` | `grant_id`、`request_id`、`origin` = `{method, meta, body, expires?, nonce?}` | `{request_id, content_digest, signature_input, signature, created, expires}` | P1 已实现 |
 | `RENEW_GRANT` | `grant_id`、`expiry` | 续期后的完整 grant（含新的 `expiry`、`renewals`） | P1 已实现 |
 | `SIGN_PURPOSE` | `grant_id`、`request_id`、`purpose`、`domain`（只有 `application_assertion` 给）、`payload`（hex，≤4096 字节） | `{request_id, signature, public_multibase, purpose}` | P2 已实现 |
-| `SIGN_OBJECT_PROOF` | `value`（对象）、`proof_purpose` | `{proof}`（整份带 proof 的对象） | P5 |
-| `SIGN_DOCUMENT_PROOF` | 完整文档、`proof_purpose` | `{document}` | P5 |
+| `SIGN_OBJECT_PROOF` | `grant_id`、`request_id`、`object`（JSON 对象） | `{request_id, value, proof}` —— `value` 是带上 `proof` 的整份对象 | P5 已实现 |
+| `SIGN_DOCUMENT_PROOF` | `grant_id`、`request_id`、`document`（完整文档）、`proof_purpose`（可省，缺省 `assertionMethod`）、`domain`、`challenge`（都可省） | `{request_id, value, proof}` —— `value` 是带上 `proof` 的整份文档 | P5 已实现 |
 | `ECDH` | `peer`（32 字节 hex X25519 公钥） | `{shared_secret, peer_fingerprint}` | P3 已实现 |
 
 `SIGN_ORIGIN_PROOF` 的待签事实是 `{method, meta, body}` 这个对象，**不是**一条 HTTP 请求：没有 URL、没有 header，逻辑目标 URI 由 `meta.target.{kind,did}` 决定（`kind` ∈ `agent`/`group`/`service`）。`created` 一律用 daemon 的钟；`expires` 可省，给了就必须落在 300 秒内。签名基、`signature_input`、`signature` 全由 daemon 拼，调用方只给事实，不能覆盖 `did`/`kid`/`key_id`/`signature_profile`。`expires` 在没给时就是 `null`。
@@ -430,7 +430,14 @@ anpio-key mcp --config /etc/anpio-key/service.json
 
 `SIGN_PURPOSE` 是设备断言：签的是调用方给的字节，没有任何 daemon 自己拼的签名基。唯一的例外是 `application_assertion`——上游 `anp_identity` 在这一步给载荷加了一段域前缀（`anp.identity.application-assertion.v1\0` + u16 BE 域长 + 域 + payload），daemon 必须逐字节照做，客户端按同样的规则验签。`device_assertion` 不加任何前缀，`domain` 也不许给。`purpose` 取值只有 `device_assertion`、`application_assertion`；请求签名不在这里，走 `SIGN_HTTP` / `SIGN_ORIGIN_PROOF`。
 
-`SIGN_OBJECT_PROOF`/`SIGN_DOCUMENT_PROOF` 只接受 `id == did`、`verificationMethod == kid` 的输入，cryptosuite 固定，不接受调用方指定。
+`SIGN_OBJECT_PROOF`/`SIGN_DOCUMENT_PROOF` 是"daemon 把 proof 拼进调用方给的东西"：调用方给对象或完整文档，**键不在请求里**（由 grant 决定），`verificationMethod` 由 daemon 用 `{did}#{fragment}` 拼、调用方写不进来，`created` 用 daemon 的钟（调用方要的时刻就是返回的 proof 里那一个）。两条的编码各自冻结，都是上游 `anp::proof` 的产物：
+
+- **对象 proof**：`prepare_object_proof`/`complete_object_proof`，purpose 固定 `assertionMethod`，`type` = `DataIntegrityProof`，`cryptosuite` = `eddsa-jcs-2022`，`proofValue` = multibase base58btc（`z` 前缀）。只接受绑了 `device_assertion` 的键——一把 `application_assertion` 的键借这条路能签的对象形状更宽，等于自己给自己扩权。
+- **文档 proof**：`prepare_w3c_proof`/`complete_w3c_proof`，`type`/`cryptosuite` 同上，purpose 由调用方在 `assertionMethod`/`authentication` 里选（缺省前者），可选 `domain`/`challenge`（非空、≤256 字节、全 `is_ascii_graphic`，否则 `PROOF_DOMAIN_INVALID`/`PROOF_CHALLENGE_INVALID`）。上游交出来的是裸 base64url，daemon 转成与发布文档同一种 `z`+base58btc 字母表再返回——不转的话客户端拿到的那条与它自己 `did.json` 上的对不上。
+
+文档 proof 只签**属于这把键的文档**，三条都要过，否则是 `PROOF_INVALID`：① `id` 等于键的 DID；② 文档锚在这个 DID 上（`e1_`/`k1_` 段编的是绑定键的指纹，`verificationMethod` 里得真有那把键）；③ 请求要用的 `{did}#{fragment}` 正是这次授权的键，且还挂在文档里。②不看文档自带的 `proof`——调用方交上来的常是刚改过、要去重新签的文档，它要么没有 proof，要么还挂着上一条。这三条在**扣配额之前**判，所以一份不合规的文档是明确的 `PROOF_INVALID`，不会留下 `OUTCOME_UNKNOWN`。
+
+去重按各自的域算摘要：对象摘掉顶层 `proof` 后规范化；文档再额外并入 `proof_purpose`/`domain`/`challenge`。同一个 `request_id` 换了其中任何一项都是另一个请求，重发会撞 `REQUEST_ID_CONFLICT` 而不是命中缓存。结果在库里最多留 300 秒（`expires_at = created_at + 300`），完成事件记的是证明的形状（purpose/proof type/cryptosuite/verificationMethod/created/domain/challenge）与两端摘要（`document_bytes`、`document_digest`），**不记对象或文档正文**。
 
 `ECDH` 是**唯一一个把秘密输出给调用方的操作**：单次、短到期、grant 内绑定 peer 白名单；审计记 `peer_fingerprint` 和 grant，**不记共享密钥**。没有 grant 的 `ECDH` 直接拒绝，不存在"只查公钥不协商"的路径。共享密钥**不落库**：`requests.result` 永远是 NULL，同一个 `request_id` 重放得到的是 `completed` + 空结果（客户端翻成 `OUTCOME_UNKNOWN`），不是同一把密钥的第二次交付。低阶 peer（共享密钥退化成公开值）返回 `ECDH_PEER_INVALID`；peer 不在白名单是 `POLICY_DENIED`。
 
@@ -503,20 +510,24 @@ catalog 角色追加 `device_signing`、`key_agreement`（现有五个不变）�
 
 ### 11.7 默认关清单
 
-每个新签名路单独一个开关，默认关，开的时候单独一条审计。已实现三路：`SIGN_ORIGIN_PROOF`（`features.sign_origin_proof`）、`SIGN_PURPOSE`（`features.sign_purpose`，每个用途一个布尔量）、`ECDH`（`features.ecdh`，唯一一条会把秘密吐出来的路）。`SIGN_OBJECT_PROOF`、`SIGN_DOCUMENT_PROOF` 仍是待实现的开关。
+每个新签名路单独一个开关，默认关，开的时候单独一条审计。已实现五路：`SIGN_ORIGIN_PROOF`（`features.sign_origin_proof`）、`SIGN_PURPOSE`（`features.sign_purpose`，每个用途一个布尔量）、`ECDH`（`features.ecdh`，唯一一条会把秘密吐出来的路）、`SIGN_OBJECT_PROOF`（`features.sign_object_proof`）、`SIGN_DOCUMENT_PROOF`（`features.sign_document_proof`）。
 
 `SIGN_PURPOSE` 的开关是逐用途的，列出来的才有，没列出来或整段缺省都是关：
 
 ```json
-{"features":{"sign_origin_proof":true,"sign_purpose":{"device_assertion":true},"ecdh":true}}
+{"features":{"sign_origin_proof":true,"sign_purpose":{"device_assertion":true},"ecdh":true,"sign_object_proof":true,"sign_document_proof":true}}
 ```
 
-三路开关各自在启动时往审计链追加一条：`{"event":"FEATURES","sign_origin_proof":…}`、每个开着的用途一条 `{"event":"SIGN_PURPOSE_ENABLED","purpose":…}`、`ECDH` 一条 `{"event":"ECDH_ENABLED"}`。关着时该操作不出现在 `operations` 里（`signing_purposes` 相应为空），发了就是 `OPERATION_DISABLED`，事后从审计能回答"这版服务开过哪些签名路"。开关只决定数据面收不收这个操作，不改变 `SIGN_HTTP` 的行为。开一路不带开另一路：三个开关互不牵连，配的是哪路就只多哪路。
+各路开关各自在启动时往审计链追加一条：`{"event":"FEATURES","sign_origin_proof":…}`、每个开着的用途一条 `{"event":"SIGN_PURPOSE_ENABLED","purpose":…}`、`ECDH` 一条 `{"event":"ECDH_ENABLED"}`、各一条 `{"event":"SIGN_OBJECT_PROOF_ENABLED"}` 与 `{"event":"SIGN_DOCUMENT_PROOF_ENABLED"}`。关着时该操作不出现在 `operations` 里（`signing_purposes` 相应为空），发了就是 `OPERATION_DISABLED`，事后从审计能回答"这版服务开过哪些签名路"。开关只决定数据面收不收这个操作，不改变 `SIGN_HTTP` 的行为。开一路不带开另一路：各路开关互不牵连，配的是哪路就只多哪路。
 
-`signing_available=true` 不表示这些路开着，客户端仍以 `operations` 为准。**根的管理操作**（换设备、轮换根、注册）只在管理平面，要求在场（SE 租约或等价物）。数据面唯一能用 root 键的是 `SIGN_DOCUMENT_PROOF`，且它的 grant 只能由管理平面签发——数据面自己没有任何途径造出 root 授权。
+`signing_available=true` 不表示这些路开着，客户端仍以 `operations` 为准。**根的管理操作**（换设备、重发文档、撤销设备、注册）只在管理平面，要求在场（SE 租约或等价物）：签名发生在**带凭据的完成步**，批准时算过的输入在完成时逐字节复核。数据面唯一能用 root 键的是 `SIGN_DOCUMENT_PROOF`，且它的 grant 只能由管理平面签发——数据面自己没有任何途径造出 root 授权。所以"换一台设备""改自己的文档"这两件事，客户端全程只交公开输入（公钥、要加/要撤的 `{did}#{fragment}`），root 私钥一个字节都不出 daemon。
+
+`e1_` 身份里 **DID 就是根公钥的指纹**，所以不存在"原地换根、DID 不变"的操作：换根就是换身份。要换根时走的是新身份（`keygen` 或 `import-mnemonic`）+ 在旧身份上撤销旧设备，而不是把新私钥交给客户端去重签。这条边界不是实现缺口，是 `e1_` 编码本身的性质。
 
 ### 11.8 客户端对接要求
 
 awiki-cli-rs2 的适配器不在本仓库，但要满足：用 async `IdentityCustody` 那条接缝，不走 `ProviderIdentitySigner`（它对 `sign`/`sign_root`/`ecdh` 一律 `PermissionDenied`）；每条消息的 origin proof、每个 KeyPackage 的设备断言、每个 secure-direct 会话的 ECDH 各对应 §11.3 一个操作。`anpio-cli` 的 `custody.rs` 从子进程 `document`/`sign` 扩到同一批操作，参数保持管理员固定、不接受调用方覆盖 config/socket/did/kid。
 
 P4 的验收还有客户端那一半没做：这两份适配器都要把本地私钥交进 daemon（走 §7.4 的入组或 `import-mnemonic`），改完之后客户端目录里不再有任何私钥文件，而登录、发消息、建会话三条路都仍然正常。这一步要在各自仓库里跑，`anpio-key` 这边能提供的只是 §11.3 的数据面操作与 §7.4 的管理变更。
+
+P5 的客户端那一半同理：`sign_object_proof`/`sign_document_proof` 这两个接缝改走 §11.3 的两条操作，客户端不再自己拼 proof、也不再为改文档去碰 root 私钥。设备入组与撤销按 §7.4 的四步走，客户端只交公开输入。

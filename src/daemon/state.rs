@@ -639,6 +639,36 @@ impl DaemonState {
         })
     }
 
+    /// 对象 proof。键由 grant 决定,`created` 由执行器给 —— 见
+    /// [`crate::security::proofs`] 里那条"调用方定不了时刻"。
+    pub(crate) fn sign_object_proof(
+        &self,
+        uid: u32,
+        key_record: &crate::persistence::catalog::KeyRecord,
+        request: &crate::security::proofs::ObjectProofRequest,
+        created: i64,
+    ) -> Result<crate::security::proofs::SignedProof> {
+        self.with_vault(uid, |vault| {
+            vault.with_key(&key_record.kid, self.autolock, Instant::now(), |key| {
+                request.sign(key, &key_record.did, &key_record.kid, created)
+            })
+        })
+    }
+
+    pub(crate) fn sign_document_proof(
+        &self,
+        uid: u32,
+        key_record: &crate::persistence::catalog::KeyRecord,
+        request: &crate::security::proofs::DocumentProofRequest,
+        created: i64,
+    ) -> Result<crate::security::proofs::SignedProof> {
+        self.with_vault(uid, |vault| {
+            vault.with_key(&key_record.kid, self.autolock, Instant::now(), |key| {
+                request.sign(key, &key_record.kid, created)
+            })
+        })
+    }
+
     /// X25519 协商一次。共享密钥只从这条返回值交给执行器,**不进**
     /// `unlocked` 之外的任何地方 —— 尤其是不能落库。
     pub(crate) fn derive_shared_secret(

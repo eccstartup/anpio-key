@@ -51,6 +51,30 @@ pub enum DataRequest {
         /// 小写 hex,≤4096 字节。
         payload: String,
     },
+    /// 对象 proof。daemon 用设备签名键给一个任意 JSON 对象盖上
+    /// `assertionMethod` 的 DataIntegrityProof;键由 grant 决定。
+    #[serde(rename = "SIGN_OBJECT_PROOF")]
+    SignObjectProof {
+        grant_id: String,
+        request_id: String,
+        /// 待签对象。顶层 `proof` 会被摘掉,不参与签名。
+        object: serde_json::Value,
+    },
+    /// 文档 proof。签的是**整份**属于这把键的 DID 文档,不是随便一份 JSON。
+    #[serde(rename = "SIGN_DOCUMENT_PROOF")]
+    SignDocumentProof {
+        grant_id: String,
+        request_id: String,
+        /// 完整文档。`id` 必须是这把键的 DID,而键必须还挂在文档里。
+        document: serde_json::Value,
+        /// `assertionMethod`(缺省)或 `authentication`。
+        #[serde(default)]
+        proof_purpose: Option<String>,
+        #[serde(default)]
+        domain: Option<String>,
+        #[serde(default)]
+        challenge: Option<String>,
+    },
     /// X25519 协商。`peer` 是 32 字节公钥的小写 hex;共享密钥只回一次,不落库。
     #[serde(rename = "ECDH")]
     Ecdh {

@@ -49,6 +49,14 @@ pub struct Features {
     /// `ECDH`。唯一一条会吐出秘密的路径,默认关,单独一条 `ECDH_ENABLED` 审计。
     #[serde(default)]
     pub ecdh: bool,
+    /// `SIGN_OBJECT_PROOF`。默认关,开的时候多一条 `SIGN_OBJECT_PROOF_ENABLED`。
+    #[serde(default)]
+    pub sign_object_proof: bool,
+    /// `SIGN_DOCUMENT_PROOF`。默认关,开的时候多一条
+    /// `SIGN_DOCUMENT_PROOF_ENABLED`。它签的是整份身份文档,所以和
+    /// `sign_object_proof` 各走各的开关,不能一把开两路。
+    #[serde(default)]
+    pub sign_document_proof: bool,
 }
 
 /// 每用途一个开关。开哪一路审计里就多一条 `SIGN_PURPOSE_ENABLED`。

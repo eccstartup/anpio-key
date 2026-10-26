@@ -93,6 +93,44 @@ impl Database {
         })
     }
 
+    /// 对象 proof 的摘要按对象自己的域算,文档 proof 另外带上 purpose 与
+    /// domain/challenge —— 同一个 request_id 换了其中任何一项都算另一个请求。
+    pub fn reserve_object_proof(
+        &mut self,
+        principal: &str,
+        grant_id: &str,
+        id: &str,
+        request: &crate::security::proofs::ObjectProofRequest,
+        now: Time,
+    ) -> Result<Reservation> {
+        let digest = request.digest();
+        self.reserve(principal, grant_id, id, digest, "object-proof", now, |db| {
+            db.authorize_object_proof(principal, grant_id, now)
+        })
+    }
+
+    /// 文档 proof。文档对不对得上这把键由授权那一步判,所以走不到签名的请求
+    /// 不会留下一行 `outcome_unknown`。
+    pub fn reserve_document_proof(
+        &mut self,
+        principal: &str,
+        grant_id: &str,
+        id: &str,
+        request: &crate::security::proofs::DocumentProofRequest,
+        now: Time,
+    ) -> Result<Reservation> {
+        let digest = request.digest();
+        self.reserve(
+            principal,
+            grant_id,
+            id,
+            digest,
+            "document-proof",
+            now,
+            |db| db.authorize_document_proof(principal, grant_id, request, now),
+        )
+    }
+
     /// 同一个 request_id 重放拿到的是"做过"而不是那把密钥 —— 见
     /// [`Database::complete_ecdh`]。
     pub fn reserve_ecdh(
@@ -223,6 +261,29 @@ impl Database {
             validity,
             signature_digest,
             Some(("signing", options)),
+            now,
+        )
+    }
+    /// proof 的完成事件记下证明的形状(purpose/proofType/cryptosuite/
+    /// verificationMethod/created)与两端摘要,不记对象或文档正文。
+    #[allow(clippy::too_many_arguments)]
+    pub fn complete_proof(
+        &mut self,
+        principal: &str,
+        id: &str,
+        result: &Value,
+        validity: (i64, i64),
+        signature_digest: &str,
+        options: Value,
+        now: Time,
+    ) -> Result<()> {
+        self.complete(
+            principal,
+            id,
+            result,
+            validity,
+            signature_digest,
+            Some(("proof", options)),
             now,
         )
     }

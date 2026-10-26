@@ -89,9 +89,11 @@ fn role_for(purpose: super::policy::Purpose) -> Result<catalog::KeyRole> {
         Purpose::PurposeSigning => catalog::KeyRole::DeviceSigning,
         // 协商键是唯一一种 X25519 键,它不做别的。
         Purpose::Ecdh => catalog::KeyRole::KeyAgreement,
-        Purpose::ObjectProof | Purpose::DocumentProof | Purpose::Root => {
-            return Err(refused("GRANT_INVALID"))
-        }
+        // 对象 proof 是设备断言的一种形状;文档 proof 动的是身份本身,只有根能做。
+        Purpose::ObjectProof => catalog::KeyRole::DeviceSigning,
+        Purpose::DocumentProof => catalog::KeyRole::Root,
+        // 根的其余操作(换设备、轮换)只走管理平面,数据平面上一律没有 grant 形状。
+        Purpose::Root => return Err(refused("GRANT_INVALID")),
     })
 }
 
@@ -103,9 +105,9 @@ pub(super) fn operation_for(purpose: super::policy::Purpose) -> Result<&'static 
         Purpose::OriginProof => "SIGN_ORIGIN_PROOF",
         Purpose::PurposeSigning => "SIGN_PURPOSE",
         Purpose::Ecdh => "ECDH",
-        Purpose::ObjectProof | Purpose::DocumentProof | Purpose::Root => {
-            return Err(refused("GRANT_INVALID"))
-        }
+        Purpose::ObjectProof => "SIGN_OBJECT_PROOF",
+        Purpose::DocumentProof => "SIGN_DOCUMENT_PROOF",
+        Purpose::Root => return Err(refused("GRANT_INVALID")),
     })
 }
 
@@ -543,6 +545,58 @@ impl Database {
             now,
         )?;
         super::policy::evaluate_ecdh(content, request.peer())?;
+        Ok((g, key))
+    }
+
+    /// `SIGN_OBJECT_PROOF`。键必须绑的是 `device_assertion` —— 一把
+    /// `application_assertion` 的键借这条路能签的对象形状更宽,不这么判就等于
+    /// 让它自己给自己扩权。
+    pub fn authorize_object_proof(
+        &mut self,
+        principal_id: &str,
+        id: &str,
+        now: Time,
+    ) -> Result<(Grant, catalog::KeyRecord)> {
+        let (g, key, content) = self.authorize(
+            principal_id,
+            id,
+            super::policy::Purpose::ObjectProof,
+            "SIGN_OBJECT_PROOF",
+            now,
+        )?;
+        if key.purpose != crate::security::purpose::SigningPurpose::DeviceAssertion.name() {
+            return Err(refused("KEY_ROLE_FORBIDDEN"));
+        }
+        super::policy::evaluate_proof(
+            content,
+            super::policy::Purpose::ObjectProof,
+            crate::security::proofs::ProofPurpose::AssertionMethod.name(),
+        )?;
+        Ok((g, key))
+    }
+
+    /// `SIGN_DOCUMENT_PROOF`。除了策略,还要文档本身对得上这把键 ——
+    /// 这一步在**扣配额之前**,所以一份别人的文档是明确的拒绝,不是"可能签了"。
+    pub fn authorize_document_proof(
+        &mut self,
+        principal_id: &str,
+        id: &str,
+        request: &crate::security::proofs::DocumentProofRequest,
+        now: Time,
+    ) -> Result<(Grant, catalog::KeyRecord)> {
+        let (g, key, content) = self.authorize(
+            principal_id,
+            id,
+            super::policy::Purpose::DocumentProof,
+            "SIGN_DOCUMENT_PROOF",
+            now,
+        )?;
+        super::policy::evaluate_proof(
+            content,
+            super::policy::Purpose::DocumentProof,
+            request.purpose().name(),
+        )?;
+        request.verify_binding(&key.did, &key.kid)?;
         Ok((g, key))
     }
 
