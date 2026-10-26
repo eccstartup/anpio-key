@@ -16,6 +16,8 @@
 | 外部 SDK 高层热密钥解析 | `@connectx-sdk/core` 0.4.2 起兼容 | 更早版本仍不兼容；最低兼容版本 0.4.2 |
 | awiki JSON-RPC | Node v2 client 可按实际 RPC body 签名 | SDK 原生 ANP-02 body 不能直接当作 RPC envelope |
 
+awiki-cli-rs2 的 Rust 侧（`IdentitySigner`）**没有适配器**，今天能对上的只有结构化那两条：`http_signature_headers` ↔ `SIGN` 的 `Structured` 变体，`did_document`/`optional_did_document` ↔ `GET_DOCUMENT`。其余接缝没有对应能力：`sign`/`sign_root`/`sign_device_assertion` 只能落到默认关闭的 `Raw` 或 `Challenge`；`sign_object_proof`/`sign_document_proof` 在 socket 上没有请求类型（`REQUEST_TYPES` 不含）；`ecdh` 要 `keyAgreement` 的 X25519 私钥，本工具只造 Ed25519，进程里也没有这条协议路径。登录/RPC 签名可以走 CLI 接缝，端到端加密那半接不了。
+
 正式 Linux release 且配置显式为 `linux-protected-v1` 时支持保护声明。调试、preview、macOS、软件硬件替身及 seed-export 不在声明内。同 UID 不受限 Agent 之间没有隔离。
 
 ## 2. 管理端与 Agent 分工
