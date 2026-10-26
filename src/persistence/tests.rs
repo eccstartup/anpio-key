@@ -1395,7 +1395,7 @@ fn origin_policy(f: &mut Fixture, max_renewals: u32) -> String {
             version: 1,
             content: json!({"schema_version":2,"name":"im-origin","purpose":"origin-proof",
               "limits":{"max_duration_seconds":900,"max_uses":100000,"max_lifetime_seconds":86400,"max_renewals":max_renewals},
-              "content":{"methods":["direct.send"],"target_kinds":["agent"],"body":{"mode":"bounded","max_bytes":8192}}}),
+              "content":{"origin":"anp://agent","methods":["direct.send"],"paths":["*"],"body":{"mode":"bounded","max_bytes":8192}}}),
         },
     );
     id

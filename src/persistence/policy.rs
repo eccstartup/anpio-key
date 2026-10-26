@@ -69,16 +69,23 @@ struct HttpContent {
 
 /// `origin-proof` 的 content。
 ///
-/// 这里**没有** `origin`/`paths`:ANP 的 origin proof 待签的是一个
-/// `{method, meta, body}` 对象,目标由 `meta.target.{kind,did}` 给出,
-/// 既没有 URL 也没有路径。能收窄的只有方法名、目标类别和 body 大小。
+/// 待签的对象是 `{method, meta, body}`,daemon 从 `meta.target.{kind,did}`
+/// 拼出 logical target URI `anp://{kind}/{percent-encoded did}`,签名基里
+/// `@target-uri` 就是它。所以这里按 URL 的样子收窄:`origin` 是
+/// `anp://{kind}`, `paths` 里每一项是 URI 剩下的那一段(以 `/` 开头、
+/// 后面是编码过的 DID);整项写 `*` 表示该类别的任意 DID。
+/// `paths` 里的字节和待签 `@target-uri` 的后缀**逐字节**相等,不做模糊匹配。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct OriginContent {
+    origin: String,
     methods: Vec<String>,
-    target_kinds: Vec<String>,
+    paths: Vec<String>,
     body: Body,
 }
+
+/// `*` 是 `paths` 里唯一的通配写法。
+const WILDCARD_PATH: &str = "*";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -384,19 +391,23 @@ fn validate_origin(p: &OriginContent) -> Result<()> {
             && b.iter()
                 .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-".contains(b))
     };
+    let kind = p
+        .origin
+        .strip_prefix("anp://")
+        .filter(|kind| TARGET_KINDS.contains(kind))
+        .ok_or_else(invalid)?;
     if p.methods.is_empty()
         || p.methods.len() > 16
         || p.methods.iter().collect::<BTreeSet<_>>().len() != p.methods.len()
         || !p.methods.iter().all(method_ok)
-        || p.target_kinds.is_empty()
-        || p.target_kinds
+        || p.paths.is_empty()
+        || p.paths.len() > 64
+        || p.paths.iter().collect::<BTreeSet<_>>().len() != p.paths.len()
+        || (p.paths.len() > 1 && p.paths.iter().any(|path| path == WILDCARD_PATH))
+        || !p
+            .paths
             .iter()
-            .collect::<BTreeSet<_>>()
-            .len()
-            != p.target_kinds.len()
-        || p.target_kinds
-            .iter()
-            .any(|kind| !TARGET_KINDS.contains(&kind.as_str()))
+            .all(|path| path == WILDCARD_PATH || valid_origin_path(kind, path))
     {
         return Err(invalid());
     }
@@ -409,6 +420,34 @@ fn validate_origin(p: &OriginContent) -> Result<()> {
         return Err(invalid());
     }
     Ok(())
+}
+
+/// 一条 path 是不是能将来的 `@target-uri` 后缀。
+///
+/// 校验办法是反着算:解出 DID,再用上游拼 logical target URI 的同一个函数
+/// 重新编码,要求和策略里写下的 `origin + path` 逐字节相等。非规范编码
+/// (比如小写 `%3a` 或不该编码的字符)在这里就被拒,不会变成一条发布时
+/// 看起来正常、运行时永远匹配不上的策略。
+fn valid_origin_path(kind: &str, path: &str) -> bool {
+    let Some(encoded) = path.strip_prefix('/') else {
+        return false;
+    };
+    let Some(did) = percent_encoding::percent_decode_str(encoded)
+        .decode_utf8()
+        .ok()
+        .filter(|did| !did.is_empty() && did.len() <= 512 && !did.chars().any(char::is_control))
+    else {
+        return false;
+    };
+    let Ok(target_kind) = anp::proof::TargetKind::try_from(kind) else {
+        return false;
+    };
+    let Ok(uri) = anp::proof::build_logical_target_uri(target_kind, &did) else {
+        return false;
+    };
+    uri.strip_prefix("anp://")
+        .and_then(|rest| rest.strip_prefix(kind))
+        == Some(path)
 }
 
 pub(super) fn parse(content: Value) -> Result<Policy> {
@@ -479,8 +518,19 @@ pub(super) fn evaluate_origin(content: Value, proof: &OriginProof) -> Result<()>
     let Content::Origin(o) = &p.content else {
         return Err(denied());
     };
+    // 待签 `@target-uri` 用 daemon 拼签名基的同一个函数算,再把策略的
+    // `origin` 剥掉得到 suffix:匹配的就是签名基里那几个字节,不是另算一套。
+    let kind = anp::proof::TargetKind::try_from(proof.target_kind()).map_err(|_| denied())?;
+    let target = anp::proof::build_logical_target_uri(kind, proof.target_did()).map_err(|_| denied())?;
+    let path = target
+        .strip_prefix(&o.origin)
+        .filter(|path| path.starts_with('/'))
+        .ok_or_else(denied)?;
     if !o.methods.iter().any(|m| m == proof.method())
-        || !o.target_kinds.iter().any(|k| k == proof.target_kind())
+        || !o
+            .paths
+            .iter()
+            .any(|allowed| allowed == WILDCARD_PATH || allowed == path)
         || proof.body_len() > o.body.max_bytes as usize
         || (o.body.mode == "empty" && !proof.is_empty_body())
         || (o.body.mode == "bounded" && proof.is_empty_body())
@@ -506,8 +556,30 @@ mod tests {
     }
 
     fn origin_content() -> Value {
-        json!({"methods":["direct.send"],"target_kinds":["agent"],
+        json!({"origin":"anp://agent","methods":["direct.send"],"paths":["*"],
                "body":{"mode":"bounded","max_bytes":8192}})
+    }
+
+    /// 一条 path 在策略里长什么样:和 daemon 拼的 `@target-uri` 同一个后缀。
+    fn origin_path(kind: &str, did: &str) -> String {
+        let uri = anp::proof::build_logical_target_uri(
+            anp::proof::TargetKind::try_from(kind).unwrap(),
+            did,
+        )
+        .unwrap();
+        uri.strip_prefix(&format!("anp://{kind}")).unwrap().to_owned()
+    }
+
+    fn origin_proof(kind: &str, did: &str) -> OriginProof {
+        crate::security::origin::OriginProofRequest {
+            method: "direct.send".into(),
+            meta: json!({"target":{"kind":kind,"did":did}}),
+            body: json!({"text":"hi"}),
+            expires: None,
+            nonce: None,
+        }
+        .validate(1_000)
+        .unwrap()
     }
 
     /// v1 文档的规范化结果和以前逐字节一致。
@@ -540,9 +612,9 @@ mod tests {
         let wrong = origin_content();
         assert!(normalize(v2("http-authentication", wrong)).is_err());
 
-        let mut with_origin = origin_content();
-        with_origin["origin"] = json!("https://service.example.com");
-        assert!(normalize(v2("origin-proof", with_origin)).is_err());
+        let mut with_old_shape = origin_content();
+        with_old_shape["target_kinds"] = json!(["agent"]);
+        assert!(normalize(v2("origin-proof", with_old_shape)).is_err());
 
         assert!(normalize(v2("root", json!({}))).is_ok());
         assert!(normalize(v2("root", json!({"peers":[]}))).is_err());
@@ -550,15 +622,68 @@ mod tests {
 
     #[test]
     fn origin_content_only_accepts_real_targets_and_methods() {
+        let body = || json!({"mode":"bounded","max_bytes":8192});
+        let path = origin_path("agent", "did:wba:example.com:agent:alice");
         for broken in [
-            json!({"methods":[],"target_kinds":["agent"],"body":{"mode":"empty","max_bytes":0}}),
-            json!({"methods":["Direct.Send"],"target_kinds":["agent"],"body":{"mode":"empty","max_bytes":0}}),
-            json!({"methods":["direct.send"],"target_kinds":["robot"],"body":{"mode":"empty","max_bytes":0}}),
-            json!({"methods":["direct.send"],"target_kinds":["agent"],"body":{"mode":"bounded","max_bytes":0}}),
-            json!({"methods":["direct.send"],"target_kinds":["agent"],"body":{"mode":"bounded","max_bytes":65536}}),
+            json!({"origin":"anp://agent","methods":[],"paths":["*"],"body":body()}),
+            json!({"origin":"anp://agent","methods":["Direct.Send"],"paths":["*"],"body":body()}),
+            // origin 只认 origin proof 的那三种 kind,且拼法必须完全一样。
+            json!({"origin":"anp://robot","methods":["direct.send"],"paths":["*"],"body":body()}),
+            json!({"origin":"https://service.example.com","methods":["direct.send"],"paths":["*"],"body":body()}),
+            json!({"origin":"anp://agent/","methods":["direct.send"],"paths":["*"],"body":body()}),
+            // 旧的 target_kinds 形状不能再回来。
+            json!({"methods":["direct.send"],"target_kinds":["agent"],"body":body()}),
+            // path 必须是以 `/` 开头的规范编码 DID。
+            json!({"origin":"anp://agent","methods":["direct.send"],"paths":[],"body":body()}),
+            json!({"origin":"anp://agent","methods":["direct.send"],
+                   "paths":[path.trim_start_matches('/')],"body":body()}),
+            json!({"origin":"anp://agent","methods":["direct.send"],
+                   "paths":["/did:wba:example.com:agent:alice"],"body":body()}),
+            json!({"origin":"anp://agent","methods":["direct.send"],
+                   "paths":["/did%3awba%3Aexample.com%3Aagent%3Aalice"],"body":body()}),
+            // 通配符和具体 DID 摆在一起就还是没收窄;重复项也是笔误。
+            json!({"origin":"anp://agent","methods":["direct.send"],"paths":["*",path],"body":body()}),
+            json!({"origin":"anp://agent","methods":["direct.send"],"paths":[path,path],"body":body()}),
+            json!({"origin":"anp://agent","methods":["direct.send"],"paths":["*"],
+                   "body":{"mode":"bounded","max_bytes":0}}),
+            json!({"origin":"anp://agent","methods":["direct.send"],"paths":["*"],
+                   "body":{"mode":"bounded","max_bytes":65536}}),
         ] {
-            assert!(normalize(v2("origin-proof", broken)).is_err());
+            assert!(
+                normalize(v2("origin-proof", broken.clone())).is_err(),
+                "{broken} should be refused"
+            );
         }
+    }
+
+    /// origin 收窄到 kind 还是收窄到一个 DID,判定都对着签名基里的
+    /// `@target-uri` 那段字节,不是另算一套比较。
+    #[test]
+    fn origin_policy_narrows_to_a_kind_or_one_did() {
+        let alice = "did:wba:example.com:agent:alice";
+        let bob = "did:wba:example.com:agent:bob";
+        let any_agent = v2("origin-proof", origin_content());
+        assert!(evaluate_origin(any_agent.clone(), &origin_proof("agent", alice)).is_ok());
+        assert!(evaluate_origin(any_agent.clone(), &origin_proof("agent", bob)).is_ok());
+        // 通配符只在一条 path 里:`*` 说的是"这个 origin 的任意 DID",
+        // 不会把别的 kind 也放进来。
+        assert!(evaluate_origin(any_agent.clone(), &origin_proof("group", alice)).is_err());
+        assert!(evaluate_origin(any_agent, &origin_proof("service", alice)).is_err());
+
+        let mut narrowed = origin_content();
+        narrowed["paths"] = json!([origin_path("agent", bob)]);
+        let only_bob = v2("origin-proof", narrowed);
+        assert!(evaluate_origin(only_bob.clone(), &origin_proof("agent", bob)).is_ok());
+        assert!(evaluate_origin(only_bob.clone(), &origin_proof("agent", alice)).is_err());
+        // 只收窄到 DID 并不放宽 kind:同一个 DID 字符串换个 kind 就是另一个目标。
+        assert!(evaluate_origin(only_bob, &origin_proof("group", bob)).is_err());
+        // 方法名和 body 上限照旧各自把关。
+        let mut other_method = origin_content();
+        other_method["methods"] = json!(["direct.ack"]);
+        assert!(evaluate_origin(v2("origin-proof", other_method), &origin_proof("agent", bob)).is_err());
+        let mut tiny = origin_content();
+        tiny["body"] = json!({"mode":"bounded","max_bytes":4});
+        assert!(evaluate_origin(v2("origin-proof", tiny), &origin_proof("agent", bob)).is_err());
     }
 
     #[test]

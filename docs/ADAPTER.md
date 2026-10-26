@@ -429,8 +429,9 @@ catalog 角色追加 `device_signing`、`key_agreement`（现有五个不变）�
 {"schema_version":2,"name":"im-origin-proof-review","purpose":"origin-proof",
  "limits":{"max_duration_seconds":900,"max_uses":1000,
            "max_lifetime_seconds":86400,"max_renewals":16},
- "content":{"methods":["direct.send"],
-            "target_kinds":["agent"],
+ "content":{"origin":"anp://agent",
+            "methods":["direct.send"],
+            "paths":["/did%3Awba%3Aexample.com%3Ausers%3Aalice"],
             "body":{"mode":"bounded","max_bytes":8192}}}
 ```
 
@@ -441,13 +442,13 @@ catalog 角色追加 `device_signing`、`key_agreement`（现有五个不变）�
 | `purpose` | `content` |
 |---|---|
 | `http-authentication` | `origin`、`methods`、`paths`、`query`、`body`、`signature_profile`（v1 那六个） |
-| `origin-proof` | `methods`、`target_kinds`、`body` |
+| `origin-proof` | `origin`、`methods`、`paths`、`body` |
 | `purpose-signing` | `purposes` |
 | `ecdh` | `peers`（32 字节小写 hex 公钥列表） |
 | `object-proof`、`document-proof` | `proof_purposes` |
 | `root` | 空对象 `{}` |
 
-`origin-proof` 刻意**没有** `origin`/`paths`：待签的是 `{method, meta, body}` 对象，目标由 `meta.target.{kind,did}` 给出，既没有 URL 也没有路径；能收窄的只有方法名、目标类别和 body 大小，而 `bounded` 的 `max_bytes` 必须大于 0（否则那条策略拒绝一切）。已发布的 purpose 字段集不可改；加新 purpose 要连 `schema_version` 一起抬。`schema_version: 1` 的文档继续可读、判定不变。
+`origin-proof` 的 `origin` 是 `anp://agent` / `anp://group` / `anp://service` 之一，`paths` 里每一项是 logical target URI `anp://{kind}/{percent-encoded did}` 中 `anp://{kind}` 之后的那一段：以 `/` 开头、后面是 percent-encoded 的 DID，与待签 `@target-uri` 的后缀**逐字节**相等。发布时按上游同一个编码函数反算校验，非规范编码（该编码的没编码、小写 `%3a`）直接拒，不会留下一条永远匹配不上的策略。整项写 `"*"` 表示该 origin 下的任意 DID，只能单独出现；和具体 DID 并列就还是没收窄，按非法处理。`bounded` 的 `max_bytes` 必须大于 0（否则那条策略拒绝一切）。已发布的 purpose 字段集不可改；加新 purpose 要连 `schema_version` 一起抬。`schema_version: 1` 的文档继续可读、判定不变。
 
 ### 11.6 助记词：只进不出
 

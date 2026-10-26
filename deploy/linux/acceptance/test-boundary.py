@@ -16,6 +16,7 @@ import subprocess
 import sys
 import time
 import uuid
+import urllib.parse
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--binary', required=True)
@@ -407,9 +408,10 @@ except ConnectionResetError:pass  # Early refusal closes with unread request byt
     check('result' not in data_as('boundary-agent-a',{'operation':'GET_REQUEST_STATUS','request_id':lostop['request_id']})['data'],'restart suppresses old completed signature')
     check(data_as('boundary-agent-a',{**signing,'grant_id':lost,'request_id':str(uuid.uuid4())})['code'] in ['GRANT_INVALID','GRANT_EXHAUSTED'],'restart refuses old grant for new signing')
     origin_policy_id=str(uuid.uuid4())
+    origin_path='/'+urllib.parse.quote(fixture['did'],safe='')
     origin_policy={'schema_version':2,'name':'im-origin-proof','purpose':'origin-proof',
                    'limits':{'max_duration_seconds':600,'max_uses':1000,'max_lifetime_seconds':3600,'max_renewals':1},
-                   'content':{'methods':['direct.send'],'target_kinds':['agent'],'body':{'mode':'bounded','max_bytes':1024}}}
+                   'content':{'origin':'anp://agent','methods':['direct.send'],'paths':[origin_path],'body':{'mode':'bounded','max_bytes':1024}}}
     commit_change({'kind':'Catalog','change':{'action':'PublishPolicy','policy_id':origin_policy_id,'version':1,'content':origin_policy}})
     session=commit_change({'kind':'Grant','change':{'action':'CreateSession','principal_id':principal_a,'key_id':hot_key['key_id'],'policy_id':origin_policy_id,'policy_version':1,'expiry':int(time.time())+300,'max_uses':50}})['effect']['effect']['grant']
     check(session['kind']=='session' and session['max_renewals']==1 and session['renewals']==0,'session grant takes its renewal budget from the policy, not the caller')
@@ -428,6 +430,8 @@ except ConnectionResetError:pass  # Early refusal closes with unread request byt
     check(data_as('boundary-agent-b',origin_op)['code']=='GRANT_INVALID','origin proof stays bound to its principal')
     group_origin={**origin,'meta':{**origin['meta'],'target':{'kind':'group','did':fixture['did']}}}
     check(data_as('boundary-agent-a',{**origin_op,'request_id':str(uuid.uuid4()),'origin':group_origin})['code']=='POLICY_DENIED','origin policy gates the signed target kind')
+    other_did_origin={**origin,'meta':{**origin['meta'],'target':{'kind':'agent','did':'did:wba:example.com:someone-else'}}}
+    check(data_as('boundary-agent-a',{**origin_op,'request_id':str(uuid.uuid4()),'origin':other_did_origin})['code']=='POLICY_DENIED','origin policy gates the DID itself, not just its kind')
     big_origin={**origin,'body':{'text':'x'*2048}}
     check(data_as('boundary-agent-a',{**origin_op,'request_id':str(uuid.uuid4()),'origin':big_origin})['code']=='POLICY_DENIED','origin policy gates the signed body size')
     for bad in [{**origin,'method':'Direct.Send'},{**origin,'meta':{'profile':'p'}}]:
