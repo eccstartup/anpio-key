@@ -344,6 +344,10 @@ except ConnectionResetError:pass  # Early refusal closes with unread request byt
     check(data_as('boundary-agent-a',{**signing,'did':fixture['did']})['code']=='PROTOCOL_INVALID', 'data caller cannot override exact grant key')
     for operation in ['SIGN_RAW','SIGN_CHALLENGE','LOCK_ALL']:
         check(data_as('boundary-agent-a',{'operation':operation})['code']=='PROTOCOL_INVALID','v2 excludes '+operation)
+    origin={'method':'direct.send','meta':{'profile':'anp.direct.base.v1','sender_did':fixture['did'],'target':{'kind':'agent','did':fixture['did']},'message_id':'msg-p1'},'body':{'text':'hi'}}
+    check(data_as('boundary-agent-a',{'operation':'SIGN_ORIGIN_PROOF','grant_id':grant_id,'request_id':str(uuid.uuid4()),'origin':origin})['code']=='OPERATION_DISABLED','origin proof path is off until the deployment switch is on')
+    caps_off=data_as('boundary-agent-a',{'operation':'GET_CAPABILITIES'})['data']
+    check('SIGN_ORIGIN_PROOF' not in caps_off['operations'] and 'RENEW_GRANT' in caps_off['operations'] and caps_off['grant_kinds']==['request','session'],'capabilities hide a disabled signing path but still announce renewal')
     root_grant={**create_grant,'key_id':root_key['key_id']}
     source.write_text(json.dumps({'kind':'Grant','change':root_grant}));source.chmod(0o644)
     check(command('boundary-admin','admin','prepare','--file',str(source)).returncode!=0, 'root role cannot enter an Agent grant')
@@ -395,10 +399,51 @@ except ConnectionResetError:pass  # Early refusal closes with unread request byt
         if recovered['code']=='OK':break
         time.sleep(.02)
     check(recovered['data']['state']=='completed' and recovered['data'].get('result') is not None,'disconnect after send preserves completed result for explicit recovery')
+    # P1: the origin-proof path only exists once the deployment switch is on.
+    config['features']={'sign_origin_proof':True}
+    config_path.write_text(json.dumps(config))
     stop(process); process=start()
     check(data_as('boundary-agent-a',{'operation':'GET_GRANT_STATUS','grant_id':lost})['data']['state'] in ['revoked_restart','exhausted'],'restart never revives consumed grants')
     check('result' not in data_as('boundary-agent-a',{'operation':'GET_REQUEST_STATUS','request_id':lostop['request_id']})['data'],'restart suppresses old completed signature')
     check(data_as('boundary-agent-a',{**signing,'grant_id':lost,'request_id':str(uuid.uuid4())})['code'] in ['GRANT_INVALID','GRANT_EXHAUSTED'],'restart refuses old grant for new signing')
+    origin_policy_id=str(uuid.uuid4())
+    origin_policy={'schema_version':2,'name':'im-origin-proof','purpose':'origin-proof',
+                   'limits':{'max_duration_seconds':600,'max_uses':1000,'max_lifetime_seconds':3600,'max_renewals':1},
+                   'content':{'methods':['direct.send'],'target_kinds':['agent'],'body':{'mode':'bounded','max_bytes':1024}}}
+    commit_change({'kind':'Catalog','change':{'action':'PublishPolicy','policy_id':origin_policy_id,'version':1,'content':origin_policy}})
+    session=commit_change({'kind':'Grant','change':{'action':'CreateSession','principal_id':principal_a,'key_id':hot_key['key_id'],'policy_id':origin_policy_id,'policy_version':1,'expiry':int(time.time())+300,'max_uses':50}})['effect']['effect']['grant']
+    check(session['kind']=='session' and session['max_renewals']==1 and session['renewals']==0,'session grant takes its renewal budget from the policy, not the caller')
+    unlock_hot()
+    caps=data_as('boundary-agent-a',{'operation':'GET_CAPABILITIES'})['data']
+    check('SIGN_ORIGIN_PROOF' in caps['operations'] and 'origin-proof' in caps['purposes'],'capabilities announce the enabled origin path')
+    origin_op={'operation':'SIGN_ORIGIN_PROOF','grant_id':session['grant_id'],'request_id':str(uuid.uuid4()),'origin':origin}
+    proof=data_as('boundary-agent-a',origin_op)
+    check(proof['code']=='OK' and proof['data']['state']=='completed','origin proof signs over the real v2 socket')
+    result=proof['data']['result']
+    digest=result['content_digest']
+    check(result['signature_input'].startswith('sig1=(') and result['signature'].startswith('sig1=:') and digest.startswith('sha-256=:') and len(digest)==len('sha-256=::')+44 and result['expires'] is None and set(result)=={'request_id','content_digest','signature_input','signature','created','expires'},'origin proof returns header-ready RFC 9421 values and no key material')
+    check(data_as('boundary-agent-a',origin_op)['data']==proof['data'],'same origin request ID returns the identical cached proof without a second use')
+    check(data_as('boundary-agent-a',{**origin_op,'origin':{**origin,'body':{'text':'different'}}})['code']=='REQUEST_ID_CONFLICT','origin proof ID cannot be rebound to another body')
+    check(data_as('boundary-agent-a',{**origin_op,'request_id':lostop['request_id']})['code']=='REQUEST_ID_CONFLICT','HTTP and origin proofs share one request-id namespace')
+    check(data_as('boundary-agent-b',origin_op)['code']=='GRANT_INVALID','origin proof stays bound to its principal')
+    group_origin={**origin,'meta':{**origin['meta'],'target':{'kind':'group','did':fixture['did']}}}
+    check(data_as('boundary-agent-a',{**origin_op,'request_id':str(uuid.uuid4()),'origin':group_origin})['code']=='POLICY_DENIED','origin policy gates the signed target kind')
+    big_origin={**origin,'body':{'text':'x'*2048}}
+    check(data_as('boundary-agent-a',{**origin_op,'request_id':str(uuid.uuid4()),'origin':big_origin})['code']=='POLICY_DENIED','origin policy gates the signed body size')
+    for bad in [{**origin,'method':'Direct.Send'},{**origin,'meta':{'profile':'p'}}]:
+        check(data_as('boundary-agent-a',{'operation':'SIGN_ORIGIN_PROOF','grant_id':session['grant_id'],'request_id':str(uuid.uuid4()),'origin':bad})['code']=='ORIGIN_INVALID','malformed origin facts are refused before signing')
+    check(data_as('boundary-agent-a',{'operation':'SIGN_ORIGIN_PROOF','grant_id':session['grant_id'],'request_id':str(uuid.uuid4()),'origin':{**origin,'did':fixture['did']}})['code']=='PROTOCOL_INVALID','origin caller cannot bring its own exact key')
+    renewed=data_as('boundary-agent-a',{'operation':'RENEW_GRANT','grant_id':session['grant_id'],'expiry':int(time.time())+3000})['data']
+    check(renewed['renewals']==1 and renewed['expiry']>session['expiry'],'session renewal extends the same grant')
+    check(renewed['expiry']<=renewed['created_at']+origin_policy['limits']['max_lifetime_seconds'],'renewal clamps at the absolute lifetime ceiling')
+    check(data_as('boundary-agent-a',{'operation':'RENEW_GRANT','grant_id':session['grant_id'],'expiry':int(time.time())+3000})['code']=='GRANT_RENEWALS_EXHAUSTED','renewal budget from the policy is enforced')
+    backwards=commit_change({'kind':'Grant','change':{'action':'CreateSession','principal_id':principal_a,'key_id':hot_key['key_id'],'policy_id':origin_policy_id,'policy_version':1,'expiry':int(time.time())+300,'max_uses':50}})['effect']['effect']['grant']
+    check(data_as('boundary-agent-a',{'operation':'RENEW_GRANT','grant_id':backwards['grant_id'],'expiry':backwards['expiry']-10})['code']=='GRANT_INVALID','renewal never shortens a grant')
+    one_shot=commit_change({'kind':'Grant','change':{'action':'Create','principal_id':principal_a,'key_id':hot_key['key_id'],'policy_id':origin_policy_id,'policy_version':1,'expiry':int(time.time())+300,'max_uses':2}})['effect']['effect']['grant']
+    check(one_shot['max_renewals']==0 and data_as('boundary-agent-a',{'operation':'RENEW_GRANT','grant_id':one_shot['grant_id'],'expiry':int(time.time())+600})['code']=='GRANT_INVALID','a one-shot request grant cannot be renewed')
+    with sqlite3.connect(Path(config['state_dir'])/'state.sqlite') as database:
+        events=''.join(row[0].decode() for row in database.execute('SELECT event_data FROM audit_events')).replace(' ','')
+    check('"GRANT_RENEWED"' in events and '"event":"FEATURES"' in events and '"sign_origin_proof":true' in events,'renewals and the enabled switch are both on the audit chain')
     with sqlite3.connect(Path(config['state_dir'])/'state.sqlite') as database:
         check(database.execute("SELECT count(*) FROM audit_events WHERE CAST(event_data AS TEXT) LIKE '%LEGACY_AUDIT_LINKED%'").fetchone()[0]>=1,'SQLite history links verified legacy audit without rewriting it')
     policy['unexpected'] = True
@@ -630,10 +675,11 @@ try:
 finally:
     saved.rename(state_path)
 with sqlite3.connect(state_path) as database:
-    database.execute('PRAGMA user_version=4')
+    schema = database.execute('PRAGMA user_version').fetchone()[0]
+    database.execute(f'PRAGMA user_version={schema+1}')
 check(command('anpio-key', 'serve-protected').returncode != 0, 'newer schema stops startup')
 with sqlite3.connect(state_path) as database:
-    database.execute('PRAGMA user_version=3')
+    database.execute(f'PRAGMA user_version={schema}')
     database.execute("UPDATE audit_events SET event_data=x'00' WHERE seq=1")
 check(command('anpio-key', 'serve-protected').returncode != 0, 'corrupt audit stops startup')
 if args.systemd:
