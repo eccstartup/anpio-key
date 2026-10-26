@@ -25,6 +25,9 @@ OLD_LABEL = 'org.anp-keyd.local'
 NEW_LABEL = 'org.anpio-key.local'
 ACCOUNTS = [('_anpkeyd', '_anpio'), ('_anpkeyd_sign', '_anpio_sign'),
             ('_anpkeyd_admin', '_anpio_admin')]
+RECORDS = dict(ACCOUNTS)
+BINARY_OLD = OLD_BASE / 'bin/anp-keyd'
+BINARY_NEW = NEW_BASE / 'bin/anpio-key'
 ENV = {'PATH': '/usr/bin:/bin:/usr/sbin:/sbin'}
 
 
@@ -49,7 +52,12 @@ def rewrite_config(config):
 def rewrite_job(job):
     updated = dict(job)
     updated['Label'] = NEW_LABEL
-    updated['ProgramArguments'] = [rebase(arg) for arg in job.get('ProgramArguments', [])]
+    for key in ('UserName', 'GroupName'):
+        if key in updated:
+            updated[key] = RECORDS.get(updated[key], updated[key])
+    arguments = [str(BINARY_NEW) if arg == str(BINARY_OLD) else rebase(arg)
+                 for arg in job.get('ProgramArguments', [])]
+    updated['ProgramArguments'] = arguments
     if 'WorkingDirectory' in updated:
         updated['WorkingDirectory'] = rebase(updated['WorkingDirectory'])
     return updated
@@ -111,7 +119,10 @@ def main():
     with OLD_PLIST.open('rb') as handle:
         job = plistlib.load(handle)
     plan = account_plan({u.pw_name for u in pwd.getpwall()}, {g.gr_name for g in grp.getgrall()})
-    moves = [(str(OLD_BASE), str(NEW_BASE)), (str(OLD_PLIST), str(NEW_PLIST))]
+    moves = [(str(OLD_BASE), str(NEW_BASE))]
+    if os.path.lexists(BINARY_OLD):
+        moves.append((str(BINARY_OLD), str(BINARY_NEW)))
+    moves.append((str(OLD_PLIST), str(NEW_PLIST)))
     if args.user_home and os.path.lexists(args.user_home / '.anp-keyd'):
         moves.append((str(args.user_home / '.anp-keyd'), str(args.user_home / '.anpio-key')))
     print(json.dumps({'rename_records': plan, 'commands': rename_commands(plan), 'moves': moves,
@@ -127,7 +138,11 @@ def main():
     wait_for_sockets_gone(config)
     for command in rename_commands(plan):
         subprocess.run(command, env=ENV, check=True, timeout=20)
+    subprocess.run(['/usr/bin/dscacheutil', '-flushcache'], env=ENV, timeout=20)
     os.rename(OLD_BASE, NEW_BASE)
+    moved_binary = NEW_BASE / 'bin' / BINARY_OLD.name
+    if os.path.lexists(moved_binary):
+        os.rename(moved_binary, BINARY_NEW)
     staged = NEW_BASE / '.service.json.new'
     write_file(staged, json.dumps(rewrite_config(config), indent=2).encode(), 0o644)
     os.replace(staged, NEW_BASE / 'service.json')

@@ -132,11 +132,11 @@ from live model-provider acceptance.
 ## Migrating an installation made under the old name
 
 Installations created before the rename use `/Library/ANPKeyd`, the
-`org.anp-keyd.local` launchd label and the `_anpkeyd*` accounts. The migration
-tool rewrites all three; it is plan-only until `--apply`, and needs root for the
-apply. Renaming a Directory Services record keeps its UID/GID, so file ownership
-and group memberships survive, but the old names stop existing and there is no
-automatic rollback.
+`org.anp-keyd.local` launchd label, the `_anpkeyd*` accounts and a binary at
+`bin/anp-keyd`. The migration tool rewrites all four; it is plan-only until
+`--apply`, and needs root for the apply. Renaming a Directory Services record
+keeps its UID/GID, so file ownership and group memberships survive, but the old
+names stop existing and there is no automatic rollback.
 
 ```sh
 python3 deploy/macos/migrate-name.py --user-home "$HOME"
@@ -144,8 +144,9 @@ python3 deploy/macos/migrate-name.py --user-home "$HOME"
 ```
 
 It stops the job, waits for both sockets to disappear, renames the users/groups,
-moves the installation and plist, rewrites `service.json` and the plist, and
-bootstraps the renamed job. An incomplete or already-migrated tree is refused
+flushes the Directory Services cache, moves and renames the installation and its
+binary, rewrites `service.json` and the plist (including `UserName`/`GroupName`),
+and bootstraps the renamed job. An incomplete or already-migrated tree is refused
 rather than half-converted. Restarting locks keys and revokes grants, so re-unlock
 before signing.
 

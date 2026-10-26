@@ -37,7 +37,7 @@ class Config(unittest.TestCase):
 
 class Job(unittest.TestCase):
     def job(self):
-        return {'Label': 'org.anp-keyd.local', 'UserName': '_anpkeyd',
+        return {'Label': 'org.anp-keyd.local', 'UserName': '_anpkeyd', 'GroupName': '_anpkeyd',
                 'ProgramArguments': ['/Library/ANPKeyd/bin/anp-keyd', 'serve-protected',
                                      '--config', '/Library/ANPKeyd/service.json'],
                 'WorkingDirectory': '/Library/ANPKeyd', 'RunAtLoad': True}
@@ -48,12 +48,14 @@ class Job(unittest.TestCase):
     def test_program_and_working_directory_move(self):
         updated = module.rewrite_job(self.job())
         self.assertEqual(updated['ProgramArguments'],
-                         ['/Library/ANPIOKey/bin/anp-keyd', 'serve-protected',
+                         ['/Library/ANPIOKey/bin/anpio-key', 'serve-protected',
                           '--config', '/Library/ANPIOKey/service.json'])
         self.assertEqual(updated['WorkingDirectory'], '/Library/ANPIOKey')
 
-    def test_the_record_name_is_left_to_directory_services(self):
-        self.assertEqual(module.rewrite_job(self.job())['UserName'], '_anpkeyd')
+    def test_the_service_accounts_follow_the_record_rename(self):
+        updated = module.rewrite_job(self.job())
+        self.assertEqual(updated['UserName'], '_anpio')
+        self.assertEqual(updated['GroupName'], '_anpio')
 
     def test_the_input_is_not_mutated(self):
         job = self.job()
