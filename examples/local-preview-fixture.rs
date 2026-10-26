@@ -31,7 +31,21 @@ fn main() {
             .expect("independent upstream verification failed");
             println!("VERIFIED");
         }
-        _ => panic!("expected generate/generate-se NEW_DIRECTORY or verify with public JSON stdin"),
+        Some("verify-document") => {
+            let path = PathBuf::from(args.next().expect("signed document path"));
+            assert!(args.next().is_none());
+            let document: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).expect("read the signed document"))
+                    .expect("parse the signed document");
+            assert!(
+                anp::authentication::validate_did_document_binding(&document, true),
+                "independent upstream document verification failed"
+            );
+            println!("VERIFIED");
+        }
+        _ => panic!(
+            "expected generate/generate-se NEW_DIRECTORY, verify with public JSON stdin, or verify-document PATH"
+        ),
     }
 }
 fn generate(path: PathBuf, secure_enclave: bool) {

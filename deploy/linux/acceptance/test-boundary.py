@@ -553,6 +553,12 @@ except ConnectionResetError:pass  # Early refusal closes with unread request byt
     check(signed_document['code']=='OK' and signed_document['data']['state']=='completed','document proof signs the published identity document over the real v2 socket')
     signed_identity=signed_document['data']['result']['value']
     check(signed_identity['id']==fixture['did'] and signed_identity['proof']['proofValue'].startswith('z') and signed_identity['proof']['proofPurpose']=='assertionMethod' and signed_identity['proof']['verificationMethod']==root_key['kid'] and signed_identity['proof']['type']=='DataIntegrityProof' and signed_identity['proof']['cryptosuite']=='eddsa-jcs-2022','the root key signs its own document in the published multibase alphabet')
+    # Shape is not proof. Hand the socket's own output to upstream and let it
+    # decide whether the signing base was the one it verifies.
+    verifier=Path(args.binary).parent/'examples'/'local-preview-fixture'
+    signed_path=Path('/tmp/signed-did-document.json');signed_path.write_text(json.dumps(signed_identity))
+    verified=subprocess.run([str(verifier),'verify-document',str(signed_path)],capture_output=True,text=True)
+    check(verified.returncode==0 and 'VERIFIED' in verified.stdout,'an independent upstream verifier accepts the document the socket signed')
     authentication=data_as('boundary-agent-a',{**document_op,'request_id':str(uuid.uuid4()),'proof_purpose':'authentication'})
     check(authentication['code']=='OK' and authentication['data']['result']['value']['proof']['proofPurpose']=='authentication','the document takes the second declared purpose too')
     check(data_as('boundary-agent-a',{**document_op,'request_id':str(uuid.uuid4()),'proof_purpose':'capabilityInvocation'})['code']=='PROOF_INVALID','a purpose outside the vocabulary never reaches a key')
