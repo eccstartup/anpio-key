@@ -28,13 +28,13 @@ DEVICE_REPORT = {
     'group': 'tss', 'mode': '0660', 'sysfs': '/sys/class/tpm/tpm0', 'version_major': '2',
     'description': 'Example TPM', 'driver': 'tpm_tis', 'virtual_device_hint': False,
 }
-ACCOUNT = SimpleNamespace(pw_name='anp-keyd', pw_uid=321, pw_gid=321,
-                          pw_dir='/var/lib/anp-keyd')
+ACCOUNT = SimpleNamespace(pw_name='anpio-key', pw_uid=321, pw_gid=321,
+                          pw_dir='/var/lib/anpio-key')
 
 
 class DeviceFacts(unittest.TestCase):
     def test_dropin_template_keeps_the_device_boundary(self):
-        template = (HERE.parent / 'anp-keyd-tpm.conf.in').read_text()
+        template = (HERE.parent / 'anpio-key-tpm.conf.in').read_text()
         for line in ('PrivateDevices=no', 'DevicePolicy=closed',
                      'DeviceAllow=@TPM_DEVICE@ rw',
                      'SupplementaryGroups=@SUPPLEMENTARY_GROUPS@',

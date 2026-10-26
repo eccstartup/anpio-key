@@ -25,17 +25,17 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use anp_keyd::client::Client;
-use anp_keyd::crypto::hygiene::LockedBytes;
-use anp_keyd::crypto::kdf::Argon2Config;
-use anp_keyd::crypto::thumbprint::e1_segment;
-use anp_keyd::daemon::peer::PeerPolicy;
-use anp_keyd::daemon::state::{autolock_from_secs, DaemonState, Roots, SigningGates};
-use anp_keyd::daemon::wire::SignRequest;
-use anp_keyd::daemon::{server, ServerConfig};
-use anp_keyd::keystore::layout::KeydLayout;
-use anp_keyd::keystore::record::{KeyAlgorithm, KeyId};
-use anp_keyd::keystore::{device, store, wrap};
+use anpio_key::client::Client;
+use anpio_key::crypto::hygiene::LockedBytes;
+use anpio_key::crypto::kdf::Argon2Config;
+use anpio_key::crypto::thumbprint::e1_segment;
+use anpio_key::daemon::peer::PeerPolicy;
+use anpio_key::daemon::state::{autolock_from_secs, DaemonState, Roots, SigningGates};
+use anpio_key::daemon::wire::SignRequest;
+use anpio_key::daemon::{server, ServerConfig};
+use anpio_key::keystore::layout::KeydLayout;
+use anpio_key::keystore::record::{KeyAlgorithm, KeyId};
+use anpio_key::keystore::{device, store, wrap};
 use base64::Engine;
 
 /// 这把钥匙的种子。**这份测试里唯一的已知量** —— 没有它,下面每一条
@@ -191,11 +191,11 @@ impl Machine {
         // (`state::sign_structured` 里那一步,决定覆盖面的是它),没有文档
         // 就没有签名这条路 —— 而这条测试要的正是"签过一次之后",所以少了
         // 这一步会以一个看起来毫不相干的 `KeyNotFound` 失败。
-        let key = anp_keyd::keystore::unwrap::unlock(&wrapped, PASSPHRASE, &device_secret).unwrap();
-        let unsigned = anp_keyd::did::document::rebuild(&did, &key.verifying_key()).unwrap();
+        let key = anpio_key::keystore::unwrap::unlock(&wrapped, PASSPHRASE, &device_secret).unwrap();
+        let unsigned = anpio_key::did::document::rebuild(&did, &key.verifying_key()).unwrap();
         let document =
-            anp_keyd::did::document::sign_document(&unsigned, &key, &wrapped.id.kid).unwrap();
-        anp_keyd::did::document::verify_path_binding(&did, &document).unwrap();
+            anpio_key::did::document::sign_document(&unsigned, &key, &wrapped.id.kid).unwrap();
+        anpio_key::did::document::verify_path_binding(&did, &document).unwrap();
         store::write_did_document(&layout, &did, &document).unwrap();
         drop(key);
 
@@ -291,7 +291,7 @@ async fn the_seed_is_on_no_disk_the_agent_can_reach() {
 
     // 先说这次签名是真的成了 —— 否则下面"什么都没搜到"可能只是因为**什么
     // 都没发生**。
-    let headers = anp_keyd::client::parse_signed_headers(&signed).unwrap();
+    let headers = anpio_key::client::parse_signed_headers(&signed).unwrap();
     assert!(headers.contains_key("Signature"), "{headers:?}");
     anp::authentication::verify_http_message_signature(
         &machine.document,

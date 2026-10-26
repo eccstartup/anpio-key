@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'acceptance'))
 
 import acceptance_se
 
-LABEL = 'anp-keyd/e1_' + 'A' * 43
+LABEL = 'anpio-key/e1_' + 'A' * 43
 
 
 class KeyLoss(unittest.TestCase):
@@ -20,7 +20,7 @@ class KeyLoss(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.base = Path(self.directory.name)
         self.cleanup = self.base / 'Cleanup.app'
-        binary = self.cleanup / 'Contents' / 'MacOS' / 'anp-keyd'
+        binary = self.cleanup / 'Contents' / 'MacOS' / 'anpio-key'
         binary.parent.mkdir(parents=True)
         binary.write_bytes(b'cleanup')
         self.digest = hashlib.sha256(b'cleanup').hexdigest()

@@ -1,4 +1,4 @@
 # Validate with visudo -cf before installation. Exact command, NO arguments.
 # Keep the wrapper, binary and their parent directories root-owned/unwritable.
 Defaults:keyd-observer env_reset
-keyd-observer ALL=(anp-keyd) NOPASSWD: /usr/local/libexec/anp-keyd-audit-source ""
+keyd-observer ALL=(anpio-key) NOPASSWD: /usr/local/libexec/anpio-key-audit-source ""

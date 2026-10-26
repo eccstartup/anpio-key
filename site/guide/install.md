@@ -14,7 +14,7 @@
 - `--did-host` 是 DID 文档将来发布的域名；
 - `--target` 是 Agent 实际要访问的完整 HTTPS 地址，策略里的网站、路径和方法都从它得出。
 
-省略这两项时脚本会在终端里询问。执行中会要求输入几次口令（绑定钥匙、热钥匙、迁入受保护状态、解锁）。口令只由 anp-keyd 从终端读取，不经过 Agent、命令行参数或环境变量。
+省略这两项时脚本会在终端里询问。执行中会要求输入几次口令（绑定钥匙、热钥匙、迁入受保护状态、解锁）。口令只由 Anpio Key 从终端读取，不经过 Agent、命令行参数或环境变量。
 
 成功后打印 DID 文档地址、vault、grant、有效期、恢复材料目录和一段 Agent 请求示例。把 DID 文档上传到打印出的地址，把 grant 交给 Agent。
 
@@ -45,11 +45,11 @@
 装完检查（用管理员账号执行）：
 
 ```bash
-sudo systemctl status anp-keyd
-sudo -u operator /usr/local/libexec/anp-keyd admin \
-  --config /etc/anp-keyd/service.json status
-sudo -u operator /usr/local/libexec/anp-keyd probe \
-  --security --config /etc/anp-keyd/service.json
+sudo systemctl status anpio-key
+sudo -u operator /usr/local/libexec/anpio-key admin \
+  --config /etc/anpio-key/service.json status
+sudo -u operator /usr/local/libexec/anpio-key probe \
+  --security --config /etc/anpio-key/service.json
 ```
 
 `status` 里的 `signing_available=true` 表示钥匙已经解锁，可以签名。`protected_supported=true` 只说明部署支持范围，见下文。
@@ -59,12 +59,12 @@ sudo -u operator /usr/local/libexec/anp-keyd probe \
 
 ```bash
 cargo build --locked --release --features mcp
-sha256sum target/release/anp-keyd
-sudo python3 deploy/linux/install.py --binary target/release/anp-keyd \
+sha256sum target/release/anpio-key
+sudo python3 deploy/linux/install.py --binary target/release/anpio-key \
   --sha256 你核对过的SHA256 \
   --admin-user operator --agent-user agent-a --agent-user agent-b
 sudo systemctl daemon-reload
-sudo systemctl enable --now anp-keyd
+sudo systemctl enable --now anpio-key
 ```
 
 </details>
@@ -73,11 +73,11 @@ sudo systemctl enable --now anp-keyd
 
 ```bash
 cargo build --locked --release
-sha256sum target/release/anp-keyd
-sudo systemctl stop anp-keyd
+sha256sum target/release/anpio-key
+sudo systemctl stop anpio-key
 sudo python3 deploy/linux/install.py --update \
-  --binary target/release/anp-keyd --sha256 你核对过的SHA256
-sudo systemctl start anp-keyd
+  --binary target/release/anpio-key --sha256 你核对过的SHA256
+sudo systemctl start anpio-key
 ```
 
 更新不会覆盖配置和状态，也不会自动重启。旧 grant 在重启后失效。
@@ -122,7 +122,7 @@ macOS 预览不要求完整 Xcode、付费开发者会员或 Secure Enclave。�
 
 ```bash
 cargo install --path .
-anp-keyd probe
+anpio-key probe
 ```
 
 这不会建立服务/管理员/Agent 隔离，只适合临时身份和可信进程。用法见[五分钟跑通](/guide/quickstart)。

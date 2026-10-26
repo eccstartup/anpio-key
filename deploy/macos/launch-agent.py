@@ -57,7 +57,7 @@ def dedicated(path, uid, check_acl):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--config', type=Path, default=Path('/Library/ANPKeyd/service.json'))
+    parser.add_argument('--config', type=Path, default=Path('/Library/ANPIOKey/service.json'))
     parser.add_argument('--uid', type=int, required=True)
     parser.add_argument('--home', type=Path, required=True)
     parser.add_argument('--workspace', type=Path, required=True)

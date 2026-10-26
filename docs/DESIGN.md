@@ -1,10 +1,10 @@
-# anp-keyd 架构与安全设计
+# Anpio Key 架构与安全设计
 
 本文描述当前实现的职责边界、持久化语义和兼容约束。接入方法见 [ADAPTER](ADAPTER.md)，命令概览见 [README](../README.md)。
 
 ## 一、产品目标与威胁模型
 
-anp-keyd 在本机受保护服务中保管 did:wba Ed25519 密钥，让 Agent 使用有限签名授权。产品同时做到两件事：长期私钥不通过普通接口分发；调用者只能在批准的身份、请求范围、期限和次数内使用密钥。密钥已解锁本身不构成签名许可。
+Anpio Key 在本机受保护服务中保管 did:wba Ed25519 密钥，让 Agent 使用有限签名授权。产品同时做到两件事：长期私钥不通过普通接口分发；调用者只能在批准的身份、请求范围、期限和次数内使用密钥。密钥已解锁本身不构成签名许可。
 
 ### 1.1 两种部署边界
 
@@ -52,21 +52,21 @@ Agent 不能拥有 sudo、宿主 Docker socket、服务配置写权限或控制�
 ### 2.2 默认部署布局
 
 ```text
-/etc/anp-keyd/service.json        root 控制的信任配置
-/usr/local/libexec/anp-keyd       root 控制的程序
-/var/lib/anp-keyd/                服务 UID 拥有，0700
+/etc/anpio-key/service.json        root 控制的信任配置
+/usr/local/libexec/anpio-key       root 控制的程序
+/var/lib/anpio-key/                服务 UID 拥有，0700
   state.sqlite                   状态与审计真源，0600
   vaults/<vault_uuid>/
     device.secret
     keys/<thumbprint>.json       加密信封
     dids/<safe_did>.json          公开 DID 文档
   audit-export/events.jsonl       数据库审计投影
-/run/anp-keyd/                    分离的管理/签名 socket 子目录
+/run/anpio-key/                    分离的管理/签名 socket 子目录
 ```
 
-默认签名端点为 `/run/anp-keyd/sign/sign.sock`，管理端点为 `/run/anp-keyd/admin/admin.sock`；具体路径以安装器生成的配置为准。Agent 不能写程序、配置、socket 父目录或服务状态；daemon 也不能修改部署信任配置。vault 路径由受信配置及 UUID 决定，不从 Agent 提交的 DID、UID 或任意文件路径拼接。
+默认签名端点为 `/run/anpio-key/sign/sign.sock`，管理端点为 `/run/anpio-key/admin/admin.sock`；具体路径以安装器生成的配置为准。Agent 不能写程序、配置、socket 父目录或服务状态；daemon 也不能修改部署信任配置。vault 路径由受信配置及 UUID 决定，不从 Agent 提交的 DID、UID 或任意文件路径拼接。
 
-旧开发模式使用 `~/.anp-keyd`，其 `--system` 布局不等于 v2 受保护服务。普通本地生命周期命令拒绝直接操作托管目录，避免形成管理旁路。
+旧开发模式使用 `~/.anpio-key`，其 `--system` 布局不等于 v2 受保护服务。普通本地生命周期命令拒绝直接操作托管目录，避免形成管理旁路。
 
 ### 2.3 代码职责
 
@@ -78,7 +78,7 @@ Agent 不能拥有 sudo、宿主 Docker socket、服务配置写权限或控制�
 | `src/security/coordinator.rs`、`executor.rs` | 有界排队、撤销顺序、签名事务执行 |
 | `src/persistence/` | schema、授权、管理意图、恢复与事务审计 |
 | `src/keystore/`、`src/sign/`、`src/crypto/` | 信封、驻留密钥、签名及密码学实现 |
-| `src/mcp/protected.rs`、`adapters/keyd-v2.mjs` | 数据面适配，不自行授予权限 |
+| `src/mcp/protected.rs`、`adapters/anpio-key-v2.mjs` | 数据面适配，不自行授予权限 |
 
 ## 三、密钥格式与恢复兼容性
 

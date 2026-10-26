@@ -163,7 +163,7 @@ impl Session {
         let document = store::read_did_document(&self.layout, did).map_err(|error| {
             KeydError::Protocol(format!(
                 "no local document for {did} ({error}). These commands change the document \
-                 that is already there, so run `anp-keyd publish --did {did}` first — \
+                 that is already there, so run `anpio-key publish --did {did}` first — \
                  inventing one from the DID alone would silently drop anything the real \
                  one carries (hot keys, recovery keys, a migration record)"
             ))

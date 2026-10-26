@@ -50,8 +50,8 @@ class Management(unittest.TestCase):
     def setUp(self):
         self.saved = {name: vars(module).get(name) for name in ('ADMIN', 'BINARY', 'CONFIG')}
         module.ADMIN = 'operator'
-        module.BINARY = Path('/Library/ANPKeyd/bin/anp-keyd')
-        module.CONFIG = Path('/Library/ANPKeyd/service.json')
+        module.BINARY = Path('/Library/ANPIOKey/bin/anpio-key')
+        module.CONFIG = Path('/Library/ANPIOKey/service.json')
         self.addCleanup(self.restore)
 
     def restore(self):
@@ -64,8 +64,8 @@ class Management(unittest.TestCase):
     def test_management_never_runs_as_root(self):
         command = module.admin_command('status')
         self.assertEqual(command[:5], ['/usr/bin/sudo', '-n', '-u', 'operator', '--'])
-        self.assertEqual(command[5:], ['/Library/ANPKeyd/bin/anp-keyd', 'admin',
-                                       '--config', '/Library/ANPKeyd/service.json', 'status'])
+        self.assertEqual(command[5:], ['/Library/ANPIOKey/bin/anpio-key', 'admin',
+                                       '--config', '/Library/ANPIOKey/service.json', 'status'])
 
     def test_non_ok_reply_is_fatal(self):
         reply = NS(returncode=0, stdout='{"code":"ADMIN_REQUIRED"}\n', stderr='')
@@ -92,7 +92,7 @@ class ServiceRecovery(unittest.TestCase):
         with patch.object(module.subprocess, 'run', side_effect=[failed, started]) as called:
             self.assertTrue(module.restore_service())
         self.assertEqual(called.call_args_list[0].args[0][:3], ['/bin/launchctl', 'bootstrap', 'system'])
-        self.assertEqual(called.call_args_list[1].args[0][:3], ['/bin/launchctl', 'kickstart', 'system/org.anp-keyd.local'])
+        self.assertEqual(called.call_args_list[1].args[0][:3], ['/bin/launchctl', 'kickstart', 'system/org.anpio-key.local'])
 
     def test_failed_recovery_is_reported(self):
         failed = NS(returncode=1, stdout='', stderr='')

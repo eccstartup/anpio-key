@@ -2,11 +2,11 @@
 
 前提：管理员已经装好服务、登记身份、发布策略、创建 grant 并解锁了热钥匙。Agent 需要知道三样东西：
 
-- 受保护配置的路径，通常是 `/etc/anp-keyd/service.json`；
+- 受保护配置的路径，通常是 `/etc/anpio-key/service.json`；
 - `grant_id`；
 - 自己的系统账号（Agent 账号）。
 
-完整协议和管理变更见仓库 [ADAPTER.md](https://github.com/eccstartup/anp-keyd/blob/master/docs/ADAPTER.md)。
+完整协议和管理变更见仓库 [ADAPTER.md](https://github.com/eccstartup/anpio-key/blob/master/docs/ADAPTER.md)。
 
 ## 用 CLI 发请求
 
@@ -28,7 +28,7 @@ Agent 在自己的账号下，把一个请求保存成文件：
 ```
 
 ```bash
-anp-keyd data --config /etc/anp-keyd/service.json --file request.json
+anpio-key data --config /etc/anpio-key/service.json --file request.json
 ```
 
 每个新操作要自己生成一个 UUID，并在调用前把它和原始输入保存下来。重试时复用同一个 `request_id`；不要重复使用示例里的 UUID。
@@ -57,15 +57,15 @@ anp-keyd data --config /etc/anp-keyd/service.json --file request.json
 
 ## 用 Node
 
-仓库的 [adapters/keyd-v2.mjs](https://github.com/eccstartup/anp-keyd/blob/master/adapters/keyd-v2.mjs) 提供 `KeydV2Client`：
+仓库的 [adapters/keyd-v2.mjs](https://github.com/eccstartup/anpio-key/blob/master/adapters/keyd-v2.mjs) 提供 `AnpioKeyV2Client`：
 
 ```js
 import { randomUUID } from 'node:crypto'
-import { KeydV2Client } from './adapters/keyd-v2.mjs'
+import { AnpioKeyV2Client } from './adapters/anpio-key-v2.mjs'
 
-const client = new KeydV2Client({
-  config: '/etc/anp-keyd/service.json',
-  binary: '/usr/local/libexec/anp-keyd',
+const client = new AnpioKeyV2Client({
+  config: '/etc/anpio-key/service.json',
+  binary: '/usr/local/libexec/anpio-key',
 })
 const request = {
   grant_id: 管理员给的GrantId,
@@ -87,7 +87,7 @@ const response = await fetch(signed.url, {
 
 ## 用现有 SDK
 
-`keydV2Connector` 接到 `@connectx-sdk/core` 的 `createConfig` / `signRequest` 上，需要你提供一个稳定的 `requestId` 函数。高层热密钥解析要求 SDK 0.4.2 或更新；更早版本可能错误地要求热钥匙匹配根指纹。
+`anpioKeyV2Connector` 接到 `@connectx-sdk/core` 的 `createConfig` / `signRequest` 上，需要你提供一个稳定的 `requestId` 函数。高层热密钥解析要求 SDK 0.4.2 或更新；更早版本可能错误地要求热钥匙匹配根指纹。
 
 SDK 的 ANP-02 登录体和 awiki 的 JSON-RPC envelope 不是同一种 body。先构造正确的 body 再签名，不能签完再包装。
 
@@ -98,9 +98,9 @@ SDK 的 ANP-02 登录体和 awiki 的 JSON-RPC envelope 不是同一种 body。�
 ```json
 {
   "mcpServers": {
-    "anp-keyd": {
-      "command": "/usr/local/libexec/anp-keyd",
-      "args": ["mcp", "--config", "/etc/anp-keyd/service.json"]
+    "anpio-key": {
+      "command": "/usr/local/libexec/anpio-key",
+      "args": ["mcp", "--config", "/etc/anpio-key/service.json"]
     }
   }
 }
@@ -128,4 +128,4 @@ SDK 的 ANP-02 登录体和 awiki 的 JSON-RPC envelope 不是同一种 body。�
 
 服务重启后旧 grant 失效、钥匙锁定，需要管理员重新解锁和建权。文档在本地生成，不代表已经发布到网上。
 
-给 Agent 的操作约束见仓库 [skill](https://github.com/eccstartup/anp-keyd/tree/master/skills/anp-keyd)。
+给 Agent 的操作约束见仓库 [skill](https://github.com/eccstartup/anpio-key/tree/master/skills/anpio-key)。

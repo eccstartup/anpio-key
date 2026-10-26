@@ -4,11 +4,11 @@ lastUpdated: false
 ---
 # 设计说明
 
-这一页说明 anp-keyd 为什么这样设计、各部分保证什么。完整的实现级规格在仓库的 [DESIGN.md](https://github.com/eccstartup/anp-keyd/blob/master/docs/DESIGN.md)。
+这一页说明 Anpio Key 为什么这样设计、各部分保证什么。完整的实现级规格在仓库的 [DESIGN.md](https://github.com/eccstartup/anpio-key/blob/master/docs/DESIGN.md)。
 
 ## 目标
 
-anp-keyd 要同时做到两件事：
+Anpio Key 要同时做到两件事：
 
 1. 长期私钥不通过普通接口交出去；
 2. 调用者只能在批准的身份、目标、期限和次数内使用密钥。

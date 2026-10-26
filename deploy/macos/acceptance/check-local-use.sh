@@ -17,7 +17,7 @@ if [ "$#" = 6 ] && [ "$6" != --interactive-ui ]; then
   exit 2
 fi
 script_dir="$(cd -- "$(dirname -- "$0")" && pwd -P)"
-installed=/Library/ANPKeyd/bin/anp-keyd
+installed=/Library/ANPIOKey/bin/anpio-key
 # Pin every executable before the first test. Never run the mutable build-tree
 # candidate as root; test-runtime copies the pinned bytes into a temporary domain.
 /usr/bin/python3 - "$installed" "$1" "$2" "$3" "$4" "$5" <<'PY'

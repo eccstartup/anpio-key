@@ -1,8 +1,8 @@
 {
-  "name": "anp-keyd-docs",
+  "name": "anpio-key-docs",
   "version": "0.1.0",
   "private": true,
-  "description": "anp-keyd 的文档站",
+  "description": "anpio-key 的文档站",
   "type": "module",
   "scripts": {
     "content": "node scripts/build-design.mjs",

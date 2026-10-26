@@ -9,8 +9,8 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 const execute = promisify(execFile)
 
-export class KeydV2Client {
-  constructor({ config = '/etc/anp-keyd/service.json', binary = '/usr/local/libexec/anp-keyd' } = {}) {
+export class AnpioKeyV2Client {
+  constructor({ config = '/etc/anpio-key/service.json', binary = '/usr/local/libexec/anpio-key' } = {}) {
     this.config = config
     this.binary = binary
   }
@@ -63,7 +63,7 @@ export class KeydV2Client {
 /** Adapter for the existing ANP keyd connector's signHttpRequest-shaped seam.
  * Lifecycle/registration stays with a separate trusted management client.
  */
-export function keydV2Signer(client, grant_id) {
+export function anpioKeyV2Signer(client, grant_id) {
   return {
     async signHttpRequest(input) {
       return client.sign({ ...input, grant_id })
@@ -75,7 +75,7 @@ export function keydV2Signer(client, grant_id) {
  * Pass the SDK's subjectOf export and a durable request-ID
  * callback. Canonical URLs must already match the SDK's outgoing target.
  */
-export function keydV2Connector({ client, grant_id, key_id, requestId, subjectOf }) {
+export function anpioKeyV2Connector({ client, grant_id, key_id, requestId, subjectOf }) {
   async function getIdentity(want = {}) {
     const { keys } = await client.keys()
     const key = keys.find(k => k.key_id === key_id)
@@ -89,7 +89,7 @@ export function keydV2Connector({ client, grant_id, key_id, requestId, subjectOf
       publicKey: { publicKeyMultibase: method.publicKeyMultibase }, didDocument: document }
   }
   return {
-    id: 'keyd-v2', name: 'anp-keyd v2', type: 'keyd', getIdentity,
+    id: 'keyd-v2', name: 'anpio-key v2', type: 'keyd', getIdentity,
     async isAvailable() { try { await getIdentity(); return true } catch { return false } },
     async signRequest(req) {
       if (req.successorDid != null) throw new Error('DID lifecycle requires trusted management')

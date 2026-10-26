@@ -39,12 +39,12 @@ jobs:
           persist-credentials: false
       - name: Check Node v2 adapter syntax
         run: |
-          node --check adapters/keyd-v2.mjs
+          node --check adapters/anpio-key-v2.mjs
           node --check adapters/test-sdk.mjs
       - name: Build and test disposable service/admin/Agent domains
         run: >-
           docker run --rm
-          -e ANP_KEYD_TEST_MCP=${{ matrix.test_mcp }}
+          -e ANPIO_KEY_TEST_MCP=${{ matrix.test_mcp }}
           -v "$GITHUB_WORKSPACE:/src:ro" -w /src
           "${{ matrix.image }}"
           bash deploy/linux/acceptance/test-container.sh

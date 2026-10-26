@@ -26,9 +26,9 @@ import sys
 import tempfile
 import time
 
-BASE = Path('/Library/ANPKeyd')
-HELPER = BASE / 'ANPKeyd.app'
-EXECUTABLE = 'anp-keyd'
+BASE = Path('/Library/ANPIOKey')
+HELPER = BASE / 'ANPIOKey.app'
+EXECUTABLE = 'anpio-key'
 FEATURES = 'mcp,hardware-se'
 ENV = {'PATH': '/usr/bin:/bin:/usr/sbin:/sbin'}
 PENDING = [
@@ -101,7 +101,7 @@ def info_plist(application, version):
         'CFBundleExecutable': EXECUTABLE,
         'CFBundleIdentifier': application.split('.', 1)[1],
         'CFBundleInfoDictionaryVersion': '6.0',
-        'CFBundleName': 'ANPKeyd',
+        'CFBundleName': 'ANPIOKey',
         'CFBundlePackageType': 'APPL',
         'CFBundleShortVersionString': version,
         'CFBundleVersion': version,
@@ -533,7 +533,7 @@ def install(args):
         verify_bundle(destination, args.team_id, args.application_id,
                       installed=True, require_notarized=False)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    staged = Path(tempfile.mkdtemp(prefix='.ANPKeyd.app.', dir=destination.parent)) / 'bundle'
+    staged = Path(tempfile.mkdtemp(prefix='.ANPIOKey.app.', dir=destination.parent)) / 'bundle'
     try:
         shutil.copytree(source, staged, symlinks=False)
         for root, directories, files in os.walk(staged):
@@ -581,11 +581,11 @@ def main():
         if name == 'plan':
             sub.add_argument('--identity')
             sub.add_argument('--profile', type=Path)
-            sub.add_argument('--out', type=Path, default=Path('target/se-release/ANPKeyd.app'))
+            sub.add_argument('--out', type=Path, default=Path('target/se-release/ANPIOKey.app'))
         if name == 'build':
             sub.add_argument('--identity', required=True)
             sub.add_argument('--profile', type=Path, required=True)
-            sub.add_argument('--out', type=Path, default=Path('target/se-release/ANPKeyd.app'))
+            sub.add_argument('--out', type=Path, default=Path('target/se-release/ANPIOKey.app'))
             sub.add_argument('--binary', type=Path, help='use an already built candidate')
             sub.add_argument('--require-notarized', action='store_true')
         if name == 'sign-example':

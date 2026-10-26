@@ -47,7 +47,7 @@ ADMISSION_MARKERS = [
 ]
 TERMINAL_MARKERS = ['PASS ', 'se-persistence:', 'Disallowing', 'Killed: 9',
                     'Code Signature Invalid', 'exited due to signal']
-STAGE_PREFIX = 'ANPKeydSystemContextChecks-'
+STAGE_PREFIX = 'ANPIOKeySystemContextChecks-'
 MAX_STATE = 64 * 1024
 
 
@@ -123,10 +123,10 @@ def state_shape(state):
             or not set(root) <= {'kind', 'tag'}):
         raise ValueError('state does not name a Secure Enclave root')
     tag = root.get('tag')
-    if not isinstance(tag, str) or not tag.startswith('anp-keyd/acceptance-'):
+    if not isinstance(tag, str) or not tag.startswith('anpio-key/acceptance-'):
         raise ValueError('state label is outside the acceptance namespace')
     hint = state.get('tag_hint')
-    if not isinstance(hint, str) or hint != tag[len('anp-keyd/'):]:
+    if not isinstance(hint, str) or hint != tag[len('anpio-key/'):]:
         raise ValueError('state label and hint disagree')
     return tag
 
@@ -273,7 +273,7 @@ def exit_code(status, text):
 def run_one_probe(stage, staged_binary, staged_state, account, tag,
                   creator_session, timeout, session_create):
     suffix = 'session-create' if session_create else 'raw'
-    label = 'org.anp-keyd.system-context-check.' + stage.name + '.' + suffix
+    label = 'org.anpio-key.system-context-check.' + stage.name + '.' + suffix
     log = stage / ('probe-' + suffix + '.log')
     log.touch(mode=0o644)
     log.chmod(0o644)

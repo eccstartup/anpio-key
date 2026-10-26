@@ -24,9 +24,9 @@ spec.loader.exec_module(post_reboot)
 
 class RebootJob(unittest.TestCase):
     def test_one_shot_root_system_job_has_no_restart_or_boot_install(self):
-        stage = Path('/Library/ANPKeydRebootChecks-example')
+        stage = Path('/Library/ANPIOKeyRebootChecks-example')
         job = launcher.job_spec(stage, Path('/usr/bin/python3'), ['--candidate-binary', '/fixture'])
-        self.assertEqual(job['Label'], 'org.anp-keyd.reboot-check.ANPKeydRebootChecks-example')
+        self.assertEqual(job['Label'], 'org.anpio-key.reboot-check.ANPIOKeyRebootChecks-example')
         self.assertFalse(job['KeepAlive'])
         self.assertTrue(job['SessionCreate'])
         self.assertTrue(job['LaunchOnlyOnce'])
@@ -62,7 +62,7 @@ class BootEvidence(unittest.TestCase):
 class RebootState(unittest.TestCase):
     def checks(self, base):
         return SimpleNamespace(base=base, config={'instance_id': 'instance'},
-            path=base / 'service.json', args=SimpleNamespace(binary=Path('/usr/local/bin/anp-keyd'),
+            path=base / 'service.json', args=SimpleNamespace(binary=Path('/usr/local/bin/anpio-key'),
                 se_login_sha256='a' * 64),
             admin=SimpleNamespace(pw_uid=501), agent=SimpleNamespace(pw_uid=601),
             key={'key_id': 'k', 'did': 'did', 'kid': 'kid'}, policy_id='p',

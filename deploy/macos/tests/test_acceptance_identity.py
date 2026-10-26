@@ -9,9 +9,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'acceptance'))
 import acceptance_se
 
 ENTITLEMENTS = {
-    'com.apple.application-identifier': 'TEAM.org.anp-keyd.se-acceptance',
+    'com.apple.application-identifier': 'TEAM.org.anpio-key.se-acceptance',
     'com.apple.developer.team-identifier': 'TEAM',
-    'keychain-access-groups': ['TEAM.org.anp-keyd.se-acceptance', 'TEAM.shared'],
+    'keychain-access-groups': ['TEAM.org.anpio-key.se-acceptance', 'TEAM.shared'],
 }
 
 
@@ -30,13 +30,13 @@ class Entitlements(unittest.TestCase):
 
     def test_application_identifier_change_moves_the_keychain_group(self):
         changed = acceptance_se.with_application_identifier(
-            ENTITLEMENTS, 'TEAM.org.anp-keyd.se-acceptance.other')
+            ENTITLEMENTS, 'TEAM.org.anpio-key.se-acceptance.other')
         self.assertEqual(changed['com.apple.application-identifier'],
-                         'TEAM.org.anp-keyd.se-acceptance.other')
+                         'TEAM.org.anpio-key.se-acceptance.other')
         self.assertEqual(changed['keychain-access-groups'],
-                         ['TEAM.org.anp-keyd.se-acceptance.other', 'TEAM.shared'])
+                         ['TEAM.org.anpio-key.se-acceptance.other', 'TEAM.shared'])
         self.assertEqual(ENTITLEMENTS['com.apple.application-identifier'],
-                         'TEAM.org.anp-keyd.se-acceptance')
+                         'TEAM.org.anpio-key.se-acceptance')
 
     def test_missing_application_identifier_is_refused(self):
         with self.assertRaisesRegex(ValueError, 'application identifier'):

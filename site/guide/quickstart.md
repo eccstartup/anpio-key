@@ -7,7 +7,7 @@
 ```bash
 cargo install --path .
 mkdir -p /tmp/keyd-lab
-export KEYD="anp-keyd --root /tmp/keyd-lab"
+export KEYD="anpio-key --root /tmp/keyd-lab"
 ```
 
 ## 1. 写下身份放在哪里
@@ -59,7 +59,7 @@ https://example.com/agents/mybot/.../did.json
 $KEYD serve
 ```
 
-命令会马上返回，服务在后台运行，默认 socket 是 `~/.anp-keyd/run/keyd.sock`（用了 `--root` 时在对应目录下）。它会打印 pid 和停止方法。
+命令会马上返回，服务在后台运行，默认 socket 是 `~/.anpio-key/run/keyd.sock`（用了 `--root` 时在对应目录下）。它会打印 pid 和停止方法。
 
 想让它占住当前终端，加 `--foreground`；systemd、launchd 这类服务管理器要用这个参数。
 

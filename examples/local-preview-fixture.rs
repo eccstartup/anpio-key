@@ -35,11 +35,11 @@ fn main() {
     }
 }
 fn generate(path: PathBuf, secure_enclave: bool) {
-    use anp_keyd::crypto::kdf::Argon2Config;
-    use anp_keyd::did::document::{self, DidDocumentSpec};
-    use anp_keyd::keystore::hardware::HardwareChoice;
-    use anp_keyd::keystore::layout::KeydLayout;
-    use anp_keyd::keystore::{create, device, store, unwrap};
+    use anpio_key::crypto::kdf::Argon2Config;
+    use anpio_key::did::document::{self, DidDocumentSpec};
+    use anpio_key::keystore::hardware::HardwareChoice;
+    use anpio_key::keystore::layout::KeydLayout;
+    use anpio_key::keystore::{create, device, store, unwrap};
     // Only the disposable hot key uses SE. The root remains available for
     // document construction; the independent service must never open SE itself.
     let hot_hardware = if secure_enclave {
@@ -84,9 +84,9 @@ fn generate(path: PathBuf, secure_enclave: bool) {
         hot_hardware,
     )
     .unwrap();
-    let mut unsigned = anp_keyd::did::lifecycle::strip_proof(&doc).unwrap();
+    let mut unsigned = anpio_key::did::lifecycle::strip_proof(&doc).unwrap();
     unsigned["service"] = serde_json::json!([{"id":format!("{}#anp",created.did),"type":"ANPMessageService","serviceEndpoint":"https://example.com/anp-im/rpc","serviceDid":"did:wba:example.com"}]);
-    let unsigned = anp_keyd::did::lifecycle::with_extra_key(
+    let unsigned = anpio_key::did::lifecycle::with_extra_key(
         &unsigned,
         &created.did,
         &key.verifying_key(),
@@ -108,7 +108,7 @@ fn generate(path: PathBuf, secure_enclave: bool) {
         HardwareChoice::None,
     )
     .unwrap();
-    let unsigned = anp_keyd::did::lifecycle::with_extra_key(
+    let unsigned = anpio_key::did::lifecycle::with_extra_key(
         &unsigned,
         &created.did,
         &key.verifying_key(),

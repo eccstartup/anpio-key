@@ -59,7 +59,7 @@ class ReleasePolicy(unittest.TestCase):
     def test_info_plist_matches_bundle_identity(self):
         plist = release.info_plist(APP, '0.1.0')
         self.assertEqual(plist['CFBundleIdentifier'], APP.split('.', 1)[1])
-        self.assertEqual(plist['CFBundleExecutable'], 'anp-keyd')
+        self.assertEqual(plist['CFBundleExecutable'], 'anpio-key')
         self.assertEqual(plist['CFBundlePackageType'], 'APPL')
         self.assertIs(plist['LSBackgroundOnly'], True)
 
@@ -77,7 +77,7 @@ class ReleasePolicy(unittest.TestCase):
 
     def test_plan_reports_missing_identity_and_profile_without_mutation(self):
         args = SimpleNamespace(team_id=TEAM, application_id=APP, identity=None,
-                               profile=None, out=Path('target/se-release/ANPKeyd.app'))
+                               profile=None, out=Path('target/se-release/ANPIOKey.app'))
         with patch.object(release, 'identities', return_value=[]):
             report = release.plan(args)
         self.assertTrue(report['plan_only'])
@@ -133,10 +133,10 @@ class ReleaseProfile(unittest.TestCase):
 
 class BundleVerification(unittest.TestCase):
     def bundle(self, directory, application=APP):
-        bundle = Path(directory) / 'ANPKeyd.app'
+        bundle = Path(directory) / 'ANPIOKey.app'
         contents = bundle / 'Contents'
         (contents / 'MacOS').mkdir(parents=True)
-        (contents / 'MacOS' / 'anp-keyd').write_bytes(b'helper')
+        (contents / 'MacOS' / 'anpio-key').write_bytes(b'helper')
         (contents / 'Info.plist').write_bytes(plistlib.dumps(release.info_plist(application, '0.1.0')))
         (contents / 'embedded.provisionprofile').write_bytes(b'profile')
         return bundle
@@ -264,7 +264,7 @@ class SignExample(unittest.TestCase):
 class InstallSafety(unittest.TestCase):
     def test_upgrade_requires_root_before_touching_anything(self):
         args = SimpleNamespace(bundle=Path('/nonexistent'), team_id=TEAM, application_id=APP,
-                               profile_sha256=None, destination=Path('/tmp/ANPKeyd.app'),
+                               profile_sha256=None, destination=Path('/tmp/ANPIOKey.app'),
                                upgrade=True, require_notarized=False)
         with patch.object(release.os, 'geteuid', return_value=501):
             with self.assertRaisesRegex(release.ReleaseError, 'root'):
@@ -275,8 +275,8 @@ class InstallSafety(unittest.TestCase):
             base = Path(directory)
             source = base / 'source'
             (source / 'Contents' / 'MacOS').mkdir(parents=True)
-            (source / 'Contents' / 'MacOS' / 'anp-keyd').write_bytes(b'new')
-            destination = base / 'ANPKeyd.app'
+            (source / 'Contents' / 'MacOS' / 'anpio-key').write_bytes(b'new')
+            destination = base / 'ANPIOKey.app'
             destination.mkdir()
             report = {'upgrade_continuity': 'profile unchanged'}
             args = SimpleNamespace(bundle=source, destination=destination, upgrade=True,
@@ -292,7 +292,7 @@ class InstallSafety(unittest.TestCase):
 
     def test_build_refuses_existing_output(self):
         with tempfile.TemporaryDirectory() as directory:
-            out = Path(directory) / 'ANPKeyd.app'
+            out = Path(directory) / 'ANPIOKey.app'
             out.mkdir()
             args = SimpleNamespace(team_id=TEAM, application_id=APP, identity='x',
                                    profile=Path('/nonexistent'), out=out, binary=None,

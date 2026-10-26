@@ -74,7 +74,7 @@ pub fn inspect(path: &Path, verify: bool) -> Result<Value> {
             let pass =
                 crate::tty::read_secret(tty, &format!("Verify recovery of {}: ", wrapped.id.kid))?;
             let key = unwrap::unlock(&wrapped, pass.as_bytes(), &device)?;
-            let message = b"anp-keyd offline recovery self-test v1";
+            let message = b"anpio-key offline recovery self-test v1";
             let signature = key.sign(message)?;
             if !key.verify(message, &signature) || key.verifying_key() != pk {
                 return Err(KeydError::Misuse(
@@ -88,7 +88,7 @@ pub fn inspect(path: &Path, verify: bool) -> Result<Value> {
     }
     let legacy = crate::audit::log::legacy_summary(&layout.audit_dir())?;
     Ok(
-        json!({"format":"anp-keyd-migration-inspection-v1", "keys":inventory,
+        json!({"format":"anpio-key-migration-inspection-v1", "keys":inventory,
         "legacy_audit":legacy,"recovery_verified":verify,
         "historical_copies_revoked":false}),
     )

@@ -108,7 +108,7 @@ fn recorded_pid(path: &Path) -> Option<u32> {
 /// 把守护进程放到后台,然后**把这个终端还回去**。
 ///
 /// 做法是**重新执行自己**,不是 fork:后台那个进程就是
-/// `anp-keyd serve --foreground`,和服务管理器拉起来的一模一样。守护进程
+/// `anpio-key serve --foreground`,和服务管理器拉起来的一模一样。守护进程
 /// 本体于是只有一条代码路径 —— "后台跑的"和"launchd 跑的"不会各自长出
 /// 一种毛病。
 ///
@@ -195,7 +195,7 @@ pub fn detach(log_path: &Path, sock_path: &Path, pid_path: &Path) -> Result<()> 
                 return Err(exited(status));
             }
             println!("listening on {} (pid {pid})", sock_path.display());
-            println!("to stop it: anp-keyd stop");
+            println!("to stop it: anpio-key stop");
             return Ok(());
         }
 

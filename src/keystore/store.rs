@@ -146,7 +146,7 @@ pub fn resolve(layout: &KeydLayout, did: &str, kid: Option<&str>) -> Result<Wrap
             .find(|wrapped| wrapped.id.kid == wanted)
             .ok_or_else(|| {
                 KeydError::KeyNotFound(format!(
-                    "{did} has no key named {kid:?}; the ones it has are listed by `anp-keyd list`"
+                    "{did} has no key named {kid:?}; the ones it has are listed by `anpio-key list`"
                 ))
             });
     }

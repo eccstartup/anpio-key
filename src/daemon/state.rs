@@ -4,7 +4,7 @@
 //!
 //! 这是这个模块里唯一重要的结构决定:已解锁的钥匙不是存在一个全局表里,
 //! 而是**按对端 uid 分的 vault**,每个 vault 有自己的磁盘根
-//! (`/var/lib/anp-keyd/users/<uid>`)。
+//! (`/var/lib/anpio-key/users/<uid>`)。
 //!
 //! 于是"uid A 用不了 uid B 的钥匙"不是一条需要记得去执行的检查,而是
 //! **没有那个入口**:一个请求能说出任何 did,但 did 只会在调用者自己那个
@@ -34,9 +34,9 @@ use crate::sign::{ed25519::LockedSigningKey, rfc9421};
 
 /// 磁盘根从哪来。
 pub enum Roots {
-    /// 单用户:整个守护进程只服务 `~/.anp-keyd` 这一个命名空间。
+    /// 单用户:整个守护进程只服务 `~/.anpio-key` 这一个命名空间。
     Single(KeydLayout),
-    /// 系统服务:`/var/lib/anp-keyd/users/<uid>`,对端 uid 决定用哪个。
+    /// 系统服务:`/var/lib/anpio-key/users/<uid>`,对端 uid 决定用哪个。
     PerUid,
 }
 
@@ -59,7 +59,7 @@ impl Roots {
     pub fn service_audit_dir(&self) -> std::path::PathBuf {
         match self {
             Roots::Single(layout) => layout.audit_dir(),
-            Roots::PerUid => std::path::PathBuf::from("/var/lib/anp-keyd/audit"),
+            Roots::PerUid => std::path::PathBuf::from("/var/lib/anpio-key/audit"),
         }
     }
 }
@@ -1076,7 +1076,7 @@ mod tests {
             pub fn new() -> Self {
                 let n = COUNTER.fetch_add(1, Ordering::Relaxed);
                 let path = std::env::temp_dir().join(format!(
-                    "anp-keyd-test-{}-{n}-{:?}",
+                    "anpio-key-test-{}-{n}-{:?}",
                     std::process::id(),
                     std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)

@@ -2,7 +2,7 @@
 """Create a fresh identity, migrate it into protected state, and issue one grant.
 
 Run as root through install.sh --bootstrap. Passphrases are read only by the
-anp-keyd binary from the human's terminal; this script never receives, stores or
+anpio-key binary from the human's terminal; this script never receives, stores or
 passes them on the command line.
 """
 import argparse
@@ -20,8 +20,8 @@ import uuid
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
-CONFIG = Path("/etc/anp-keyd/service.json")
-BINARY = Path("/usr/local/libexec/anp-keyd")
+CONFIG = Path("/etc/anpio-key/service.json")
+BINARY = Path("/usr/local/libexec/anpio-key")
 ACCEPTED_METHODS = {"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}
 EMPTY_BODY_METHODS = {"GET", "HEAD", "OPTIONS", "DELETE"}
 BODY_METHODS = {"POST", "PUT", "PATCH"}
@@ -64,7 +64,7 @@ def apply_change(change, description):
     # The change contains only public identifiers; it is readable by the admin
     # account because the management command runs under that UID.
     handle = tempfile.NamedTemporaryFile(
-        prefix="anp-keyd-admin-", suffix=".json", dir="/tmp", mode="w", delete=False
+        prefix="anpio-key-admin-", suffix=".json", dir="/tmp", mode="w", delete=False
     )
     try:
         json.dump(change, handle)
@@ -185,8 +185,8 @@ def main():
         fail("--body-bytes 必须在 1 到 16777216 之间")
     policy = build_policy(args.target, methods, args.body_bytes, args.grant_days, args.max_uses)
 
-    staging = Path(tempfile.mkdtemp(prefix="anp-keyd-bootstrap-", dir="/root"))
-    recovery = Path("/root/anp-keyd-recovery-" + datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S"))
+    staging = Path(tempfile.mkdtemp(prefix="anpio-key-bootstrap-", dir="/root"))
+    recovery = Path("/root/anpio-key-recovery-" + datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S"))
     service_started = False
     try:
         spec = staging / "identity.spec.json"
@@ -232,7 +232,7 @@ def main():
         hot_kid = match.group(1)
 
         step("停止服务，把身份离线迁入受保护状态（会再次要求口令）")
-        subprocess.run(["systemctl", "stop", "anp-keyd.service"], check=True)
+        subprocess.run(["systemctl", "stop", "anpio-key.service"], check=True)
         run([
             sys.executable or "python3", str(Path(__file__).with_name("migrate-vault.py")),
             "--config", str(CONFIG), "--binary", str(BINARY),
@@ -242,7 +242,7 @@ def main():
         vault_id = journal["vault_id"]
 
         step("启动服务")
-        subprocess.run(["systemctl", "start", "anp-keyd.service"], check=True)
+        subprocess.run(["systemctl", "start", "anpio-key.service"], check=True)
         service_started = True
         for _ in range(30):
             status = subprocess.run(
@@ -350,7 +350,7 @@ def main():
         print(json.dumps(sample, ensure_ascii=False, indent=2))
     except BaseException as error:
         if not service_started:
-            subprocess.run(["systemctl", "start", "anp-keyd.service"], check=False)
+            subprocess.run(["systemctl", "start", "anpio-key.service"], check=False)
         print()
         print(f"初始化没有完成。临时身份留在 {staging}，迁移记录在 {recovery}。", file=sys.stderr)
         print("先检查上面的错误；不要在不明状态下重复执行 --bootstrap。", file=sys.stderr)

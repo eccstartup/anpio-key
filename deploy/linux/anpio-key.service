@@ -4,10 +4,10 @@ After=local-fs.target systemd-tmpfiles-setup.service
 
 [Service]
 Type=simple
-User=anp-keyd
-Group=anp-keyd
-SupplementaryGroups=anp-keyd-agent anp-keyd-admin
-ExecStart=/usr/local/libexec/anp-keyd serve-protected --config /etc/anp-keyd/service.json
+User=anpio-key
+Group=anpio-key
+SupplementaryGroups=anpio-key-agent anpio-key-admin
+ExecStart=/usr/local/libexec/anpio-key serve-protected --config /etc/anpio-key/service.json
 UMask=0077
 NoNewPrivileges=yes
 PrivateTmp=yes
@@ -26,7 +26,7 @@ AmbientCapabilities=
 LimitCORE=0
 LimitMEMLOCK=64M
 TasksMax=64
-ReadWritePaths=/var/lib/anp-keyd /run/anp-keyd/sign /run/anp-keyd/admin
+ReadWritePaths=/var/lib/anpio-key /run/anpio-key/sign /run/anpio-key/admin
 Restart=on-failure
 RestartSec=2
 

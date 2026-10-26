@@ -212,7 +212,7 @@ impl ServerHandler for Keyd {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             instructions: Some(
-                "本机 did:wba 签名服务。密钥由 anp-keyd 守护进程持有,\
+                "本机 did:wba 签名服务。密钥由 anpio-key 守护进程持有,\
                  这个接口只提供签名,不提供任何私钥材料。"
                     .into(),
             ),
@@ -285,7 +285,7 @@ fn text(value: serde_json::Value) -> std::result::Result<CallToolResult, ErrorDa
 
 /// 在 stdin/stdout 上跑 MCP 服务,直到对端关闭。
 ///
-/// `socket` 不给就按默认布局推导(`~/.anp-keyd/run/keyd.sock`)。
+/// `socket` 不给就按默认布局推导(`~/.anpio-key/run/keyd.sock`)。
 ///
 /// **stdout 归协议。** 这里不打印任何东西到 stdout —— 一行日志就能把一次
 /// 初始化打成 JSON 解析错误,而症状看起来像"MCP 客户端不认这个服务器"。

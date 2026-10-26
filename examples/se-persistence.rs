@@ -51,10 +51,10 @@ mod macos {
     use std::os::unix::fs::OpenOptionsExt;
     use std::path::{Path, PathBuf};
 
-    use anp_keyd::keystore::hardware::se::{
+    use anpio_key::keystore::hardware::se::{
         acceptance_create, acceptance_delete, acceptance_open, acceptance_open_checked,
     };
-    use anp_keyd::keystore::record::HardwareRoot;
+    use anpio_key::keystore::record::HardwareRoot;
     use base64::Engine;
     use serde::{Deserialize, Serialize};
     use sha2::{Digest, Sha256};

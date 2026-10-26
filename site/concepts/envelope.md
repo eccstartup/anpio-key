@@ -1,6 +1,6 @@
 # 信封与归档
 
-anp-keyd 有两种看起来很像、用途完全不同的文件。
+Anpio Key 有两种看起来很像、用途完全不同的文件。
 
 | | 信封 `keys/<thumbprint>.json` | 归档 `<thumbprint>.anpkeyd.json` |
 |---|---|---|

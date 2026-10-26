@@ -1,6 +1,6 @@
 """Real awiki-open-server acceptance, called only by disposable test-boundary.py.
 
-ANP_KEYD_ANP_TARGET is a local throwaway service's physical HTTP origin. The
+ANPIO_KEY_ANP_TARGET is a local throwaway service's physical HTTP origin. The
 service must use https://example.com as public_base_url and strict signed docs.
 Physical HTTP override is confined to this test; production adapter uses TLS.
 """
@@ -17,7 +17,7 @@ import uuid
 
 
 def run(ctx):
-    target = os.environ['ANP_KEYD_ANP_TARGET'].rstrip('/')
+    target = os.environ['ANPIO_KEY_ANP_TARGET'].rstrip('/')
     check, commit, prepare, data = (ctx[k] for k in ('check', 'commit_change', 'prepare_change', 'data_as'))
     command, identity = ctx['command'], ctx['identity']
     config, vault_id, fixture = ctx['config'], ctx['vault_id'], ctx['fixture']
@@ -90,9 +90,9 @@ def run(ctx):
 
     old_grant = grant(hot)
     unlock(hot)
-    if os.environ.get('ANP_KEYD_TEST_SDK'):
+    if os.environ.get('ANPIO_KEY_TEST_SDK'):
         sdk_grant = grant(hot)
-        signed_sdk = subprocess.run(['node', 'adapters/test-sdk.mjs', os.environ['ANP_KEYD_TEST_SDK'], sdk_grant, hot['key_id'], str(uuid.uuid4()), str(uuid.uuid4())],
+        signed_sdk = subprocess.run(['node', 'adapters/test-sdk.mjs', os.environ['ANPIO_KEY_TEST_SDK'], sdk_grant, hot['key_id'], str(uuid.uuid4()), str(uuid.uuid4())],
             preexec_fn=identity('boundary-agent-a'), capture_output=True, text=True, timeout=30)
         assert signed_sdk.returncode == 0, signed_sdk.stderr
         sdk_result = json.loads(signed_sdk.stdout)

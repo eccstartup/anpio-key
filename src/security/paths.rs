@@ -147,7 +147,7 @@ pub fn deny_managed_directory(path: &Path) -> Result<()> {
     }
     let existing = existing.canonicalize()?;
     for ancestor in existing.ancestors() {
-        if ancestor.join(".anp-keyd-managed").try_exists()?
+        if ancestor.join(".anpio-key-managed").try_exists()?
             || ancestor.join("state.sqlite").try_exists()?
         {
             return Err(KeydError::Permission(

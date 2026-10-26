@@ -28,7 +28,7 @@ site/.vitepress/cache/
 core
 core.[0-9]*
 *.core
-.anp-keyd/
+.anpio-key/
 *.anpkeyd.json
 *.sqlite
 *.sqlite-journal

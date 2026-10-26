@@ -76,7 +76,7 @@ pub fn from_words(phrase: &str) -> Result<LockedBytes> {
 
     if mnemonic.word_count() != WORDS {
         return Err(KeydError::Crypto(format!(
-            "this mnemonic has {} words, and anp-keyd only ever writes {WORDS} (a {ENTROPY_BYTES}-byte \
+            "this mnemonic has {} words, and anpio-key only ever writes {WORDS} (a {ENTROPY_BYTES}-byte \
              seed). A different word count encodes a different amount of entropy, so this is \
              not a mistyped one of ours — it is a mnemonic from somewhere else",
             mnemonic.word_count()

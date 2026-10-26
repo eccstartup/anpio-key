@@ -4,13 +4,13 @@
 #[test]
 #[ignore = "run only inside deploy/linux/test-container.sh"]
 fn disposable_linux_fixture() {
-    use anp_keyd::crypto::kdf::Argon2Config;
-    use anp_keyd::did::document::{self, DidDocumentSpec};
-    use anp_keyd::keystore::hardware::HardwareChoice;
-    use anp_keyd::keystore::layout::KeydLayout;
-    use anp_keyd::keystore::{create, device, store, unwrap};
+    use anpio_key::crypto::kdf::Argon2Config;
+    use anpio_key::did::document::{self, DidDocumentSpec};
+    use anpio_key::keystore::hardware::HardwareChoice;
+    use anpio_key::keystore::layout::KeydLayout;
+    use anpio_key::keystore::{create, device, store, unwrap};
     assert_eq!(
-        std::env::var("ANP_KEYD_DISPOSABLE_LINUX_TEST").as_deref(),
+        std::env::var("ANPIO_KEY_DISPOSABLE_LINUX_TEST").as_deref(),
         Ok("1")
     );
     assert_eq!(nix::unistd::geteuid().as_raw(), 0);
@@ -51,9 +51,9 @@ fn disposable_linux_fixture() {
         HardwareChoice::None,
     )
     .unwrap();
-    let mut unsigned = anp_keyd::did::lifecycle::strip_proof(&doc).unwrap();
+    let mut unsigned = anpio_key::did::lifecycle::strip_proof(&doc).unwrap();
     unsigned["service"] = serde_json::json!([{"id":format!("{}#anp",created.did),"type":"ANPMessageService","serviceEndpoint":"https://example.com/anp-im/rpc","serviceDid":"did:wba:example.com"}]);
-    let unsigned = anp_keyd::did::lifecycle::with_extra_key(
+    let unsigned = anpio_key::did::lifecycle::with_extra_key(
         &unsigned,
         &created.did,
         &key.verifying_key(),
@@ -75,7 +75,7 @@ fn disposable_linux_fixture() {
         HardwareChoice::None,
     )
     .unwrap();
-    let unsigned = anp_keyd::did::lifecycle::with_extra_key(
+    let unsigned = anpio_key::did::lifecycle::with_extra_key(
         &unsigned,
         &created.did,
         &key.verifying_key(),

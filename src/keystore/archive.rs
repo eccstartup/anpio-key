@@ -89,7 +89,7 @@ pub struct Archive {
     ///
     /// 现在还没有 WNS 支持,所以写出来永远是 `null`。留着是因为格式冻结:
     /// 等有了 WNS 再往回塞这个字段,新旧两代归档就分叉了 —— 那时候旧版本
-    /// 的 anp-keyd 读新文件会拒,而这恰好是最不该拒的一类文件。
+    /// 的 anpio-key 读新文件会拒,而这恰好是最不该拒的一类文件。
     #[serde(default)]
     pub wns_handle: Option<String>,
 
@@ -131,14 +131,14 @@ impl Archive {
     pub fn validate(&self) -> Result<()> {
         if self.format != ARCHIVE_FORMAT {
             return Err(KeydError::Protocol(format!(
-                "this file says it is a `{}`, and anp-keyd archives are `{ARCHIVE_FORMAT}`",
+                "this file says it is a `{}`, and anpio-key archives are `{ARCHIVE_FORMAT}`",
                 self.format
             )));
         }
         if self.version != ARCHIVE_VERSION {
             return Err(KeydError::Protocol(format!(
                 "this archive is version {}, and this build reads version {ARCHIVE_VERSION}. \
-                 Do not retry with a guess — use a build of anp-keyd that knows this version, \
+                 Do not retry with a guess — use a build of anpio-key that knows this version, \
                  because a wrong reading of the format produces garbage rather than an error",
                 self.version
             )));
@@ -221,7 +221,7 @@ impl Archive {
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         let archive: Archive = serde_json::from_slice(bytes)
-            .map_err(|e| KeydError::Protocol(format!("this is not an anp-keyd archive: {e}")))?;
+            .map_err(|e| KeydError::Protocol(format!("this is not an anpio-key archive: {e}")))?;
         archive.validate()?;
         Ok(archive)
     }
@@ -519,7 +519,7 @@ mod tests {
     #[test]
     fn a_foreign_json_file_is_refused() {
         let error = Archive::from_bytes(b"{\"hello\":\"world\"}").unwrap_err();
-        assert!(error.to_string().contains("not an anp-keyd archive"), "{error}");
+        assert!(error.to_string().contains("not an anpio-key archive"), "{error}");
 
         let mut tampered = fixture("alice");
         tampered.format = "someone-elses-backup".into();

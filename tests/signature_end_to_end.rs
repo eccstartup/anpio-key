@@ -12,17 +12,17 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
-use anp_keyd::client::Client;
-use anp_keyd::crypto::kdf::Argon2Config;
-use anp_keyd::daemon::peer::PeerPolicy;
-use anp_keyd::daemon::state::{autolock_from_secs, DaemonState, Roots, SigningGates};
-use anp_keyd::daemon::wire::{SignRequest, MAX_CHALLENGE_LEN};
-use anp_keyd::daemon::{self, server, ServerConfig};
-use anp_keyd::did::document::{self, DidDocumentSpec};
-use anp_keyd::did::proof_value;
-use anp_keyd::keystore::layout::KeydLayout;
-use anp_keyd::keystore::hardware::HardwareChoice;
-use anp_keyd::keystore::{create, device, store};
+use anpio_key::client::Client;
+use anpio_key::crypto::kdf::Argon2Config;
+use anpio_key::daemon::peer::PeerPolicy;
+use anpio_key::daemon::state::{autolock_from_secs, DaemonState, Roots, SigningGates};
+use anpio_key::daemon::wire::{SignRequest, MAX_CHALLENGE_LEN};
+use anpio_key::daemon::{self, server, ServerConfig};
+use anpio_key::did::document::{self, DidDocumentSpec};
+use anpio_key::did::proof_value;
+use anpio_key::keystore::layout::KeydLayout;
+use anpio_key::keystore::hardware::HardwareChoice;
+use anpio_key::keystore::{create, device, store};
 use serde_json::Value;
 
 const PASSPHRASE: &[u8] = b"e2e passphrase";
@@ -102,7 +102,7 @@ impl Running {
         // 落盘。之后验签用的就是磁盘上这一份 —— 不是内存里的那个半成品。
         let wrapped = store::load(&layout, &created.wrapped.id.thumbprint).unwrap();
         let device_secret = device::load(&layout).unwrap();
-        let key = anp_keyd::keystore::unwrap::unlock(&wrapped, PASSPHRASE, &device_secret).unwrap();
+        let key = anpio_key::keystore::unwrap::unlock(&wrapped, PASSPHRASE, &device_secret).unwrap();
         let unsigned = document::rebuild(&created.did, &key.verifying_key()).unwrap();
         let signed = document::sign_document(&unsigned, &key, &wrapped.id.kid).unwrap();
         document::verify_path_binding(&created.did, &signed).unwrap();
@@ -177,7 +177,7 @@ fn wait_for_socket(path: &Path) {
 /// 把守护进程给的头接到请求头上去 —— 调用方要做的就是这个动作。
 fn splice(original: &BTreeMap<String, String>, signed: &[u8]) -> BTreeMap<String, String> {
     let mut headers = original.clone();
-    for (name, value) in anp_keyd::client::parse_signed_headers(signed).unwrap() {
+    for (name, value) in anpio_key::client::parse_signed_headers(signed).unwrap() {
         headers.insert(name, value);
     }
     headers
@@ -210,7 +210,7 @@ fn verify_challenge(document: &Value, signature: &[u8], challenge: &[u8]) -> Res
         .as_str()
         .ok_or_else(|| "a verification method without publicKeyMultibase".to_string())?;
 
-    let key = anp_keyd::crypto::thumbprint::ed25519_from_multibase(multibase)
+    let key = anpio_key::crypto::thumbprint::ed25519_from_multibase(multibase)
         .map_err(|error| error.to_string())?;
     let signature = ed25519_dalek::Signature::from_slice(signature).map_err(|e| e.to_string())?;
 
@@ -418,7 +418,7 @@ async fn signing_is_refused_while_locked() {
         })
         .await;
 
-    assert_eq!(error.wire_code(), anp_keyd::daemon::wire::ErrorCode::Locked, "{error}");
+    assert_eq!(error.wire_code(), anpio_key::daemon::wire::ErrorCode::Locked, "{error}");
 }
 
 /// 同一把钥匙被两个客户端同时签:两个都成,而且**内容各自独立**。
@@ -526,7 +526,7 @@ async fn a_challenge_signature_verifies_with_an_outside_verifier() {
 
     assert_eq!(
         error.wire_code(),
-        anp_keyd::daemon::wire::ErrorCode::Protocol,
+        anpio_key::daemon::wire::ErrorCode::Protocol,
         "one byte over the cap must be a protocol error, not a signature: {error}"
     );
     assert!(error.to_string().contains("257"), "{error}");

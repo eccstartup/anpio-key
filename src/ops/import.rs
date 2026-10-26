@@ -336,7 +336,7 @@ fn place(
     if fresh_device_secret {
         println!();
         println!("this machine had no device.secret, so a new one was just created. It is");
-        println!("half of every key this machine will ever hold — back up ~/.anp-keyd's");
+        println!("half of every key this machine will ever hold — back up ~/.anpio-key's");
         println!("device.secret separately from any exported archive, or a stolen archive");
         println!("plus later access to this machine is still not enough to open anything.");
     }
@@ -530,9 +530,9 @@ fn clone_warning(did: &str) {
     println!("no way for anyone, including this tool, to make that copy stop working.");
     println!();
     println!("You cannot undo an export. You can migrate off it:");
-    println!("    anp-keyd rotate-hot-key --did {did}");
+    println!("    anpio-key rotate-hot-key --did {did}");
     println!("  ...so day-to-day signing uses a key only this machine has, and");
-    println!("    anp-keyd migrate --did {did} --to <new DID>");
+    println!("    anpio-key migrate --did {did} --to <new DID>");
     println!("  ...so the DID everyone has cached is explicitly retired and pointed");
     println!("     somewhere new.");
     println!();

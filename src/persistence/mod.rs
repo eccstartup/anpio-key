@@ -842,7 +842,7 @@ impl Database {
 }
 
 fn managed_marker(root: &Path, instance: &str) -> Result<()> {
-    let path = root.join(".anp-keyd-managed");
+    let path = root.join(".anpio-key-managed");
     match OpenOptions::new()
         .write(true)
         .create_new(true)

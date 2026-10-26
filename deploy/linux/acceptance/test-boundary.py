@@ -28,7 +28,7 @@ if args.systemd:
     if (Path('/.dockerenv').exists() or Path('/proc/1/comm').read_text().strip() != 'systemd'
             or marker.is_symlink() or not marker.is_file() or marker.stat().st_uid != 0
             or marker.stat().st_mode & 0o077
-            or marker.read_text().strip() != 'anp-keyd-disposable-systemd-v1'):
+            or marker.read_text().strip() != 'anpio-key-disposable-systemd-v1'):
         sys.exit('systemd mode requires an explicitly marked disposable systemd VM')
 elif not Path('/.dockerenv').exists():
     sys.exit('container mode requires Docker; systemd VM testing needs --systemd')
@@ -37,11 +37,11 @@ for name in ['boundary-admin', 'boundary-agent-a', 'boundary-agent-b', 'boundary
     subprocess.run(['useradd', '--create-home', '--shell', '/bin/sh', name], check=True)
 subprocess.run([sys.executable, 'deploy/linux/install.py', '--binary', args.binary,
                 *([] if args.systemd else ['--allow-development-build']), '--sha256', hashlib.sha256(Path(args.binary).read_bytes()).hexdigest(), '--admin-user', 'boundary-admin', '--agent-user', 'boundary-agent-a', '--agent-user', 'boundary-agent-b'], check=True)
-config_path = Path('/etc/anp-keyd/service.json')
+config_path = Path('/etc/anpio-key/service.json')
 config = json.loads(config_path.read_text())
 fixture = json.loads(Path('/tmp/keyd-boundary-fixture-info.json').read_text())
-service = pwd.getpwnam('anp-keyd')
-binary = '/usr/local/libexec/anp-keyd'
+service = pwd.getpwnam('anpio-key')
+binary = '/usr/local/libexec/anpio-key'
 source = Path('/root/keyd-migration-source')
 migration_source = source
 recovery = Path('/root/keyd-migration-recovery')
@@ -139,21 +139,21 @@ def start():
     if args.systemd:
         Path('/tmp/keyd-host-visible-marker').write_text('disposable host namespace')
         Path('/tmp/keyd-host-visible-marker').chmod(0o644)
-        dropin = Path('/run/systemd/system/anp-keyd.service.d')
+        dropin = Path('/run/systemd/system/anpio-key.service.d')
         dropin.mkdir(parents=True, exist_ok=True)
         (dropin / 'sandbox-probe.conf').write_text('[Service]\nExecStartPost=/usr/bin/python3 ' + str(Path(__file__).resolve().with_name('sandbox-probe.py')) + '\n')
-        subprocess.run(['systemctl','enable','anp-keyd.service'], check=True)
+        subprocess.run(['systemctl','enable','anpio-key.service'], check=True)
         subprocess.run(['systemctl', 'daemon-reload'], check=True)
-        subprocess.run(['systemd-tmpfiles', '--create', '/etc/tmpfiles.d/anp-keyd.conf'], check=True)
-        subprocess.run(['systemctl', 'reset-failed', 'anp-keyd.service'], check=True)
-        subprocess.run(['systemctl', 'start', 'anp-keyd.service'], check=True)
+        subprocess.run(['systemd-tmpfiles', '--create', '/etc/tmpfiles.d/anpio-key.conf'], check=True)
+        subprocess.run(['systemctl', 'reset-failed', 'anpio-key.service'], check=True)
+        subprocess.run(['systemctl', 'start', 'anpio-key.service'], check=True)
         for _ in range(100):
             if Path(config['admin_socket']).exists():
-                invocation = subprocess.check_output(['systemctl','show','anp-keyd.service','-p','InvocationID','--value'], text=True).strip()
+                invocation = subprocess.check_output(['systemctl','show','anpio-key.service','-p','InvocationID','--value'], text=True).strip()
                 return invocation
             time.sleep(.05)
-        raise AssertionError(subprocess.check_output(['journalctl','-u','anp-keyd.service','--no-pager','-n','40'], text=True))
-    process = subprocess.Popen([binary, 'serve-protected'], preexec_fn=identity('anp-keyd'), stderr=subprocess.PIPE, text=True)
+        raise AssertionError(subprocess.check_output(['journalctl','-u','anpio-key.service','--no-pager','-n','40'], text=True))
+    process = subprocess.Popen([binary, 'serve-protected'], preexec_fn=identity('anpio-key'), stderr=subprocess.PIPE, text=True)
     for _ in range(100):
         if process.poll() is not None:
             raise AssertionError(process.stderr.read())
@@ -165,7 +165,7 @@ def start():
 
 def stop(process):
     if args.systemd:
-        subprocess.run(['systemctl','stop','anp-keyd.service'], check=True)
+        subprocess.run(['systemctl','stop','anpio-key.service'], check=True)
         stderr = subprocess.check_output(['journalctl','_SYSTEMD_INVOCATION_ID=' + process, '--no-pager'], text=True)
     else:
         process.terminate()
@@ -228,7 +228,7 @@ print(exact(struct.unpack('!I',exact(4))[0]).decode())'''
         tamper = subprocess.run([sys.executable, '-c', 'import os,sys;os.unlink(sys.argv[1])', protected_path], preexec_fn=identity('boundary-agent-a'), capture_output=True)
         check(tamper.returncode != 0 and Path(protected_path).exists(), 'Agent cannot replace ' + protected_path)
     # Even giving Agent A the admin connection group cannot override the UID check.
-    subprocess.run(['usermod', '-a', '-G', 'anp-keyd-admin', 'boundary-agent-a'], check=True)
+    subprocess.run(['usermod', '-a', '-G', 'anpio-key-admin', 'boundary-agent-a'], check=True)
     raw_admin = subprocess.run([sys.executable, '-c', code, config['admin_socket']], preexec_fn=identity('boundary-agent-a'), capture_output=True, text=True, timeout=8)
     check('ADMIN_REQUIRED' in raw_admin.stdout, 'admin socket group alone cannot authorize Agent')
     # Data protocol cannot parse old operations, even for an authorized Agent.
@@ -236,7 +236,7 @@ print(exact(struct.unpack('!I',exact(4))[0]).decode())'''
     refused = subprocess.run([sys.executable, '-c', data_probe, config['sign_socket']], preexec_fn=identity('boundary-agent-a'), capture_output=True, text=True, timeout=8)
     check('PROTOCOL_INVALID' in refused.stdout and 'temporary-boundary-test-secret' not in refused.stdout, 'data socket has no password operation')
     # Unknown UID with connection-group membership is still denied.
-    subprocess.run(['usermod', '-a', '-G', 'anp-keyd-agent', 'boundary-stranger'], check=True)
+    subprocess.run(['usermod', '-a', '-G', 'anpio-key-agent', 'boundary-stranger'], check=True)
     check(as_agent('boundary-stranger')['code'] == 'PRINCIPAL_DISABLED', 'unregistered UID rejected despite socket group')
     # Admin mutation is unavailable to an Agent even with vault/did/kid knowledge.
     unlock = {'version': 2, 'request': {'operation': 'UNLOCK_KEY', 'vault_id': vault_id, **fixture}}
@@ -279,12 +279,12 @@ except ConnectionResetError:pass  # Early refusal closes with unread request byt
     commit_change({'kind':'Catalog','change':{'action':'ConfirmRole','key_id':root_key['key_id'],'role':'root'}})
     check(command('boundary-agent-a','admin','catalog').returncode != 0, 'Agent cannot inspect or mutate managed key roles')
     for local_command in [('keygen','--spec','/tmp/unused-spec.json'),('publish','--did',fixture['did']),('serve',)]:
-        result = command('anp-keyd','--root',str(vault),*local_command)
+        result = command('anpio-key','--root',str(vault),*local_command)
         check(result.returncode != 0 and 'managed vault requires' in result.stderr, 'service UID cannot use legacy local ' + local_command[0])
-    relative = subprocess.run([binary,'--root','new-untracked-vault','keygen','--spec','/tmp/unused-spec.json'],cwd=str(vault),preexec_fn=identity('anp-keyd'),capture_output=True,text=True,timeout=12)
+    relative = subprocess.run([binary,'--root','new-untracked-vault','keygen','--spec','/tmp/unused-spec.json'],cwd=str(vault),preexec_fn=identity('anpio-key'),capture_output=True,text=True,timeout=12)
     check(relative.returncode != 0 and 'managed vault requires' in relative.stderr, 'relative nonexistent root cannot bypass managed directory guard')
     alias=Path('/tmp/keyd-managed-vault-alias');alias.symlink_to(vault)
-    check(command('anp-keyd','--root',str(alias),'status').returncode != 0, 'symlink root cannot bypass managed directory guard')
+    check(command('anpio-key','--root',str(alias),'status').returncode != 0, 'symlink root cannot bypass managed directory guard')
     alias.unlink()
     policy_id = str(uuid.uuid4())
     policy = {'schema_version':1,'name':'read-only','purpose':'http-authentication','origin':'https://example.com','methods':['GET'],'paths':['/test'],'query':{'mode':'none'},'body':{'mode':'empty','max_bytes':0},'signature_profile':'anp-http-v2','grant_limits':{'max_duration_seconds':60,'max_uses':2}}
@@ -316,7 +316,7 @@ except ConnectionResetError:pass  # Early refusal closes with unread request byt
         result=subprocess.run([sys.executable,'-c',admin_call,config['admin_socket'],json.dumps(op)],preexec_fn=identity('boundary-admin'),capture_output=True,text=True,timeout=12)
         assert result.returncode==0 and json.loads(result.stdout)['code']=='OK', result.stdout+result.stderr
     unlock_hot()
-    if os.environ.get('ANP_KEYD_TEST_SDK'):
+    if os.environ.get('ANPIO_KEY_TEST_SDK'):
         sdk_policy_id = str(uuid.uuid4())
         sdk_policy = {**policy, 'name': 'sdk-hot-login', 'methods': ['POST'],
                       'paths': ['/user-service/v1/did-auth/rpc'],
@@ -326,7 +326,7 @@ except ConnectionResetError:pass  # Early refusal closes with unread request byt
         sdk_grant = commit_change({'kind': 'Grant', 'change': {**create_grant,
                       'policy_id': sdk_policy_id}})['effect']['effect']['grant']['grant_id']
         unlock_hot()  # Publishing management state deliberately locks loaded keys.
-        sdk_result = subprocess.run(['node', 'adapters/test-sdk.mjs', os.environ['ANP_KEYD_TEST_SDK'],
+        sdk_result = subprocess.run(['node', 'adapters/test-sdk.mjs', os.environ['ANPIO_KEY_TEST_SDK'],
                       sdk_grant, hot_key['key_id'], str(uuid.uuid4()), str(uuid.uuid4())],
                       preexec_fn=identity('boundary-agent-a'), capture_output=True, text=True, timeout=20)
         check(sdk_result.returncode == 0, 'SDK high-level hot-key login under independent Agent UID: ' + sdk_result.stderr)
@@ -430,7 +430,7 @@ except ConnectionResetError:pass  # Early refusal closes with unread request byt
     config_path.write_text(json.dumps(bad))
     check(command('boundary-admin', 'admin', 'status').returncode != 0, 'client rejects mismatched service ownership')
     config_path.write_text(original)
-    second = command('anp-keyd', 'serve-protected')
+    second = command('anpio-key', 'serve-protected')
     check(second.returncode != 0 and 'state lock' in second.stderr, 'second daemon cannot replace sockets')
     # Slow partial data frames consume only bounded data slots, not admin slots.
     slow_code = """import socket,sys,time
@@ -484,14 +484,14 @@ Path(fake_path).unlink()
 Path(config['sign_socket']).write_text('keep me')
 os.chown(config['sign_socket'], service.pw_uid, config['agent_gid'])
 os.chmod(config['sign_socket'], 0o660)
-result = command('anp-keyd', 'serve-protected')
+result = command('anpio-key', 'serve-protected')
 check(result.returncode != 0 and Path(config['sign_socket']).read_text() == 'keep me', 'stale cleanup preserves regular files')
 Path(config['sign_socket']).unlink()
 # Symlinks are never treated as stale sockets.
 marker = Path('/tmp/keyd-boundary-marker')
 marker.write_text('preserve symlink target')
 Path(config['sign_socket']).symlink_to(marker)
-result = command('anp-keyd', 'serve-protected')
+result = command('anpio-key', 'serve-protected')
 check(result.returncode != 0 and Path(config['sign_socket']).is_symlink() and marker.read_text() == 'preserve symlink target', 'stale cleanup preserves symlinks and targets')
 Path(config['sign_socket']).unlink()
 # A real abandoned service-owned socket is safely removed under the state lock.
@@ -592,7 +592,7 @@ check(wrong_update.returncode != 0 and Path(binary).read_bytes() == original_bin
 updated = subprocess.run([sys.executable, 'deploy/linux/install.py', '--update', '--binary', args.binary, '--sha256', hashlib.sha256(original_binary).hexdigest(), '--allow-development-build'], capture_output=True, text=True)
 check(updated.returncode == 0 and Path(binary).stat().st_mode & 0o777 == 0o755, 'offline verified update preserves executable permissions under strict umask')
 
-if os.environ.get('ANP_KEYD_ANP_TARGET'):
+if os.environ.get('ANPIO_KEY_ANP_TARGET'):
     import importlib.util
     spec = importlib.util.spec_from_file_location('keyd_real_service', Path(__file__).with_name('anp-service-acceptance.py'))
     real = importlib.util.module_from_spec(spec)
@@ -611,48 +611,48 @@ if args.systemd:
     shutil.copyfile(state_path, systemd_backup)
     systemd_backup.chmod(0o600)
 check(b'temporary-boundary-test-secret' not in state_path.read_bytes(), 'SQLite contains no unlock password')
-check(command('anp-keyd', 'init-protected-state').returncode != 0, 'explicit initialization refuses an existing database')
+check(command('anpio-key', 'init-protected-state').returncode != 0, 'explicit initialization refuses an existing database')
 saved = state_path.with_suffix('.saved')
 state_path.rename(saved)
 try:
-    result = command('anp-keyd', 'serve-protected')
+    result = command('anpio-key', 'serve-protected')
     check(result.returncode != 0 and not state_path.exists(), 'missing database stops startup without implicit recreation')
 finally:
     saved.rename(state_path)
 state_path.rename(saved)
 try:
     state_path.symlink_to(saved)
-    check(command('anp-keyd', 'serve-protected').returncode != 0, 'symlink database rejected')
+    check(command('anpio-key', 'serve-protected').returncode != 0, 'symlink database rejected')
     state_path.unlink()
     os.link(saved, state_path)
-    check(command('anp-keyd', 'serve-protected').returncode != 0, 'multiply linked database rejected')
+    check(command('anpio-key', 'serve-protected').returncode != 0, 'multiply linked database rejected')
     state_path.unlink()
 finally:
     saved.rename(state_path)
 with sqlite3.connect(state_path) as database:
     database.execute('PRAGMA user_version=4')
-check(command('anp-keyd', 'serve-protected').returncode != 0, 'newer schema stops startup')
+check(command('anpio-key', 'serve-protected').returncode != 0, 'newer schema stops startup')
 with sqlite3.connect(state_path) as database:
     database.execute('PRAGMA user_version=3')
     database.execute("UPDATE audit_events SET event_data=x'00' WHERE seq=1")
-check(command('anp-keyd', 'serve-protected').returncode != 0, 'corrupt audit stops startup')
+check(command('anpio-key', 'serve-protected').returncode != 0, 'corrupt audit stops startup')
 if args.systemd:
     # Validate the failure through the actual unit too; do not leave restart
     # loops running while the test intentionally holds corrupt state.
-    no_restart = Path('/run/systemd/system/anp-keyd.service.d/fault-test.conf')
+    no_restart = Path('/run/systemd/system/anpio-key.service.d/fault-test.conf')
     no_restart.write_text('[Service]\nRestart=no\n')
     subprocess.run(['systemctl','daemon-reload'], check=True)
-    subprocess.run(['systemctl','reset-failed','anp-keyd.service'], check=True)
-    subprocess.run(['systemctl','start','anp-keyd.service'], capture_output=True)
+    subprocess.run(['systemctl','reset-failed','anpio-key.service'], check=True)
+    subprocess.run(['systemctl','start','anpio-key.service'], capture_output=True)
     time.sleep(.5)
-    check(not Path(config['admin_socket']).exists() and subprocess.check_output(['systemctl','show','anp-keyd.service','-p','MainPID','--value'],text=True).strip() == '0', 'systemd unit fails closed on corrupt audit state')
-    subprocess.run(['systemctl','stop','anp-keyd.service'], check=True)
+    check(not Path(config['admin_socket']).exists() and subprocess.check_output(['systemctl','show','anpio-key.service','-p','MainPID','--value'],text=True).strip() == '0', 'systemd unit fails closed on corrupt audit state')
+    subprocess.run(['systemctl','stop','anpio-key.service'], check=True)
     shutil.copyfile(systemd_backup, state_path)
     with state_path.open('rb') as restored:
         os.fsync(restored.fileno())
     no_restart.unlink()
-    Path('/run/systemd/system/anp-keyd.service.d/sandbox-probe.conf').unlink()
+    Path('/run/systemd/system/anpio-key.service.d/sandbox-probe.conf').unlink()
     subprocess.run(['systemctl','daemon-reload'], check=True)
-    subprocess.run(['systemctl','reset-failed','anp-keyd.service'], check=True)
+    subprocess.run(['systemctl','reset-failed','anpio-key.service'], check=True)
     check(hashlib.sha256(state_path.read_bytes()).digest() == hashlib.sha256(systemd_backup.read_bytes()).digest(), 'test restores only exact pre-fault backup before boot validation')
 print(json.dumps({'passed': len(passed), 'protected_supported': expected_supported, 'systemd': args.systemd}), flush=True)

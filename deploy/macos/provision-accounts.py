@@ -12,10 +12,10 @@ import re
 import subprocess
 import sys
 
-SERVICE = '_anpkeyd'
+SERVICE = '_anpio'
 AGENT = '_anpagent'
-SIGN = '_anpkeyd_sign'
-ADMIN = '_anpkeyd_admin'
+SIGN = '_anpio_sign'
+ADMIN = '_anpio_admin'
 
 
 def main():

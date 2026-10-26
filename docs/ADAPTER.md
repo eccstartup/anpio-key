@@ -1,4 +1,4 @@
-# anp-keyd v2 接入说明
+# Anpio Key v2 接入说明
 
 本文面向 CLI、MCP、Node 和 ANP SDK 的接入者，描述当前接口、调用顺序及失败恢复。架构与威胁模型见 [DESIGN](DESIGN.md)。旧开发协议不作为受保护接入路径。
 
@@ -9,9 +9,9 @@
 | 接入方式 | 当前能力 | 边界 |
 |---|---|---|
 | Rust CLI `data` | 全部 v2 数据操作，认证 daemon，不自动重试 | Linux，读取受保护配置 |
-| Node `KeydV2Client` | 列钥、文档、授权/请求查询、结构化签名及 fetch | 调用 Rust CLI；Node 18+；body/URL 形态有限制 |
-| `keydV2Signer` | `signHttpRequest` 接缝 | 调用方负责稳定 request_id、发送与业务恢复 |
-| `keydV2Connector` | 现有 SDK createConfig/signRequest 接缝 | 生成 ANP-02 登录体；不接生命周期和注册挑战 |
+| Node `AnpioKeyV2Client` | 列钥、文档、授权/请求查询、结构化签名及 fetch | 调用 Rust CLI；Node 18+；body/URL 形态有限制 |
+| `anpioKeyV2Signer` | `signHttpRequest` 接缝 | 调用方负责稳定 request_id、发送与业务恢复 |
+| `anpioKeyV2Connector` | 现有 SDK createConfig/signRequest 接缝 | 生成 ANP-02 登录体；不接生命周期和注册挑战 |
 | 受保护 MCP | 五个 v2 授权工具 | 启动时固定 config，工具参数无密码或端点覆盖 |
 | 外部 SDK 高层热密钥解析 | `@connectx-sdk/core` 0.4.2 起兼容 | 更早版本仍不兼容；最低兼容版本 0.4.2 |
 | awiki JSON-RPC | Node v2 client 可按实际 RPC body 签名 | SDK 原生 ANP-02 body 不能直接当作 RPC envelope |
@@ -30,7 +30,7 @@
 可信管理员：撤销 / 轮换 / 恢复 / 发布并验证 DID 文档
 ```
 
-管理员通过 `/etc/anp-keyd/service.json` 中的独立管理端点操作；Agent 在独立 UID 下通过签名端点操作。配置、程序、socket 父目录和存储不可被 Agent 修改。不要以 root 或管理员 UID 启动不可信 Agent。
+管理员通过 `/etc/anpio-key/service.json` 中的独立管理端点操作；Agent 在独立 UID 下通过签名端点操作。配置、程序、socket 父目录和存储不可被 Agent 修改。不要以 root 或管理员 UID 启动不可信 Agent。
 
 安装器与迁移器位于 `deploy/linux/`。安装 release 需要管理员核对并提供 `--sha256`。本文的运行期示例假定服务已经安装并启动。
 
@@ -41,8 +41,8 @@
 管理员先查看登记结果：
 
 ```sh
-anp-keyd admin --config /etc/anp-keyd/service.json list-principals
-anp-keyd admin --config /etc/anp-keyd/service.json catalog
+anpio-key admin --config /etc/anpio-key/service.json list-principals
+anpio-key admin --config /etc/anpio-key/service.json catalog
 ```
 
 迁入 vault 的密钥初始为 unclassified。准备角色确认 `role.json`：
@@ -54,8 +54,8 @@ anp-keyd admin --config /etc/anp-keyd/service.json catalog
 对每个管理变更使用两步；检查返回的 `prepared.effect`、摘要及期限，再提交该次批准：
 
 ```sh
-anp-keyd admin --config /etc/anp-keyd/service.json prepare --file role.json
-anp-keyd admin --config /etc/anp-keyd/service.json commit \
+anpio-key admin --config /etc/anpio-key/service.json prepare --file role.json
+anpio-key admin --config /etc/anpio-key/service.json commit \
   --operation-id PREPARED_OPERATION_UUID --digest PREPARED_DIGEST
 ```
 
@@ -110,7 +110,7 @@ anp-keyd admin --config /etc/anp-keyd/service.json commit \
 管理员通过受认证通道解锁指定 hot key：
 
 ```sh
-anp-keyd admin --config /etc/anp-keyd/service.json unlock \
+anpio-key admin --config /etc/anpio-key/service.json unlock \
   --vault-id VAULT_UUID --did DID --kid FULL_KID
 ```
 
@@ -123,7 +123,7 @@ anp-keyd admin --config /etc/anp-keyd/service.json unlock \
 `data --file` 接收一个 **DataRequest 对象**，无需手工添加 version/request 包装。以获准 Agent UID 执行：
 
 ```sh
-anp-keyd data --config /etc/anp-keyd/service.json --file request.json
+anpio-key data --config /etc/anpio-key/service.json --file request.json
 ```
 
 请求文件示例：
@@ -188,11 +188,11 @@ anp-keyd data --config /etc/anp-keyd/service.json --file request.json
 ```js
 // 将导入路径改为部署后的实际位置。
 import { randomUUID } from 'node:crypto'
-import { KeydV2Client } from './adapters/keyd-v2.mjs'
+import { AnpioKeyV2Client } from './adapters/anpio-key-v2.mjs'
 
-const client = new KeydV2Client({
-  config: '/etc/anp-keyd/service.json',
-  binary: '/usr/local/libexec/anp-keyd',
+const client = new AnpioKeyV2Client({
+  config: '/etc/anpio-key/service.json',
+  binary: '/usr/local/libexec/anpio-key',
 })
 const request = {
   grant_id: administratorSuppliedGrantId,
@@ -219,10 +219,10 @@ const response = await fetch(signed.url, {
 
 ```js
 import { createConfig, signRequest, subjectOf } from '@connectx-sdk/core'
-import { KeydV2Client, keydV2Connector } from './adapters/keyd-v2.mjs'
+import { AnpioKeyV2Client, anpioKeyV2Connector } from './adapters/anpio-key-v2.mjs'
 
-const client = new KeydV2Client()
-const connector = keydV2Connector({
+const client = new AnpioKeyV2Client()
+const connector = anpioKeyV2Connector({
   client,
   grant_id: administratorSuppliedGrantId,
   key_id: administratorSuppliedExactKeyId,
@@ -249,7 +249,7 @@ awiki did-auth RPC 要求 JSON-RPC envelope，SDK signRequest 生成的 ANP-02 `
 
 ### 6.2 其他 SDK 接缝
 
-`keydV2Signer(client, grant_id)` 只包装 `signHttpRequest(input)`，不会增加注册、文档 proof 或密钥导出能力。接入其他 IdentitySigner 接口时应逐个核对方法；需要“签调用方提供的任意文档”的接口不能直接映射数据面。awiki-cli-rs2 的全部命令或其他外部工具没有全部完成 v2 接入。
+`anpioKeyV2Signer(client, grant_id)` 只包装 `signHttpRequest(input)`，不会增加注册、文档 proof 或密钥导出能力。接入其他 IdentitySigner 接口时应逐个核对方法；需要“签调用方提供的任意文档”的接口不能直接映射数据面。awiki-cli-rs2 的全部命令或其他外部工具没有全部完成 v2 接入。
 
 ## 7. 注册、轮换、撤销与恢复
 
@@ -269,7 +269,7 @@ awiki did-auth RPC 要求 JSON-RPC envelope，SDK signRequest 生成的 ANP-02 `
 challenge 必须替换为服务实际给出的 32 位小写 hex 字符串。管理员 prepare 后查看 effect，再使用：
 
 ```sh
-anp-keyd admin --config /etc/anp-keyd/service.json complete-secret-operation \
+anpio-key admin --config /etc/anpio-key/service.json complete-secret-operation \
   --operation-id PREPARED_OPERATION_UUID --digest PREPARED_DIGEST
 ```
 
@@ -312,7 +312,7 @@ CLI 读取管理口令，daemon 单次、短期、精确绑定地完成根签名
 编译启用 mcp feature 后，在 Agent 所属执行域启动：
 
 ```sh
-anp-keyd mcp --config /etc/anp-keyd/service.json
+anpio-key mcp --config /etc/anpio-key/service.json
 ```
 
 受保护工具只有以下五个，均调用同一个 v2 数据客户端：

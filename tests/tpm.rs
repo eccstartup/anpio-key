@@ -49,12 +49,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use anp_keyd::crypto::kdf::Argon2Config;
-use anp_keyd::did::document::DidDocumentSpec;
-use anp_keyd::error::KeydError;
-use anp_keyd::keystore::hardware::{probe_real_roots, HardwareChoice};
-use anp_keyd::keystore::layout::KeydLayout;
-use anp_keyd::keystore::{create, device, store, unwrap};
+use anpio_key::crypto::kdf::Argon2Config;
+use anpio_key::did::document::DidDocumentSpec;
+use anpio_key::error::KeydError;
+use anpio_key::keystore::hardware::{probe_real_roots, HardwareChoice};
+use anpio_key::keystore::layout::KeydLayout;
+use anpio_key::keystore::{create, device, store, unwrap};
 use serde_json::Value;
 
 const PASSPHRASE: &[u8] = b"tpm passphrase";
@@ -125,7 +125,7 @@ impl Sealed {
 
     /// 从磁盘上读回那份信封 —— 走调用方真正走的那条路,而不是复用内存里
     /// 那个结构体。段错误那条崩溃路径只在这条路上出现过。
-    fn wrapped(&self) -> anp_keyd::keystore::record::WrappedKey {
+    fn wrapped(&self) -> anpio_key::keystore::record::WrappedKey {
         store::load(&self.layout, &self.thumbprint).expect("the envelope is on disk")
     }
 }

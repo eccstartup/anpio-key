@@ -29,7 +29,7 @@ jobs:
       - name: Local release stays preview
         run: |
           cargo build --locked --release --features mcp
-          target/release/anp-keyd build-info | python3 -c 'import json,sys; i=json.load(sys.stdin); assert i["release"] and not i["protected_supported"] and not i["seed_export"] and not i["hardware_software"]'
+          target/release/anpio-key build-info | python3 -c 'import json,sys; i=json.load(sys.stdin); assert i["release"] and not i["protected_supported"] and not i["seed_export"] and not i["hardware_software"]'
 
   signing-harness-regression:
     runs-on: ubuntu-latest

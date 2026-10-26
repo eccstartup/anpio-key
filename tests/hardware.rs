@@ -4,7 +4,7 @@
 //! 有(CI 上没有;这个开发机上没有签名身份,SE 那半边端到端根本验不了,见
 //! `src/keystore/hardware/se.rs` 的模块头)。所以真正被测的是**纯软件的替身**
 //! (`--features hardware-software`),它和真硬件的差别只有一条:HS 那 32 字节
-//! 出得来。而这一整块要拿到的东西 —— "把 `~/.anp-keyd/` 拷到另一台机器打不开"
+//! 出得来。而这一整块要拿到的东西 —— "把 `~/.anpio-key/` 拷到另一台机器打不开"
 //! —— 恰恰是那一条差别之外的**形状**,所以能在这里被真的测出来。
 //!
 //! 用替身测出来的东西**是什么**要说清楚,否则这些绿勾会变成一句超出范围的
@@ -27,16 +27,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(feature = "hardware-software")]
 use std::sync::Mutex;
 
-use anp_keyd::crypto::hygiene::LockedBytes;
-use anp_keyd::crypto::kdf::Argon2Config;
-use anp_keyd::did::document::DidDocumentSpec;
-use anp_keyd::error::KeydError;
-use anp_keyd::keystore::hardware::HardwareChoice;
+use anpio_key::crypto::hygiene::LockedBytes;
+use anpio_key::crypto::kdf::Argon2Config;
+use anpio_key::did::document::DidDocumentSpec;
+use anpio_key::error::KeydError;
+use anpio_key::keystore::hardware::HardwareChoice;
 #[cfg(feature = "hardware-software")]
-use anp_keyd::keystore::record::HardwareRoot;
-use anp_keyd::keystore::create;
+use anpio_key::keystore::record::HardwareRoot;
+use anpio_key::keystore::create;
 #[cfg(all(feature = "hardware-software", feature = "seed-export"))]
-use anp_keyd::keystore::wrap;
+use anpio_key::keystore::wrap;
 
 #[cfg(feature = "hardware-software")]
 use stand_in::*;
@@ -96,7 +96,7 @@ mod stand_in {
         }
     }
 
-    /// `ANP_KEYD_SOFTWARE_HSM` 是**进程级**的,而这些测试跑在线程里。
+    /// `ANPIO_KEY_SOFTWARE_HSM` 是**进程级**的,而这些测试跑在线程里。
     ///
     /// 只有**封装**那一趟会读它(打开用的是信封里记着的那个绝对路径),所以
     /// 拿这把锁把"设变量 → 封信封"圈起来就够了,不会让测试变成串行。
@@ -105,7 +105,7 @@ mod stand_in {
     /// 在一台"软件根在 `root` 这台机器上"的机器上生成一把钥匙。
     pub fn generate_with_root(root: &Path, tag: &str) -> create::Created {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        std::env::set_var("ANP_KEYD_SOFTWARE_HSM", root);
+        std::env::set_var("ANPIO_KEY_SOFTWARE_HSM", root);
         let created = create::generate(
             &spec(tag),
             "hardware",
@@ -115,7 +115,7 @@ mod stand_in {
             HardwareChoice::Software,
         )
         .expect("seal against the software stand-in root");
-        std::env::remove_var("ANP_KEYD_SOFTWARE_HSM");
+        std::env::remove_var("ANPIO_KEY_SOFTWARE_HSM");
         created
     }
 
@@ -143,7 +143,7 @@ fn deleting_the_hardware_secret_closes_the_envelope() {
 
     // 先确认它在**没删**的时候真的开得了 —— 否则下面那条"打不开"可能只是
     // 因为别的地方本来就是坏的。
-    anp_keyd::keystore::unwrap::unlock(&created.wrapped, PASS, &device(7))
+    anpio_key::keystore::unwrap::unlock(&created.wrapped, PASS, &device(7))
         .expect("with the hardware secret in place the envelope opens");
 
     let path = hs_path(&created);
@@ -151,7 +151,7 @@ fn deleting_the_hardware_secret_closes_the_envelope() {
     std::fs::remove_file(&path).unwrap();
 
     let error = expect_err(
-        anp_keyd::keystore::unwrap::unlock(&created.wrapped, PASS, &device(7)),
+        anpio_key::keystore::unwrap::unlock(&created.wrapped, PASS, &device(7)),
         "without the third source of entropy the envelope must not open",
     );
 
@@ -184,7 +184,7 @@ fn the_right_hardware_and_the_wrong_passphrase_still_fails() {
 
     assert!(
         matches!(
-            anp_keyd::keystore::unwrap::unlock(&created.wrapped, b"not the passphrase", &device(7)),
+            anpio_key::keystore::unwrap::unlock(&created.wrapped, b"not the passphrase", &device(7)),
             Err(KeydError::BadPassphrase)
         ),
         "the passphrase is not optional just because the root is present"
@@ -193,7 +193,7 @@ fn the_right_hardware_and_the_wrong_passphrase_still_fails() {
     // `device.secret` 那一侧同理 —— 第几路都不是可以省的。
     assert!(
         matches!(
-            anp_keyd::keystore::unwrap::unlock(&created.wrapped, PASS, &device(8)),
+            anpio_key::keystore::unwrap::unlock(&created.wrapped, PASS, &device(8)),
             Err(KeydError::BadPassphrase)
         ),
         "device.secret is still the second layer; the hardware root does not replace it"
@@ -204,7 +204,7 @@ fn the_right_hardware_and_the_wrong_passphrase_still_fails() {
 // 验收第 3 条:整份目录拷到另一台机器 → 打不开,而且说得清
 // ————————————————————————————————————————————————————————————
 
-/// 把 `~/.anp-keyd/` 整个搬到一台**没有那根根**的机器上。
+/// 把 `~/.anpio-key/` 整个搬到一台**没有那根根**的机器上。
 ///
 /// 替身这一侧的"另一台机器"就是"那个目录不存在"—— `HardwareRoot::Software`
 /// 里存的是一条绝对路径,它不会跟着 JSON 一起搬过去。真硬件上这件事更强
@@ -218,19 +218,19 @@ fn an_envelope_copied_to_another_machine_will_not_open() {
 
     let created = generate_with_root(machine_a.path(), "copied");
 
-    // 把信封抄到 B:一个全新的布局,和"在新机器上装了 anp-keyd"一样。
-    let layout_b = anp_keyd::keystore::layout::KeydLayout::at(machine_b.path().join("root"));
+    // 把信封抄到 B:一个全新的布局,和"在新机器上装了 anpio-key"一样。
+    let layout_b = anpio_key::keystore::layout::KeydLayout::at(machine_b.path().join("root"));
     layout_b.ensure().unwrap();
-    anp_keyd::keystore::store::save_new(&layout_b, &created.wrapped).unwrap();
+    anpio_key::keystore::store::save_new(&layout_b, &created.wrapped).unwrap();
 
     // B 上读回来的那份,跟 A 上那份是同一个东西。
     let copied =
-        anp_keyd::keystore::store::load(&layout_b, &created.wrapped.id.thumbprint).unwrap();
+        anpio_key::keystore::store::load(&layout_b, &created.wrapped.id.thumbprint).unwrap();
     assert_eq!(copied.id, created.wrapped.id, "the copy must be the same key");
 
     // **先说清楚哪一步不是问题**:信封本身是可搬的,文件抄过去照样解析得开。
     // 只要 A 那根根还在,B 上就能开 —— 说明拉不开的**不是**搬家这件事。
-    anp_keyd::keystore::unwrap::unlock(&copied, PASS, &device(7))
+    anpio_key::keystore::unwrap::unlock(&copied, PASS, &device(7))
         .expect("as long as the root is still reachable, the copy opens — the file moved fine");
 
     // 现在让那根根**不跟着走**:A 机器上那根根不在,而这正是一台没走到过
@@ -238,7 +238,7 @@ fn an_envelope_copied_to_another_machine_will_not_open() {
     std::fs::remove_dir_all(machine_a.path()).unwrap();
 
     let error = expect_err(
-        anp_keyd::keystore::unwrap::unlock(&copied, PASS, &device(7)),
+        anpio_key::keystore::unwrap::unlock(&copied, PASS, &device(7)),
         "without the root, the copy must be useless",
     );
 
@@ -276,19 +276,19 @@ fn the_same_seed_exports_the_same_words_whether_bound_or_not() {
 
     let bound = {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        std::env::set_var("ANP_KEYD_SOFTWARE_HSM", root.path());
-        let sealed = anp_keyd::keystore::hardware::seal_new(HardwareChoice::Software, "words")
+        std::env::set_var("ANPIO_KEY_SOFTWARE_HSM", root.path());
+        let sealed = anpio_key::keystore::hardware::seal_new(HardwareChoice::Software, "words")
             .unwrap()
             .expect("a software root was asked for");
-        std::env::remove_var("ANP_KEYD_SOFTWARE_HSM");
+        std::env::remove_var("ANPIO_KEY_SOFTWARE_HSM");
 
         wrap::seal(wrap::SealRequest {
-            id: anp_keyd::keystore::record::KeyId {
+            id: anpio_key::keystore::record::KeyId {
                 did: "did:wba:example.com:agents:words:e1_words".into(),
                 kid: "did:wba:example.com:agents:words:e1_words#key-1".into(),
                 thumbprint: "e1_words".into(),
             },
-            algorithm: anp_keyd::keystore::record::KeyAlgorithm::Ed25519,
+            algorithm: anpio_key::keystore::record::KeyAlgorithm::Ed25519,
             public_multibase: public_multibase.clone(),
             label: "words".into(),
             passphrase: PASS,
@@ -301,12 +301,12 @@ fn the_same_seed_exports_the_same_words_whether_bound_or_not() {
     };
 
     let plain = wrap::seal(wrap::SealRequest {
-        id: anp_keyd::keystore::record::KeyId {
+        id: anpio_key::keystore::record::KeyId {
             did: "did:wba:example.com:agents:words:e1_words".into(),
             kid: "did:wba:example.com:agents:words:e1_words#key-1".into(),
             thumbprint: "e1_words".into(),
         },
-        algorithm: anp_keyd::keystore::record::KeyAlgorithm::Ed25519,
+        algorithm: anpio_key::keystore::record::KeyAlgorithm::Ed25519,
         public_multibase,
         label: "words".into(),
         passphrase: PASS,
@@ -319,16 +319,16 @@ fn the_same_seed_exports_the_same_words_whether_bound_or_not() {
 
     // 两个信封是**不一样**的 —— 版本号就不一样。否则下面那一步可能只是在
     // 比较同一个对象。
-    assert_eq!(bound.version, anp_keyd::keystore::record::RECORD_VERSION_HARDWARE);
-    assert_eq!(plain.version, anp_keyd::keystore::record::RECORD_VERSION);
+    assert_eq!(bound.version, anpio_key::keystore::record::RECORD_VERSION_HARDWARE);
+    assert_eq!(plain.version, anpio_key::keystore::record::RECORD_VERSION);
 
     let bound_seed =
-        anp_keyd::keystore::unwrap::open_seed(&bound, PASS, &device(7)).expect("the bound one opens");
+        anpio_key::keystore::unwrap::open_seed(&bound, PASS, &device(7)).expect("the bound one opens");
     let plain_seed =
-        anp_keyd::keystore::unwrap::open_seed(&plain, PASS, &device(7)).expect("the plain one opens");
+        anpio_key::keystore::unwrap::open_seed(&plain, PASS, &device(7)).expect("the plain one opens");
 
-    let bound_words = anp_keyd::crypto::mnemonic::to_words(&bound_seed).unwrap();
-    let plain_words = anp_keyd::crypto::mnemonic::to_words(&plain_seed).unwrap();
+    let bound_words = anpio_key::crypto::mnemonic::to_words(&bound_seed).unwrap();
+    let plain_words = anpio_key::crypto::mnemonic::to_words(&plain_seed).unwrap();
 
     assert_eq!(
         bound_words.as_str(),
@@ -336,7 +336,7 @@ fn the_same_seed_exports_the_same_words_whether_bound_or_not() {
         "the hardware root binds the ENVELOPE, not the key — the words must not depend on it"
     );
     // 而且它们就是**原来那把** seed 的词 —— 不是一个两边都错、但错得一样的词表。
-    assert_eq!(bound_words.as_str(), anp_keyd::crypto::mnemonic::to_words(&seed).unwrap().as_str());
+    assert_eq!(bound_words.as_str(), anpio_key::crypto::mnemonic::to_words(&seed).unwrap().as_str());
 }
 
 // ————————————————————————————————————————————————————————————

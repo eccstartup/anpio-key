@@ -1,11 +1,11 @@
 #![cfg(feature = "mcp")]
 //! MCP 前端接的是一根**真的管子**:一个真守护进程、一条真 socket、一个真的
-//! `anp-keyd mcp` 子进程,说的是一行一个 JSON-RPC 的 MCP 协议。
+//! `anpio-key mcp` 子进程,说的是一行一个 JSON-RPC 的 MCP 协议。
 //!
 //! # 为什么在进程边界上测,而不是在 Rust 里调
 //!
 //! 因为**这里被测的东西就是进程边界**。MCP 客户端的配置文件里写的是
-//! `command: anp-keyd mcp` —— 它对我们的了解止于"一个说 stdio MCP 的进程"。
+//! `command: anpio-key mcp` —— 它对我们的了解止于"一个说 stdio MCP 的进程"。
 //! 在 Rust 里直接调 `ServerHandler::call_tool` 要自己拼 `RequestContext` 这些
 //! rmcp 的内部类型,测出来的是"我和 rmcp 的当前版本对得上",而不是"一个
 //! MCP 客户端能用"。前者会在 rmcp 升级时红,后者才是产品承诺。
@@ -23,14 +23,14 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use anp_keyd::crypto::kdf::Argon2Config;
-use anp_keyd::daemon::peer::PeerPolicy;
-use anp_keyd::daemon::state::{autolock_from_secs, DaemonState, Roots, SigningGates};
-use anp_keyd::daemon::{server, ServerConfig};
-use anp_keyd::did::document::{self, DidDocumentSpec};
-use anp_keyd::keystore::hardware::HardwareChoice;
-use anp_keyd::keystore::layout::KeydLayout;
-use anp_keyd::keystore::{create, device, store, unwrap};
+use anpio_key::crypto::kdf::Argon2Config;
+use anpio_key::daemon::peer::PeerPolicy;
+use anpio_key::daemon::state::{autolock_from_secs, DaemonState, Roots, SigningGates};
+use anpio_key::daemon::{server, ServerConfig};
+use anpio_key::did::document::{self, DidDocumentSpec};
+use anpio_key::keystore::hardware::HardwareChoice;
+use anpio_key::keystore::layout::KeydLayout;
+use anpio_key::keystore::{create, device, store, unwrap};
 use serde_json::{json, Value};
 
 const PASSPHRASE: &[u8] = b"mcp passphrase";
@@ -142,7 +142,7 @@ fn wait_for_socket(path: &Path) {
     panic!("the daemon never created {}", path.display());
 }
 
-/// 一个真的 `anp-keyd mcp` 子进程,说 stdio 上的 MCP。
+/// 一个真的 `anpio-key mcp` 子进程,说 stdio 上的 MCP。
 struct Mcp {
     child: Child,
     stdin: ChildStdin,
@@ -151,7 +151,7 @@ struct Mcp {
 
 impl Mcp {
     fn start(socket: &Path) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_anp-keyd"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_anpio-key"))
             .arg("mcp")
             .arg("--socket")
             .arg(socket)
@@ -160,7 +160,7 @@ impl Mcp {
             // stderr 留给它自己:诊断走 tracing,而 stdout 归协议。
             .stderr(Stdio::null())
             .spawn()
-            .expect("spawn `anp-keyd mcp`");
+            .expect("spawn `anpio-key mcp`");
 
         let stdin = child.stdin.take().expect("stdin");
         let stdout = BufReader::new(child.stdout.take().expect("stdout"));
@@ -170,7 +170,7 @@ impl Mcp {
         let init = mcp.request(1, "initialize", json!({
             "protocolVersion": "2024-11-05",
             "capabilities": {},
-            "clientInfo": {"name": "anp-keyd tests", "version": "0"},
+            "clientInfo": {"name": "anpio-key tests", "version": "0"},
         }));
         assert_eq!(
             init["result"]["protocolVersion"], "2024-11-05",
@@ -363,7 +363,7 @@ fn unlock_then_sign_request_produces_headers_upstream_accepts() {
     let daemon = Daemon::start();
     let mut mcp = Mcp::start(&daemon.sock);
 
-    anp_keyd::client::Client::connect(&daemon.sock).unwrap()
+    anpio_key::client::Client::connect(&daemon.sock).unwrap()
         .unlock(&daemon.did, None, std::str::from_utf8(PASSPHRASE).unwrap()).unwrap();
 
     let unlocked = payload(&mcp.call_tool(6, "status", json!({})));
@@ -427,7 +427,7 @@ fn a_caller_supplied_nonce_reaches_the_signature_over_mcp() {
     let daemon = Daemon::start();
     let mut mcp = Mcp::start(&daemon.sock);
 
-    anp_keyd::client::Client::connect(&daemon.sock).unwrap()
+    anpio_key::client::Client::connect(&daemon.sock).unwrap()
         .unlock(&daemon.did, None, std::str::from_utf8(PASSPHRASE).unwrap()).unwrap();
 
     let url = "https://example.com/api/nonce";

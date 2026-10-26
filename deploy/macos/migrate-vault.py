@@ -56,8 +56,8 @@ def apfs(path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source', type=Path, required=True)
-    parser.add_argument('--config', type=Path, default=Path('/Library/ANPKeyd/service.json'))
-    parser.add_argument('--binary', type=Path, default=Path('/Library/ANPKeyd/bin/anp-keyd'))
+    parser.add_argument('--config', type=Path, default=Path('/Library/ANPIOKey/service.json'))
+    parser.add_argument('--binary', type=Path, default=Path('/Library/ANPIOKey/bin/anpio-key'))
     parser.add_argument('--apply', action='store_true')
     parser.add_argument('--recovery-dir', type=Path)
     args = parser.parse_args()

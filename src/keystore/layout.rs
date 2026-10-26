@@ -1,7 +1,7 @@
 //! 目录布局、原子写、权限。
 //!
 //! ```text
-//! ~/.anp-keyd/                       0700
+//! ~/.anpio-key/                       0700
 //!   device.secret                    0600  32 字节随机 —— 第一把钥匙
 //!   keys/<thumbprint>.json           0600  信封(磁盘上唯一存的东西)
 //!   dids/<did-safe>.json             0644  可公开的 did:wba 文档
@@ -29,17 +29,17 @@ pub struct KeydLayout {
 }
 
 impl KeydLayout {
-    /// 模式 S(单机单用户):`~/.anp-keyd`。
+    /// 模式 S(单机单用户):`~/.anpio-key`。
     pub fn user_default() -> Result<Self> {
         let home = std::env::var_os("HOME")
             .ok_or_else(|| KeydError::Protocol("HOME is not set; use --root".into()))?;
-        Ok(Self::at(PathBuf::from(home).join(".anp-keyd")))
+        Ok(Self::at(PathBuf::from(home).join(".anpio-key")))
     }
 
-    /// 模式 S 系统服务:`/var/lib/anp-keyd/users/<uid>` —— 每人一个命名空间。
+    /// 模式 S 系统服务:`/var/lib/anpio-key/users/<uid>` —— 每人一个命名空间。
     pub fn system(uid: u32) -> Result<Self> {
         Ok(Self::at(
-            PathBuf::from("/var/lib/anp-keyd/users").join(uid.to_string()),
+            PathBuf::from("/var/lib/anpio-key/users").join(uid.to_string()),
         ))
     }
 

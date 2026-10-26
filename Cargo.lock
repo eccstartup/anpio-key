@@ -89,7 +89,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "anp-keyd"
+name = "anpio-key"
 version = "0.1.0"
 dependencies = [
  "anp",

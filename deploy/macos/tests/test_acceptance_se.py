@@ -19,7 +19,7 @@ class BundleChecks(unittest.TestCase):
             bundle = self.fixture(root)
             macos = bundle / 'Contents/MacOS'
             macos.mkdir()
-            binary = macos / 'anp-keyd'
+            binary = macos / 'anpio-key'
             binary.write_bytes(b'fixture-executable')
             base = Path(root) / 'runtime'
             base.mkdir()
@@ -29,7 +29,7 @@ class BundleChecks(unittest.TestCase):
             class ReachedGeneration(Exception):
                 pass
             def run(admin, helper, mode, source):
-                self.assertEqual(helper, base / 'Fixture.app/Contents/MacOS/anp-keyd')
+                self.assertEqual(helper, base / 'Fixture.app/Contents/MacOS/anpio-key')
                 self.assertEqual(mode, 'generate-se')
                 self.assertEqual(helper.read_bytes(), binary.read_bytes())
                 self.assertTrue((base / 'Fixture.app/Contents/embedded.provisionprofile').is_file())

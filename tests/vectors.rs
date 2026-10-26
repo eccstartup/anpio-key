@@ -26,10 +26,10 @@
 //! 有——它那 1023 字节的消息是从 RFC 里抽的,不是打的。凡是不能逐字符复现的,
 //! 与其写一个我记得的近似值,不如不写。
 
-use anp_keyd::crypto::hygiene::LockedBytes;
-use anp_keyd::crypto::thumbprint::e1_segment;
-use anp_keyd::keystore::KeyId;
-use anp_keyd::sign::{LockedSigningKey, Signer};
+use anpio_key::crypto::hygiene::LockedBytes;
+use anpio_key::crypto::thumbprint::e1_segment;
+use anpio_key::keystore::KeyId;
+use anpio_key::sign::{LockedSigningKey, Signer};
 use base64::Engine;
 use sha2::{Digest, Sha256, Sha512};
 use serde_json::Value;
@@ -412,7 +412,7 @@ fn the_e1_segment_is_the_one_the_sibling_implementation_derives() {
 ///    倍数时填充才恰好为空。
 #[test]
 fn the_rfc9421_signature_base_is_reproduced_character_for_character() {
-    use anp_keyd::sign::rfc9421::verify_covered_set;
+    use anpio_key::sign::rfc9421::verify_covered_set;
 
     let file = vectors("rfc9421_appendixB.json");
     let base = string(&file, "signature_base");

@@ -132,7 +132,7 @@ def probe_result(label, action, timeout):
 
 def fresh_job_probe(base):
     """One-shot launchd job created after relogin; never authority or retries."""
-    label = 'org.anp-keyd.logout-check.probe.' + str(os.getpid())
+    label = 'org.anpio-key.logout-check.probe.' + str(os.getpid())
     marker = base / 'post-relogin-probe.marker'
     spec_path = base / 'post-relogin-probe.plist'
     try:
@@ -187,7 +187,7 @@ def log_post_relogin_probes(checks):
     probe_result('launchd-fresh-job', lambda: fresh_job_probe(checks.base), 20)
 
 
-POST_RELOGIN_LAUNCHER = Path('/Library/ANPKeydLogoutChecks-post-relogin.sh')
+POST_RELOGIN_LAUNCHER = Path('/Library/ANPIOKeyLogoutChecks-post-relogin.sh')
 
 
 def write_post_relogin_state(checks, request, pending):
@@ -258,7 +258,7 @@ def wait_for_post_relogin_result(base, timeout=600):
     return outcome
 
 
-POST_REBOOT_LAUNCHER = Path('/Library/ANPKeydRebootChecks-post-reboot.sh')
+POST_REBOOT_LAUNCHER = Path('/Library/ANPIOKeyRebootChecks-post-reboot.sh')
 
 
 def host_boottime():
@@ -308,7 +308,7 @@ def write_post_reboot_state(checks, request, pending):
         'fixture': {'document': checks.fixture['manifest']['document'],
                     'helper': str(checks.fixture['helper']),
                     'vault_id': checks.fixture['vault_id']},
-        'helper': str(base / 'LoginHelper.app/Contents/MacOS/anp-keyd'),
+        'helper': str(base / 'LoginHelper.app/Contents/MacOS/anpio-key'),
         'helper_sha256': str(checks.args.se_login_sha256),
         'hardware': checks.fixture['manifest']['hot_hardware'],
     }
@@ -393,7 +393,7 @@ def install_helper(source, destination, team, application, upgrade):
 
 
 def helper_digest(bundle):
-    return hashlib.sha256((Path(bundle) / 'Contents/MacOS/anp-keyd').read_bytes()).hexdigest()
+    return hashlib.sha256((Path(bundle) / 'Contents/MacOS/anpio-key').read_bytes()).hexdigest()
 
 
 def parse_entitlements(output):
@@ -485,7 +485,7 @@ class Checks(acceptance_signing.Checks):
 
         tampered = self.base / 'TamperedHelper.app'
         shutil.copytree(upgrade_bundle, tampered)
-        binary = tampered / 'Contents/MacOS/anp-keyd'
+        binary = tampered / 'Contents/MacOS/anpio-key'
         data = bytearray(binary.read_bytes())
         data[len(data) // 2] ^= 0xff
         binary.write_bytes(data)
@@ -594,7 +594,7 @@ class Checks(acceptance_signing.Checks):
 
     def exercise_key_loss(self, label, helper_command):
         cleanup = self.args.key_loss_cleanup
-        binary = cleanup / 'Contents/MacOS/anp-keyd'
+        binary = cleanup / 'Contents/MacOS/anpio-key'
         if not binary.is_file() or binary.is_symlink():
             raise ValueError('key-loss cleanup is not a signed app bundle')
         if hashlib.sha256(binary.read_bytes()).hexdigest() != self.args.key_loss_cleanup_sha256:
@@ -688,7 +688,7 @@ class Checks(acceptance_signing.Checks):
                 raise ValueError('the probe helper kept its former keychain permission')
         print(f'PASS prepared {kind} helper copy', flush=True)
 
-        binary = copy / 'Contents/MacOS/anp-keyd'
+        binary = copy / 'Contents/MacOS/anpio-key'
         if kind == 'foreign-identity':
             # The same probe that is usable under the original signature must
             # report the SE root unavailable once the identity is gone.
@@ -732,7 +732,7 @@ class Checks(acceptance_signing.Checks):
         ending = getattr(self.args, 'se_ending', 'kill')
         bundle = self.args.se_login_bundle
         validate_bundle(bundle)
-        source = bundle / 'Contents/MacOS/anp-keyd'
+        source = bundle / 'Contents/MacOS/anpio-key'
         assert hashlib.sha256(source.read_bytes()).hexdigest() == self.args.se_login_sha256
         if ending == 'upgrade':
             upgrade_bundle = self.args.upgrade_bundle
@@ -750,7 +750,7 @@ class Checks(acceptance_signing.Checks):
         else:
             destination = self.base / 'LoginHelper.app'
             shutil.copytree(bundle, destination)
-        binary = destination / 'Contents/MacOS/anp-keyd'
+        binary = destination / 'Contents/MacOS/anpio-key'
         assert hashlib.sha256(binary.read_bytes()).hexdigest() == self.args.se_login_sha256
         info = subprocess.run([str(binary), 'build-info'], capture_output=True, text=True, timeout=15, **self.credentials(self.admin), env=self.env, cwd='/')
         assert info.returncode == 0, info.stderr
@@ -924,7 +924,7 @@ class Checks(acceptance_signing.Checks):
                     fresh = self.grant()
                     self.expect_locked(fresh)
                 if ending == 'upgrade':
-                    self.upgraded_helper_sign(destination / 'Contents/MacOS/anp-keyd')
+                    self.upgraded_helper_sign(destination / 'Contents/MacOS/anpio-key')
                 authority = ('expired authority remains unusable' if ending == 'long-sleep'
                              else 'revocation and stale-approval refusal')
                 if ending == 'upgrade':

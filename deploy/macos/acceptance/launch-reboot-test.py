@@ -17,7 +17,7 @@ import tempfile
 
 
 def job_spec(stage, python, arguments):
-    return {'Label': 'org.anp-keyd.reboot-check.' + stage.name,
+    return {'Label': 'org.anpio-key.reboot-check.' + stage.name,
         'ProgramArguments': [str(python), '-u', str(stage / 'test-runtime.py'),
                              '--se-ending', 'reboot', *arguments],
         'RunAtLoad': True, 'KeepAlive': False, 'LaunchOnlyOnce': True,
@@ -37,11 +37,11 @@ def main():
         raise ValueError('requires macOS root; run with sudo in your own terminal')
     if args.finish:
         stage = args.finish.absolute()
-        if stage.parent != Path('/Library') or not stage.name.startswith('ANPKeydRebootChecks-'):
+        if stage.parent != Path('/Library') or not stage.name.startswith('ANPIOKeyRebootChecks-'):
             raise ValueError('unexpected reboot test directory')
         if stage.is_symlink() or not stage.is_dir() or stage.stat().st_uid != 0:
             raise ValueError('expected a root-owned test directory')
-        label = 'org.anp-keyd.reboot-check.' + stage.name
+        label = 'org.anpio-key.reboot-check.' + stage.name
         status = subprocess.run(['/bin/launchctl', 'print', 'system/' + label],
                                 capture_output=True, text=True, timeout=10)
         if status.returncode:
@@ -61,7 +61,7 @@ def main():
                '--helper-sha256', '--se-login-bundle', '--se-login-sha256'}
     if len(arguments) != 12 or set(arguments[::2]) != allowed:
         raise ValueError('supply exactly the six pinned SE candidate/helper options')
-    stage = Path(tempfile.mkdtemp(prefix='ANPKeydRebootChecks-', dir='/Library'))
+    stage = Path(tempfile.mkdtemp(prefix='ANPIOKeyRebootChecks-', dir='/Library'))
     stage.chmod(0o755)
     attempted = False
     try:

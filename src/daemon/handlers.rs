@@ -735,7 +735,7 @@ mod tests {
             pub fn new() -> Self {
                 let n = COUNTER.fetch_add(1, Ordering::Relaxed);
                 let path = std::env::temp_dir().join(format!(
-                    "anp-keyd-handlers-{}-{n}-{:?}",
+                    "anpio-key-handlers-{}-{n}-{:?}",
                     std::process::id(),
                     std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)

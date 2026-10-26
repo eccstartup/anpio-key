@@ -1,5 +1,5 @@
 #!/bin/bash
-# One-command installation for anp-keyd.
+# One-command installation for anpio-key.
 #
 # Run from a reviewed checkout:
 #   ./install.sh
@@ -31,7 +31,7 @@ usage() {
 初始化身份和 grant（安装后在同一个命令里继续；macOS 只用于本机预览）:
   --bootstrap         安装后创建新身份、迁入受保护状态并创建一张 grant
   --did-host HOST     DID 文档所在域名，例如 agents.example.com
-  --did-path PATH     DID 路径，默认 agents/anp-keyd
+  --did-path PATH     DID 路径，默认 agents/anpio-key
   --target URL        Agent 要访问的完整 HTTPS URL
   --method METHOD     允许的方法，可重复，默认 GET
   --body-bytes N      有请求体的方法允许的最大字节数，默认 1048576
@@ -44,7 +44,7 @@ usage() {
   ./install.sh --tpm-device
   ./install.sh --bootstrap --did-host agents.example.com \
     --target https://api.example.com/v1/status
-  sudo ./install.sh --binary /root/anp-keyd --sha256 VERIFIED_SHA256 --admin-user operator
+  sudo ./install.sh --binary /root/anpio-key --sha256 VERIFIED_SHA256 --admin-user operator
 
 不带 --bootstrap 时只创建空服务。身份、策略和 grant 也可以之后按
 deploy/LOCAL-USE.md 手动完成。口令始终由你在这个终端输入，不经过 Agent。
@@ -62,7 +62,7 @@ DRY_RUN=0
 ROOT_PHASE=0
 BOOTSTRAP=0
 DID_HOST=""
-DID_PATH="agents/anp-keyd"
+DID_PATH="agents/anpio-key"
 TARGET=""
 METHODS=()
 BODY_BYTES=1048576
@@ -178,7 +178,7 @@ if [[ -z "$BINARY" ]]; then
   [[ -n "$TPM_DEVICE" ]] && features="$features,hardware-tpm"
   echo "==> 构建 release（features: $features）"
   ( cd "$REPO_ROOT" && cargo build --locked --release --features "$features" )
-  BINARY="$REPO_ROOT/target/release/anp-keyd"
+  BINARY="$REPO_ROOT/target/release/anpio-key"
 fi
 
 [[ -f "$BINARY" && -x "$BINARY" ]] || die "程序不可执行: $BINARY"
@@ -245,7 +245,7 @@ case "$PLATFORM" in
     for agent in "${AGENT_USERS[@]}"; do
       if ! id -u "$agent" >/dev/null 2>&1; then
         echo "==> 创建 Agent 账号 $agent"
-        useradd --create-home --shell /bin/bash --comment "anp-keyd Agent" --password '!' "$agent"
+        useradd --create-home --shell /bin/bash --comment "anpio-key Agent" --password '!' "$agent"
       fi
     done
 
@@ -257,33 +257,33 @@ case "$PLATFORM" in
 
     echo "==> 启动服务"
     systemctl daemon-reload
-    systemctl enable --now anp-keyd.service
+    systemctl enable --now anpio-key.service
     for _ in {1..30}; do
-      [[ -S /run/anp-keyd/admin/admin.sock ]] && break
+      [[ -S /run/anpio-key/admin/admin.sock ]] && break
       sleep 1
     done
-    if ! systemctl is-active --quiet anp-keyd.service; then
-      systemctl status --no-pager anp-keyd.service || true
-      journalctl -u anp-keyd.service -n 50 --no-pager || true
+    if ! systemctl is-active --quiet anpio-key.service; then
+      systemctl status --no-pager anpio-key.service || true
+      journalctl -u anpio-key.service -n 50 --no-pager || true
       die "服务没有启动；上面的日志说明了原因"
     fi
 
-    BIN=/usr/local/libexec/anp-keyd
+    BIN=/usr/local/libexec/anpio-key
     echo "==> 只读检查"
     if command -v runuser >/dev/null 2>&1; then
-      runuser -u "$ADMIN_USER" -- "$BIN" admin --config /etc/anp-keyd/service.json status || true
-      runuser -u "$ADMIN_USER" -- "$BIN" probe --security --config /etc/anp-keyd/service.json || true
+      runuser -u "$ADMIN_USER" -- "$BIN" admin --config /etc/anpio-key/service.json status || true
+      runuser -u "$ADMIN_USER" -- "$BIN" probe --security --config /etc/anpio-key/service.json || true
     fi
 
     echo
-    echo "安装完成。服务已启动，状态目录 /var/lib/anp-keyd。"
+    echo "安装完成。服务已启动，状态目录 /var/lib/anpio-key。"
     echo "管理员: $ADMIN_USER    Agent: ${AGENT_USERS[*]}"
 
     if ((BOOTSTRAP)); then
       hardware=none
       [[ -n "$TPM_DEVICE" ]] && hardware=tpm
       args=(python3 "$REPO_ROOT/deploy/linux/bootstrap.py"
-        --config /etc/anp-keyd/service.json --binary "$BIN"
+        --config /etc/anpio-key/service.json --binary "$BIN"
         --admin-user "$ADMIN_USER" --agent-user "${AGENT_USERS[0]}"
         --did-host "$DID_HOST" --did-path "$DID_PATH" --target "$TARGET"
         --body-bytes "$BODY_BYTES" --grant-days "$GRANT_DAYS" --max-uses "$MAX_USES"
@@ -301,9 +301,9 @@ case "$PLATFORM" in
     echo
     if ((BOOTSTRAP)); then
       args=(/usr/bin/python3 "$REPO_ROOT/deploy/macos/bootstrap.py"
-        --config /Library/ANPKeyd/service.json
-        --binary /Library/ANPKeyd/bin/anp-keyd
-        --plist /Library/LaunchDaemons/org.anp-keyd.local.plist
+        --config /Library/ANPIOKey/service.json
+        --binary /Library/ANPIOKey/bin/anpio-key
+        --plist /Library/LaunchDaemons/org.anpio-key.local.plist
         --admin-user "$ADMIN_USER" --agent-user "_anpagent"
         --did-host "$DID_HOST" --did-path "$DID_PATH" --target "$TARGET"
         --body-bytes "$BODY_BYTES" --grant-days "$GRANT_DAYS" --max-uses "$MAX_USES")

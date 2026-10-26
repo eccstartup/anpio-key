@@ -105,7 +105,7 @@ fn peer_pid(stream: &UnixStream) -> Option<i32> {
 /// 而这一层一旦猜错,后果是"任何人都能连上来签"。宁可编译不过。
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "ios")))]
 compile_error!(
-    "anp-keyd needs a kernel peer-credential API (SO_PEERCRED or getpeereid) to identify its \
+    "anpio-key needs a kernel peer-credential API (SO_PEERCRED or getpeereid) to identify its \
      callers, and this platform's has not been audited. Shipping without it would mean trusting \
      the caller's own claim about who it is."
 );

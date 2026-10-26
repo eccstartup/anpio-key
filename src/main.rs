@@ -1,18 +1,18 @@
-//! `anp-keyd` 的可执行入口。
+//! `anpio-key` 的可执行入口。
 //!
 //! 入口只做三件事:解析参数、把 `KeydError` 打成一句人能读的话、定退出码。
-//! 真正的逻辑全在 [`anp_keyd::cli`] 里 —— 那里可以被测试,`main` 不行。
+//! 真正的逻辑全在 [`anpio_key::cli`] 里 —— 那里可以被测试,`main` 不行。
 
 use clap::Parser;
 
-use anp_keyd::cli::Cli;
-use anp_keyd::error::KeydError;
+use anpio_key::cli::Cli;
+use anpio_key::error::KeydError;
 
 fn main() {
     let cli = Cli::parse();
 
-    if let Err(error) = anp_keyd::cli::run(cli) {
-        eprintln!("anp-keyd: {error}");
+    if let Err(error) = anpio_key::cli::run(cli) {
+        eprintln!("anpio-key: {error}");
         // 错误链要展开。`thiserror` 的 `#[from]` 会让 io 错误缩成一句
         // "I/O error",而底下那句 `Permission denied (os error 13)` 才是
         // 真正有用的 —— 它得打出来。

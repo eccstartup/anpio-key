@@ -63,7 +63,7 @@ apt-get install -y -qq openssh-server sudo >/dev/null
 cd /src
 if [ -d /cargo-cache ]; then offline=--offline; else offline=; fi
 CARGO_TARGET_DIR=/tmp/keyd-target cargo build --locked ${offline} --quiet
-install -m 755 /tmp/keyd-target/debug/anp-keyd /usr/local/bin/anp-keyd
+install -m 755 /tmp/keyd-target/debug/anpio-key /usr/local/bin/anpio-key
 useradd -m -u 1001 -s /usr/sbin/nologin keydservice
 useradd -m -u 1003 -s /bin/sh audit
 usermod -p x audit
@@ -73,7 +73,7 @@ install -d -m 755 /run/sshd /etc/ssh/authorized_keys
         execute(source, f'''install -d -m 755 /usr/local/libexec
 cat > /usr/local/libexec/keyd-audit-source <<'WRAPPER'
 #!/bin/sh
-exec /usr/local/bin/anp-keyd audit-source --database /srv/keyd/state.sqlite --instance-id {INSTANCE}
+exec /usr/local/bin/anpio-key audit-source --database /srv/keyd/state.sqlite --instance-id {INSTANCE}
 WRAPPER
 chmod 755 /usr/local/libexec/keyd-audit-source
 printf '%s\\n' 'audit ALL=(keydservice) NOPASSWD: /usr/local/libexec/keyd-audit-source ""' > /etc/sudoers.d/keyd-audit
@@ -91,7 +91,7 @@ c.execute('PRAGMA user_version=3')
 c.execute('INSERT INTO service_meta VALUES(1,3,?,0,0)', ('{INSTANCE}',))
 data=json.dumps({{'event':'INITIALIZED','instance_id':'{INSTANCE}','at':100}},sort_keys=True,separators=(',',':')).encode()
 prev='0'*64
-h=hashlib.sha256(b'anp-keyd/sqlite-audit/v1\\0'+(1).to_bytes(8,'big',signed=True)+prev.encode()+data).hexdigest()
+h=hashlib.sha256(b'anpio-key/sqlite-audit/v1\\0'+(1).to_bytes(8,'big',signed=True)+prev.encode()+data).hexdigest()
 c.execute('INSERT INTO audit_events VALUES(1,?,?,?)',(prev,h,data));c.commit();c.close()
 os.chown(p,1001,1001);os.chmod(p,0o600)
 shutil.copy2(p,'/srv/keyd/old.sqlite')
@@ -142,7 +142,7 @@ c=sqlite3.connect('/srv/keyd/state.sqlite')
 seq,prev=c.execute('SELECT seq,event_digest FROM audit_events ORDER BY seq DESC LIMIT 1').fetchone()
 data=b'{"event":"CHECKPOINT_ACCEPTANCE"}'
 seq+=1
-h=hashlib.sha256(b'anp-keyd/sqlite-audit/v1\\0'+seq.to_bytes(8,'big',signed=True)+prev.encode()+data).hexdigest()
+h=hashlib.sha256(b'anpio-key/sqlite-audit/v1\\0'+seq.to_bytes(8,'big',signed=True)+prev.encode()+data).hexdigest()
 c.execute('INSERT INTO audit_events VALUES(?,?,?,?)',(seq,prev,h,data));c.commit();c.close()
 PYADD
 ''')
@@ -190,7 +190,7 @@ import sqlite3,hashlib
 c=sqlite3.connect('/srv/keyd/state.sqlite')
 prev=c.execute('SELECT event_digest FROM audit_events WHERE seq=1').fetchone()[0]
 data=b'{"event":"ALTERNATE_BRANCH"}'
-h=hashlib.sha256(b'anp-keyd/sqlite-audit/v1\\0'+(2).to_bytes(8,'big',signed=True)+prev.encode()+data).hexdigest()
+h=hashlib.sha256(b'anpio-key/sqlite-audit/v1\\0'+(2).to_bytes(8,'big',signed=True)+prev.encode()+data).hexdigest()
 c.execute('UPDATE audit_events SET event_data=?,event_digest=? WHERE seq=2',(data,h));c.commit();c.close()
 PYFORK
 ''')

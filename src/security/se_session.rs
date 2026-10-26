@@ -253,7 +253,7 @@ mod console_observer {
             if std::thread::Builder::new()
                 .name("se-console-watch".into())
                 .spawn(move || {
-                    let name = CFString::new("org.anp-keyd.se-console-watch");
+                    let name = CFString::new("org.anpio-key.se-console-watch");
                     // No context pointer escapes; the callback touches only atomics.
                     let store = unsafe {
                         SCDynamicStoreCreate(

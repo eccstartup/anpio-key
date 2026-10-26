@@ -372,19 +372,19 @@ pub fn uncompiled_roots() -> Vec<(&'static str, &'static str)> {
 
 /// 软件假后端把它的根目录放在哪儿。
 ///
-/// 默认 `$HOME/.anp-keyd-software-hsm`;`ANP_KEYD_SOFTWARE_HSM` 可以改,
+/// 默认 `$HOME/.anpio-key-software-hsm`;`ANPIO_KEY_SOFTWARE_HSM` 可以改,
 /// 测"把信封拷到另一台机器"用的就是它。生产部署不该用它 —— 它**不是硬件**,
 /// 一个能读这个目录的人就能开信封。
 #[cfg(feature = "hardware-software")]
 pub fn software_root_dir() -> Result<PathBuf> {
-    if let Some(dir) = std::env::var_os("ANP_KEYD_SOFTWARE_HSM") {
+    if let Some(dir) = std::env::var_os("ANPIO_KEY_SOFTWARE_HSM") {
         return Ok(PathBuf::from(dir));
     }
     let home = std::env::var_os("HOME").ok_or_else(|| {
         KeydError::HardwareUnavailable(
-            "the software stand-in root needs $HOME or $ANP_KEYD_SOFTWARE_HSM to know where to live"
+            "the software stand-in root needs $HOME or $ANPIO_KEY_SOFTWARE_HSM to know where to live"
                 .into(),
         )
     })?;
-    Ok(PathBuf::from(home).join(".anp-keyd-software-hsm"))
+    Ok(PathBuf::from(home).join(".anpio-key-software-hsm"))
 }

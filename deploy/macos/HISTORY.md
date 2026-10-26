@@ -13,7 +13,7 @@ formal SE distribution automatically.
 The current SE backend uses the data protection keychain. Apple
 [TN3137](https://developer.apple.com/documentation/technotes/tn3137-on-mac-keychains)
 limits that keychain to a user login context; a system LaunchDaemon cannot use
-it. Signing the existing `_anpkeyd` LaunchDaemon does not resolve this limitation.
+it. Signing the existing `_anpio` LaunchDaemon does not resolve this limitation.
 Do not purchase a certificate on the assumption that it makes this deployment
 SE-capable. Non-persistent ECDH tests in a human login session do not demonstrate
 persistent service access. The existing local preview remains usable without SE.
@@ -29,7 +29,7 @@ The read-only release prerequisite gate never runs or signs the candidate and
 never touches a keychain, account, service or vault:
 
 ```sh
-python3 deploy/macos/se-preflight.py --binary /absolute/path/to/signed/anp-keyd \
+python3 deploy/macos/se-preflight.py --binary /absolute/path/to/signed/anpio-key \
   --sha256 VERIFIED_SIGNED_BINARY_SHA256 --execution-context system-daemon \
   --team-id APPLE_TEAM_ID --application-id APPLE_TEAM_ID.APP_IDENTIFIER
 ```
@@ -65,14 +65,14 @@ access to the human account. No sudo, admin-group membership, stored human login
 credentials, remote login to the management account, or inherited management
 sessions may be handed to Agents. A UID boundary is not a VM or a general sandbox.
 
-The service runs as `_anpkeyd`, with a disabled login shell. `_anpagent` has no
+The service runs as `_anpio`, with a disabled login shell. `_anpagent` has no
 login password and is launched by a trusted operator. It can reach only the data
 socket; its primary home `/var/empty` must not be used as a writable workspace.
 Assign an Agent-owned working directory separately, without granting access to
 the human's home. Do not install passwordless sudo or an Agent-controlled launchd
 job with authority over the service or management account.
 
-Root owns `/Library/ANPKeyd`, its executable/config and the launchd plist. The
+Root owns `/Library/ANPIOKey`, its executable/config and the launchd plist. The
 service owns mode-0700 state and separate mode-0750 socket directories; sockets
 are 0660. Socket groups allow transport access, while kernel UID authentication
 and SQLite principal state decide authorization. Clients verify config ownership,
@@ -94,7 +94,7 @@ Build from the reviewed checkout, using the checked-in lockfile:
 
 ```sh
 cargo build --locked --release --features mcp
-shasum -a 256 target/release/anp-keyd
+shasum -a 256 target/release/anpio-key
 python3 deploy/macos/provision-accounts.py --admin-user YOUR_HUMAN_ACCOUNT
 ```
 
@@ -106,7 +106,7 @@ sudo bash deploy/macos/setup-local.sh YOUR_HUMAN_ACCOUNT VERIFIED_SHA256
 ```
 
 The setup script already runs `launchctl bootstrap`; do not bootstrap it again.
-To inspect a loaded job use `launchctl print system/org.anp-keyd.local`.
+To inspect a loaded job use `launchctl print system/org.anpio-key.local`.
 
 Enter the sudo password only in your own terminal. Run from a human-controlled
 checkout after reviewing the scripts and exact binary digest. The script refuses
@@ -129,9 +129,9 @@ changes to take effect. Do not type a password into a chat or give it to an Agen
 Plan the installation first (replace the digest with the actual reviewed build):
 
 ```sh
-python3 deploy/macos/install.py --binary target/release/anp-keyd \
-  --sha256 VERIFIED_SHA256 --service-user _anpkeyd --agent-user _anpagent \
-  --admin-user YOUR_HUMAN_ACCOUNT --sign-group _anpkeyd_sign --admin-group _anpkeyd_admin
+python3 deploy/macos/install.py --binary target/release/anpio-key \
+  --sha256 VERIFIED_SHA256 --service-user _anpio --agent-user _anpagent \
+  --admin-user YOUR_HUMAN_ACCOUNT --sign-group _anpio_sign --admin-group _anpio_admin
 # Repeat the same arguments with sudo and --apply only after reviewing the plan.
 ```
 
@@ -143,11 +143,11 @@ It does not touch real identities or copy a daily-use vault. Failed installation
 is retained for inspection, never automatically deleted/reinitialized.
 
 ```sh
-sudo launchctl bootstrap system /Library/LaunchDaemons/org.anp-keyd.local.plist
-/Library/ANPKeyd/bin/anp-keyd admin --config /Library/ANPKeyd/service.json status
+sudo launchctl bootstrap system /Library/LaunchDaemons/org.anpio-key.local.plist
+/Library/ANPIOKey/bin/anpio-key admin --config /Library/ANPIOKey/service.json status
 sudo python3 deploy/macos/test-install.py
 # Explicit stop; keys lock and old grants are invalidated on next startup:
-sudo launchctl bootout system/org.anp-keyd.local
+sudo launchctl bootout system/org.anpio-key.local
 ```
 
 `RunAtLoad` starts the job after future boots once installed; crashes are not
@@ -164,7 +164,7 @@ Vault migration from Linux is not promised by this macOS installer.
 From the trusted human account and installed root-owned binary:
 
 ```sh
-/Library/ANPKeyd/bin/anp-keyd admin --config /Library/ANPKeyd/service.json unlock \
+/Library/ANPIOKey/bin/anpio-key admin --config /Library/ANPIOKey/service.json unlock \
   --vault-id VAULT_UUID --did DID --kid KID --native-ui
 ```
 
@@ -215,7 +215,7 @@ sudo python3 deploy/macos/test-runtime.py
 ```
 
 This uses the existing accounts with a separate temporary configuration, state and
-daemon under a new `/Library/ANPKeydChecks-*` directory. It tests Agent task-port
+daemon under a new `/Library/ANPIOKeyChecks-*` directory. It tests Agent task-port
 access denial, socket cleanup/restart boot epochs, and a fake root listener whose
 socket has forged expected ownership and mode. The native unlock client must
 reject it without showing a window or sending request/secret bytes. Temporary
@@ -314,9 +314,9 @@ without updating the installed daemon or executable:
 
 ```sh
 cargo build --locked --release --features mcp
-shasum -a 256 target/release/anp-keyd
+shasum -a 256 target/release/anpio-key
 sudo /usr/bin/python3 deploy/macos/test-runtime.py \
-  --candidate-binary "$PWD/target/release/anp-keyd" --candidate-sha256 VERIFIED_APP_SHA256 \
+  --candidate-binary "$PWD/target/release/anpio-key" --candidate-sha256 VERIFIED_APP_SHA256 \
   --signing-helper "$PWD/target/release/examples/local-preview-fixture" \
   --helper-sha256 VERIFIED_HELPER_SHA256 --interactive-ui
 ```
@@ -363,14 +363,14 @@ The temporary candidate does not automatically replace the installed executable.
 Review a local update plan, then apply explicitly:
 
 ```sh
-/usr/bin/python3 deploy/macos/update-local.py --binary target/release/anp-keyd \
+/usr/bin/python3 deploy/macos/update-local.py --binary target/release/anpio-key \
   --sha256 453f5aa6bf6c8f6e74cd0f8e2199ef0e775864fdbec8e924b564da4a2a12b7ee
 # Same arguments with sudo and --apply to install the accepted build.
 ```
 
 The updater verifies root-owned paths and the digest-checked release, stops the
 known launchd job, requires clean socket removal and the exclusive state lock,
-retains `bin/anp-keyd.previous`, atomically replaces the executable and restarts
+retains `bin/anpio-key.previous`, atomically replaces the executable and restarts
 with unchanged configuration/state/accounts. It verifies the installed digest,
 instance identity and status. Restart revokes grants and locks keys. Existing
 backup files are refused rather than overwritten. Errors leave artifacts/state
@@ -382,7 +382,7 @@ The default plan changes no system files or service state.
 
 The operator applied the updater successfully. Independent read-only checks
 confirmed the installed SHA-256 matches the accepted `453f5aa6...12b7ee` build
-and `bin/anp-keyd.previous` retains the original
+and `bin/anpio-key.previous` retains the original
 `41e39c6c9ff955422cb285bb8311f4d413157f908e54357eb3582cada595e4b9` build.
 The instance remains `80a37601-db74-44b6-8a17-d3ea5ad9a7ef`; status is OK,
 `boot_epoch=2`, and audit projection and transaction executor are healthy.
@@ -406,7 +406,7 @@ enroll the vault, confirm root/hot roles, publish a narrow policy, create one
 grant and unlock the hot key. It is fixed to `_anpagent` and `--hardware none`,
 refuses a configuration that already has vaults, and keeps management commands
 under the administrator UID via `sudo -n -u`; passphrases are still read only by
-anp-keyd from the human terminal.
+Anpio Key from the human terminal.
 
 Verified in this change: 12 pure policy/command-construction unit tests
 (`deploy/macos/test_bootstrap.py`), the Python syntax check and `bash -n
@@ -414,8 +414,8 @@ install.sh`.
 
 The interactive flow was then run end to end on this Mac on 2026-10-19. The
 existing empty-state preview installation was first archived intact to
-`/private/var/root/anp-keyd-reinstall-20261019-211724` (binary, config, launchd
-plist and state); the dedicated `_anpkeyd`/`_anpagent` accounts and their groups
+`/private/var/root/anpio-key-reinstall-20261019-211724` (binary, config, launchd
+plist and state); the dedicated `_anpio`/`_anpagent` accounts and their groups
 were kept. Because `provision-accounts.py` deliberately refuses to adopt existing
 accounts, the rerun invoked `deploy/macos/install.py`, `launchctl bootstrap` and
 `deploy/macos/bootstrap.py` directly instead of `setup-local.sh`; account
@@ -431,11 +431,11 @@ and a healthy audit projection; `catalog` showed the active vault
 `hot` key, and the published policy; `service.json` recorded the same vault id.
 The grant id was `b46aaf01d316c3150f3277382cdb1d6852f3d7d8b5ac981f8367cc192bf716a8`.
 Recovery material is under
-`/private/var/root/anp-keyd-recovery-20261019-132014`.
+`/private/var/root/anpio-key-recovery-20261019-132014`.
 
 The acceptance exposed and this change fixes three real defects:
 
-- a fresh install did not create `/Library/ANPKeyd/state/vaults` (now created,
+- a fresh install did not create `/Library/ANPIOKey/state/vaults` (now created,
   with a layout unit test in `test_install.py`);
 - migration rejected `/var/root` because `/var` is a symlink, so the bootstrap
   staging root is now `/private/var/root`;
@@ -445,7 +445,7 @@ The acceptance exposed and this change fixes three real defects:
 
 Scope: this was an empty installation, not a machine with no dedicated accounts.
 A literal fresh-host run of `install.sh --bootstrap` still requires removing and
-recreating `_anpkeyd`, `_anpagent`, `_anpkeyd_sign` and `_anpkeyd_admin`; that
+recreating `_anpio`, `_anpagent`, `_anpio_sign` and `_anpio_admin`; that
 destructive step was not performed here and remains noted in `TODO.md`. This is
 preview convenience only and does not change the macOS protection claim.
 

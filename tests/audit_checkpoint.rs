@@ -10,19 +10,19 @@ fn checkpoint_requires_explicit_enrollment_or_retained_evidence() {
         "--instance-id",
         "12345678-1234-4234-8234-123456789abc",
     ];
-    let missing = Command::new(env!("CARGO_BIN_EXE_anp-keyd"))
+    let missing = Command::new(env!("CARGO_BIN_EXE_anpio-key"))
         .args(args)
         .output()
         .unwrap();
     assert_eq!(missing.status.code(), Some(2));
     assert!(missing.stdout.is_empty());
-    let conflict = Command::new(env!("CARGO_BIN_EXE_anp-keyd"))
+    let conflict = Command::new(env!("CARGO_BIN_EXE_anpio-key"))
         .args(args)
         .args(["--enroll", "--previous", "/nonexistent/retained.json"])
         .output()
         .unwrap();
     assert_eq!(conflict.status.code(), Some(2));
-    let absent = Command::new(env!("CARGO_BIN_EXE_anp-keyd"))
+    let absent = Command::new(env!("CARGO_BIN_EXE_anpio-key"))
         .args(args)
         .args(["--previous", "/nonexistent/retained.json"])
         .output()

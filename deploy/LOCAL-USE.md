@@ -5,7 +5,7 @@
 | 账号 | 运行什么 | 能做什么 |
 |---|---|---|
 | 管理员（你本人） | 管理命令 | 批准变更、解锁、撤销、轮换 |
-| 服务账号 | anp-keyd daemon | 保存私钥、状态和审计，执行签名 |
+| 服务账号 | Anpio Key daemon | 保存私钥、状态和审计，执行签名 |
 | Agent 账号 | 整个 AI 框架 | 只能请求签名和查询自己的授权 |
 
 **整个 Agent 框架及其工具进程**都要在 Agent 账号下运行。只把签名子进程换账号，而模型的 shell 仍有管理员权限，边界不成立。
@@ -33,7 +33,7 @@ Linux 上在仓库根目录执行：
 
 `--did-host` 是 DID 文档将来发布的域名，`--target` 是 Agent 要访问的完整 HTTPS 地址；省略时脚本会在终端里询问。
 
-全程会要求你在终端输入口令：绑定钥匙、热钥匙、迁入受保护状态和解锁。口令只由 anp-keyd 从 `/dev/tty` 读取，不经过 Agent、命令行参数或环境变量。
+全程会要求你在终端输入口令：绑定钥匙、热钥匙、迁入受保护状态和解锁。口令只由 Anpio Key 从 `/dev/tty` 读取，不经过 Agent、命令行参数或环境变量。
 
 成功后打印 DID 文档地址、vault、grant、有效期、恢复材料目录和一段 Agent 请求示例。把 DID 文档上传到打印出的地址，把 grant 交给 Agent。
 
@@ -67,14 +67,14 @@ macOS 用同一条命令安装本机预览，始终 `protected_supported=false`�
 
 ```bash
 sudo install -d -m 700 /root/keyd-staging
-sudo /usr/local/libexec/anp-keyd --root /root/keyd-staging spec \
-  --host agents.example.com --path agents/anp-keyd \
+sudo /usr/local/libexec/anpio-key --root /root/keyd-staging spec \
+  --host agents.example.com --path agents/anpio-key \
   --out /root/keyd-staging/identity.spec.json
-sudo /usr/local/libexec/anp-keyd --root /root/keyd-staging keygen \
+sudo /usr/local/libexec/anpio-key --root /root/keyd-staging keygen \
   --spec /root/keyd-staging/identity.spec.json
-sudo /usr/local/libexec/anp-keyd --root /root/keyd-staging publish \
+sudo /usr/local/libexec/anpio-key --root /root/keyd-staging publish \
   --did DID --spec /root/keyd-staging/identity.spec.json
-sudo /usr/local/libexec/anp-keyd --root /root/keyd-staging rotate-hot-key \
+sudo /usr/local/libexec/anpio-key --root /root/keyd-staging rotate-hot-key \
   --did DID --label daily
 ```
 
@@ -93,11 +93,11 @@ sudo python3 deploy/linux/migrate-vault.py --source /root/frozen-vault \
 新身份也走同一条迁移：
 
 ```bash
-sudo systemctl stop anp-keyd
-sudo python3 deploy/linux/migrate-vault.py --source /root/keyd-staging --binary /usr/local/libexec/anp-keyd
+sudo systemctl stop anpio-key
+sudo python3 deploy/linux/migrate-vault.py --source /root/keyd-staging --binary /usr/local/libexec/anpio-key
 sudo python3 deploy/linux/migrate-vault.py --source /root/keyd-staging \
-  --binary /usr/local/libexec/anp-keyd --apply --recovery-dir /root/keyd-recovery
-sudo systemctl start anp-keyd
+  --binary /usr/local/libexec/anpio-key --apply --recovery-dir /root/keyd-recovery
+sudo systemctl start anpio-key
 ```
 
 `migration.json` 里的 `vault_id` 后面要用到。
@@ -107,7 +107,7 @@ sudo systemctl start anp-keyd
 所有管理变更都分两步：`prepare` 生成计划和摘要，你核对后 `commit`。示例里的 UUID、网址和 kid 都要换成真实值。
 
 ```bash
-ADMIN="sudo -u operator /usr/local/libexec/anp-keyd admin --config /etc/anp-keyd/service.json"
+ADMIN="sudo -u operator /usr/local/libexec/anpio-key admin --config /etc/anpio-key/service.json"
 ```
 
 登记 vault：
@@ -200,13 +200,13 @@ sudo -u agent-a -- id
 Agent 可以用 CLI：
 
 ```bash
-anp-keyd data --config /etc/anp-keyd/service.json --file request.json
+anpio-key data --config /etc/anpio-key/service.json --file request.json
 ```
 
 也可以用 MCP：
 
 ```bash
-anp-keyd mcp --config /etc/anp-keyd/service.json
+anpio-key mcp --config /etc/anpio-key/service.json
 ```
 
 MCP 需要构建时启用 `mcp` feature。工具参数不能覆盖配置文件、socket、DID 或 kid。

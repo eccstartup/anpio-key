@@ -28,8 +28,8 @@ cargo build --locked --release --features hardware-se    # macOS
 生成钥匙时指定后端：
 
 ```bash
-anp-keyd keygen --spec mybot.spec.json --hardware tpm
-anp-keyd keygen --spec mybot.spec.json --hardware secure-enclave
+anpio-key keygen --spec mybot.spec.json --hardware tpm
+anpio-key keygen --spec mybot.spec.json --hardware secure-enclave
 ```
 
 指定的硬件不可用时会报错，不会悄悄退回纯软件封装。

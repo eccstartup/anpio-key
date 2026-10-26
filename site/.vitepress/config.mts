@@ -18,7 +18,7 @@ const tokenize = (text) => {
 
 export default defineConfig({
   lang: 'zh-CN',
-  title: 'anp-keyd',
+  title: 'Anpio Key',
   description:
     '跑在你自己机器上的守护进程,替 agent 保管 did:wba 的 Ed25519 私钥,并按 RFC 9421 签 HTTP 消息签名。',
   cleanUrls: true,
@@ -106,7 +106,7 @@ export default defineConfig({
     },
 
     editLink: {
-      pattern: 'https://github.com/eccstartup/anp-keyd/edit/master/site/:path',
+      pattern: 'https://github.com/eccstartup/anpio-key/edit/master/site/:path',
       text: '在 GitHub 上改这一页',
     },
 
@@ -116,11 +116,11 @@ export default defineConfig({
     returnToTopLabel: '回到顶部',
     lastUpdated: { text: '最后更新' },
 
-    socialLinks: [{ icon: 'github', link: 'https://github.com/eccstartup/anp-keyd' }],
+    socialLinks: [{ icon: 'github', link: 'https://github.com/eccstartup/anpio-key' }],
 
     footer: {
       message: 'Apache-2.0 许可',
-      copyright: 'anp-keyd',
+      copyright: 'Anpio Key',
     },
   },
 

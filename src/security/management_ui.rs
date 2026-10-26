@@ -126,7 +126,7 @@ mod native {
 
     pub(super) fn prompt(details: &str) -> Result<Zeroizing<String>> {
         let labels = [
-            string("anp-keyd — Unlock exact key")?,
+            string("anpio-key — Unlock exact key")?,
             string(details)?,
             string("Cancel")?,
             string("Unlock")?,

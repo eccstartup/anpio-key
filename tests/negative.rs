@@ -17,19 +17,19 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use anp_keyd::audit::{AuditLog, Event};
-use anp_keyd::did::document;
-use anp_keyd::crypto::hygiene::LockedBytes;
-use anp_keyd::crypto::kdf::Argon2Config;
-use anp_keyd::daemon::peer::{self, PeerPolicy};
-use anp_keyd::daemon::autolock::Autolock;
-use anp_keyd::daemon::state::{DaemonState, Roots, SigningGates};
-use anp_keyd::did::document::DidDocumentSpec;
-use anp_keyd::error::KeydError;
-use anp_keyd::keystore::layout::KeydLayout;
-use anp_keyd::keystore::hardware::HardwareChoice;
-use anp_keyd::keystore::{create, device, store, unwrap};
-use anp_keyd::sign::rfc9421::SignRequest;
+use anpio_key::audit::{AuditLog, Event};
+use anpio_key::did::document;
+use anpio_key::crypto::hygiene::LockedBytes;
+use anpio_key::crypto::kdf::Argon2Config;
+use anpio_key::daemon::peer::{self, PeerPolicy};
+use anpio_key::daemon::autolock::Autolock;
+use anpio_key::daemon::state::{DaemonState, Roots, SigningGates};
+use anpio_key::did::document::DidDocumentSpec;
+use anpio_key::error::KeydError;
+use anpio_key::keystore::layout::KeydLayout;
+use anpio_key::keystore::hardware::HardwareChoice;
+use anpio_key::keystore::{create, device, store, unwrap};
+use anpio_key::sign::rfc9421::SignRequest;
 use serde_json::Value;
 use zeroize::Zeroizing;
 
@@ -105,7 +105,7 @@ impl Drop for TempDir {
 /// 不是风格问题:`unwrap_err` 要求 `Ok` 那半边实现 `Debug`,而
 /// `LockedSigningKey` **故意没有** `Debug` —— 不给它 Debug 正是"密钥不进日志、
 /// 不进 panic 消息"这条纪律的一部分。所以外面的人只能这样拆。
-fn refusal<T>(result: anp_keyd::error::Result<T>, what: &str) -> KeydError {
+fn refusal<T>(result: anpio_key::error::Result<T>, what: &str) -> KeydError {
     match result {
         Ok(_) => panic!("{what}"),
         Err(error) => error,

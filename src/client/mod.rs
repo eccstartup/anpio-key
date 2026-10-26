@@ -34,12 +34,12 @@ impl Client {
     ///
     /// "没有守护进程在听"被翻译成一条**看得懂**的错误。默认的 `io::Error`
     /// 会说 "No such file or directory",而那会让第一次用的人去查文件权限,
-    /// 而真正该做的事是 `anp-keyd serve`。
+    /// 而真正该做的事是 `anpio-key serve`。
     pub fn connect(path: &Path) -> Result<Self> {
         let stream = UnixStream::connect(path).map_err(|error| match error.kind() {
             std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => {
                 KeydError::Protocol(format!(
-                    "no anp-keyd is listening on {} — start one with `anp-keyd serve`",
+                    "no anpio-key is listening on {} — start one with `anpio-key serve`",
                     path.display()
                 ))
             }
@@ -270,9 +270,9 @@ mod tests {
     /// 连不上时说的是"去启动守护进程",不是 errno。
     #[test]
     fn connecting_to_nothing_says_what_to_do_about_it() {
-        let error = Client::connect(Path::new("/nonexistent/anp-keyd/nope.sock")).unwrap_err();
+        let error = Client::connect(Path::new("/nonexistent/anpio-key/nope.sock")).unwrap_err();
         let text = error.to_string();
-        assert!(text.contains("anp-keyd serve"), "{text}");
+        assert!(text.contains("anpio-key serve"), "{text}");
         assert!(!text.contains("os error"), "{text}");
     }
 

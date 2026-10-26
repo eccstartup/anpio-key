@@ -84,20 +84,20 @@ class Logout(unittest.TestCase):
 
 class SystemJob(unittest.TestCase):
     def test_diagnostic_job_selects_no_logout_diagnostic_branch(self):
-        spec = launcher.job_spec(Path('/Library/ANPKeydLogoutChecks-test'),
+        spec = launcher.job_spec(Path('/Library/ANPIOKeyLogoutChecks-test'),
             Path('/usr/bin/python3'), [], diagnostic=True)
         self.assertIn('--logout-diagnostics', spec['ProgramArguments'])
         self.assertFalse(spec['KeepAlive'])
 
     def test_probe_layers_are_opt_in(self):
-        stage = Path('/Library/ANPKeydLogoutChecks-example')
+        stage = Path('/Library/ANPIOKeyLogoutChecks-example')
         plain = launcher.job_spec(stage, Path('/usr/bin/python3'), [])
         enabled = launcher.job_spec(stage, Path('/usr/bin/python3'), [], post_relogin_probes=True)
         self.assertNotIn('--post-relogin-probes', plain['ProgramArguments'])
         self.assertIn('--post-relogin-probes', enabled['ProgramArguments'])
 
     def test_one_shot_root_system_job_has_no_restart_or_boot_install(self):
-        stage = Path('/Library/ANPKeydLogoutChecks-example')
+        stage = Path('/Library/ANPIOKeyLogoutChecks-example')
         job = launcher.job_spec(stage, Path('/usr/bin/python3'), ['--candidate-binary', '/fixture'])
         self.assertFalse(job['KeepAlive'])
         self.assertTrue(job['SessionCreate'])
@@ -256,7 +256,7 @@ class GrantWindow(unittest.TestCase):
 class PostReloginState(unittest.TestCase):
     def checks(self, base):
         return SimpleNamespace(base=base, config={'instance_id': 'x'}, path=base / 'service.json',
-            args=SimpleNamespace(binary=Path('/usr/local/bin/anp-keyd')),
+            args=SimpleNamespace(binary=Path('/usr/local/bin/anpio-key')),
             admin=SimpleNamespace(pw_uid=501), agent=SimpleNamespace(pw_uid=601),
             key={'key_id': 'k'}, policy_id='p', env={'PATH': '/usr/bin'},
             credentials=lambda user: {'user': user.pw_uid, 'group': user.pw_uid,

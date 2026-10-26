@@ -16,12 +16,12 @@ Build on Linux, then install a **new** instance as root:
 
 ```sh
 cargo build --locked --release
-sudo python3 deploy/linux/install.py --binary target/release/anp-keyd \
+sudo python3 deploy/linux/install.py --binary target/release/anpio-key \
   --admin-user operator --agent-user agent-a --agent-user agent-b
 sudo systemctl daemon-reload
-sudo systemctl enable --now anp-keyd
-anp-keyd admin status
-anp-keyd probe --security
+sudo systemctl enable --now anpio-key
+anpio-key admin status
+anpio-key probe --security
 ```
 
 The installer refuses existing state, accounts, groups or deployment files. It
@@ -50,10 +50,10 @@ at initialization. Editing bootstrap flags cannot restore disabled identities.
 List live/history principal metadata and prepare an exact management operation:
 
 ```sh
-anp-keyd admin list-principals
-anp-keyd admin prepare-disable-principal --principal-id UUID
-anp-keyd admin commit --operation-id UUID --digest SHA256
-anp-keyd admin prepare-register-principal --uid UID
+anpio-key admin list-principals
+anpio-key admin prepare-disable-principal --principal-id UUID
+anpio-key admin commit --operation-id UUID --digest SHA256
+anpio-key admin prepare-register-principal --uid UID
 ```
 
 Inspect the returned effect and digest before committing. Commit accepts only the
@@ -124,7 +124,7 @@ Unknown newer versions are refused. New management events use SQLite; existing
 JSONL files are retained without rewriting. Runtime state is not silently imported
 from old M1 preview configurations.
 For a NEW empty deployment only, explicit initialization is also available as
-`anp-keyd init-protected-state` under the configured service UID. Never use deletion
+`anpio-key init-protected-state` under the configured service UID. Never use deletion
 and reinitialization as a migration or repair procedure.
 
 The dependency is pinned to rusqlite 0.39.0 without default features, using bundled
@@ -194,7 +194,7 @@ Rust 1.88 and 1.90 disposable Linux containers each passed 467 default tests and
 one explicit temporary-identity fixture. Their independent-UID harnesses passed
 85 and 89 checks respectively; the 1.90 run also builds MCP and verifies real
 stdio initialization, v2 tool schemas, caller-scoped keys and no legacy fallback.
-Set `ANP_KEYD_TEST_MCP=1` to include those MCP checks in the container harness.
+Set `ANPIO_KEY_TEST_MCP=1` to include those MCP checks in the container harness.
 macOS `mcp,hardware-software` passed 481 tests; strict all-targets Clippy passed.
 
 At the M3 checkpoint, the implementation added exact-hot-key grants, revocation, immutable policy evaluation, dual-clock

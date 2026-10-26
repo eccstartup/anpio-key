@@ -120,7 +120,7 @@ fn platform_executable_of(pid: i32) -> Option<PathBuf> {
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "ios")))]
 compile_error!(
-    "anp-keyd has no process-identity check for this platform, so `stop` could kill a recycled \
+    "anpio-key has no process-identity check for this platform, so `stop` could kill a recycled \
      pid. Refusing to compile beats shipping a kill that guesses."
 );
 

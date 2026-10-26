@@ -39,7 +39,7 @@ const DEFAULT_IDLE_SECS: u64 = 900;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "anp-keyd",
+    name = "anpio-key",
     version,
     about = "Local daemon that holds did:wba Ed25519 private keys and signs RFC 9421 messages for agents",
     long_about = "An agent never holds private key bytes: the keys live only in the daemon's memory, \
@@ -48,7 +48,7 @@ const DEFAULT_IDLE_SECS: u64 = 900;
     help_template = help_template()
 )]
 pub struct Cli {
-    /// Override the key directory (default `~/.anp-keyd`).
+    /// Override the key directory (default `~/.anpio-key`).
     #[arg(long, global = true, value_name = "DIR")]
     pub root: Option<PathBuf>,
 
@@ -374,7 +374,7 @@ pub struct ServeArgs {
     pub socket: Option<PathBuf>,
 
     /// Multi-user system service: one namespace per uid, rooted at
-    /// `/var/lib/anp-keyd/users/<uid>`.
+    /// `/var/lib/anpio-key/users/<uid>`.
     #[arg(long)]
     pub system: bool,
 
@@ -436,7 +436,7 @@ pub struct HardwareArgs {
     /// `none` (the default) leaves the envelope exactly as it has always been:
     /// the passphrase plus this machine's `device.secret`. The other values add a
     /// **third** source of entropy that cannot be copied off the machine — so a
-    /// stolen disk, or the whole `~/.anp-keyd/` directory on another computer,
+    /// stolen disk, or the whole `~/.anpio-key/` directory on another computer,
     /// stops being enough.
     ///
     /// Which names exist depends on the build and the platform:
@@ -451,7 +451,7 @@ pub struct HardwareArgs {
     /// that looks protected and is not is worse than one that is honestly plain.
     ///
     /// (The flag is `--hardware`, not `--root` — `--root` is already the global
-    /// one that points at `~/.anp-keyd`, and two different `--root`s in one
+    /// one that points at `~/.anpio-key`, and two different `--root`s in one
     /// command line is a trap.)
     // 字段叫 `choice` 而不是 `root`:clap 的 arg **id** 取字段名,而顶层那个
     // `--root` 是 `global = true`、会铺进每一个子命令 —— 这里再有一个 id 叫
@@ -468,7 +468,7 @@ pub struct KeygenArgs {
     /// Without it there is nothing to generate: a DID is "coordinates + public
     /// key", and the coordinates have to be the ones **you** wrote down, not the
     /// ones the tool picked for you. For a starter template, see
-    /// `anp-keyd spec --help`.
+    /// `anpio-key spec --help`.
     #[arg(long, value_name = "FILE")]
     pub spec: PathBuf,
 
@@ -1209,10 +1209,10 @@ fn serve(root: Option<&Path>, args: ServeArgs) -> Result<()> {
     crate::daemon::service::detach(&layout.log_path(), &sock_path, &layout.pid_path())
 }
 
-/// 单用户 → `--root` 指哪儿是哪儿;系统服务 → `/var/lib/anp-keyd/users/<uid>`。
+/// 单用户 → `--root` 指哪儿是哪儿;系统服务 → `/var/lib/anpio-key/users/<uid>`。
 ///
 /// 日志和 pid 文件都跟着这个走,所以 `--system` 下的日志自然也落在
-/// `/var/lib/anp-keyd/users/<uid>/log/`,不用另开一套路径规则。
+/// `/var/lib/anpio-key/users/<uid>/log/`,不用另开一套路径规则。
 fn service_layout(root: Option<&Path>, args: &ServeArgs) -> Result<KeydLayout> {
     if args.system {
         KeydLayout::system(daemon::self_uid())
@@ -1226,7 +1226,7 @@ fn socket_of(layout: &KeydLayout, args: &ServeArgs) -> PathBuf {
         (Some(path), _) => path.clone(),
         // 系统服务的 socket 不属于任何单个 uid,所以它不能放在某个人的
         // 家目录里 —— 那个人一退出登录目录就没了,而服务还在跑。
-        (None, true) => PathBuf::from("/var/run/anp-keyd.sock"),
+        (None, true) => PathBuf::from("/var/run/anpio-key.sock"),
         (None, false) => layout.sock_path(),
     }
 }
@@ -1483,7 +1483,7 @@ fn keygen(root: Option<&Path>, args: KeygenArgs) -> Result<()> {
     println!("envelope written to {}", layout.key_path(&created.wrapped.id.thumbprint)?.display());
     println!();
     println!("publish it with:");
-    println!("    anp-keyd publish --did {} --spec {}", created.did, args.spec.display());
+    println!("    anpio-key publish --did {} --spec {}", created.did, args.spec.display());
     println!();
     println!("it must then be served at:");
     println!("    {}", did_url_path(&created.did)?);
@@ -1645,7 +1645,7 @@ fn verify_doc(root: Option<&Path>, args: VerifyDocArgs) -> Result<()> {
         println!();
         println!("this is the LOCAL copy; check the live one with:");
         println!(
-            "    curl -sS {} | anp-keyd verify-doc --did {} --file /dev/stdin",
+            "    curl -sS {} | anpio-key verify-doc --did {} --file /dev/stdin",
             did_url_path(&args.did)?,
             args.did
         );
@@ -1833,7 +1833,7 @@ mod tests {
     use clap::error::ErrorKind;
 
     fn parse(argv: &[&str]) -> std::result::Result<Cli, clap::Error> {
-        let mut full = vec!["anp-keyd"];
+        let mut full = vec!["anpio-key"];
         full.extend_from_slice(argv);
         Cli::try_parse_from(full)
     }

@@ -11,7 +11,7 @@ if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
 fi
 script_dir="$(cd -- "$(dirname -- "$0")" && pwd -P)"
 repo_dir="$(cd -- "$script_dir/../.." && pwd -P)"
-local_binary="${3:-$repo_dir/target/release/anp-keyd}"
+local_binary="${3:-$repo_dir/target/release/anpio-key}"
 # Validate the digest before account changes. Python and source are trusted
 # operator inputs; do not run this from an Agent-controlled checkout.
 /usr/bin/python3 - "$local_binary" "$2" <<'PY'
@@ -23,12 +23,12 @@ if hashlib.sha256(binary.read_bytes()).hexdigest() != sys.argv[2]:
 PY
 /usr/bin/python3 "$script_dir/provision-accounts.py" --admin-user "$1" --apply
 /usr/bin/python3 "$script_dir/install.py" --binary "$local_binary" --sha256 "$2" \
-  --service-user _anpkeyd --agent-user _anpagent --admin-user "$1" \
-  --sign-group _anpkeyd_sign --admin-group _anpkeyd_admin --apply
-/bin/launchctl bootstrap system /Library/LaunchDaemons/org.anp-keyd.local.plist
+  --service-user _anpio --agent-user _anpagent --admin-user "$1" \
+  --sign-group _anpio_sign --admin-group _anpio_admin --apply
+/bin/launchctl bootstrap system /Library/LaunchDaemons/org.anpio-key.local.plist
 # launchd starts asynchronously. Bound the wait and leave failures for inspection.
 for attempt in {1..30}; do
-  if [ -S /Library/ANPKeyd/admin/admin.sock ]; then break; fi
+  if [ -S /Library/ANPIOKey/admin/admin.sock ]; then break; fi
   /bin/sleep 1
 done
 /usr/bin/python3 "$script_dir/test-install.py"

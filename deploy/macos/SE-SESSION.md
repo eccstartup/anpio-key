@@ -128,9 +128,9 @@ python3 deploy/macos/se-release.py plan --team-id TEAMID --application-id TEAMID
 python3 deploy/macos/se-release.py build --team-id TEAMID \
   --application-id TEAMID.org.example.keyd --identity 'Developer ID Application: ...' \
   --profile /path/to/helper.provisionprofile
-python3 deploy/macos/se-release.py verify --bundle target/se-release/ANPKeyd.app \
+python3 deploy/macos/se-release.py verify --bundle target/se-release/ANPIOKey.app \
   --team-id TEAMID --application-id TEAMID.org.example.keyd --require-notarized
-sudo python3 deploy/macos/se-release.py install --bundle target/se-release/ANPKeyd.app \
+sudo python3 deploy/macos/se-release.py install --bundle target/se-release/ANPIOKey.app \
   --team-id TEAMID --application-id TEAMID.org.example.keyd --upgrade
 ```
 
@@ -160,8 +160,8 @@ run the installed helper from the human's local login session, using the approve
 bundle executable path:
 
 ```sh
-/ROOT_OWNED_BUNDLE/Contents/MacOS/anp-keyd admin \
-  --config /Library/ANPKeyd/service.json se-session \
+/ROOT_OWNED_BUNDLE/Contents/MacOS/anpio-key admin \
+  --config /Library/ANPIOKey/service.json se-session \
   --vault-id TEMPORARY_VAULT_UUID --did TEMPORARY_DID --kid EXACT_TEMPORARY_HOT_KID
 ```
 

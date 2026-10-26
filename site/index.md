@@ -2,7 +2,7 @@
 layout: home
 
 hero:
-  name: anp-keyd
+  name: Anpio Key
   text: 替 Agent 保管私钥，只按许可签名
   tagline: 跑在本机的服务。AI Agent 把请求交给它，它检查许可后生成 HTTP 签名；私钥始终留在服务里。
   actions:
@@ -14,7 +14,7 @@ hero:
       link: /concepts/trust-model
     - theme: alt
       text: GitHub
-      link: https://github.com/eccstartup/anp-keyd
+      link: https://github.com/eccstartup/anpio-key
 
 features:
   - title: 私钥不给 Agent
@@ -35,11 +35,11 @@ features:
 
 Agent 要代表你访问网站，网站用 did:wba 验证签名。直接把私钥交给 Agent，一次提示注入、一个坏依赖或一条误发的日志就可能泄露。
 
-anp-keyd 把私钥放在本机服务里，只给 Agent 一条签名通道：
+Anpio Key 把私钥放在本机服务里，只给 Agent 一条签名通道：
 
 ```text
 你（管理员）：创建身份 → 写许可 → 解锁
-anp-keyd：保管私钥，逐次检查许可
+anpio-key：保管私钥，逐次检查许可
 Agent：提交请求 → 拿到签名头 → 自己发送
 ```
 
@@ -50,12 +50,12 @@ Agent：提交请求 → 拿到签名头 → 自己发送
 ```bash
 cargo install --path .
 mkdir -p /tmp/keyd-lab
-anp-keyd --root /tmp/keyd-lab spec \
+anpio-key --root /tmp/keyd-lab spec \
   --host example.com --path agents/mybot --out /tmp/keyd-lab/mybot.spec.json
-anp-keyd --root /tmp/keyd-lab keygen --spec /tmp/keyd-lab/mybot.spec.json
-anp-keyd --root /tmp/keyd-lab serve
-anp-keyd --root /tmp/keyd-lab unlock --did 你的DID
-anp-keyd --root /tmp/keyd-lab sign --did 你的DID \
+anpio-key --root /tmp/keyd-lab keygen --spec /tmp/keyd-lab/mybot.spec.json
+anpio-key --root /tmp/keyd-lab serve
+anpio-key --root /tmp/keyd-lab unlock --did 你的DID
+anpio-key --root /tmp/keyd-lab sign --did 你的DID \
   --method GET --url https://service.example.net/orders/42
 ```
 

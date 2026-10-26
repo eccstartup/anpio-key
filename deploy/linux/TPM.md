@@ -35,8 +35,8 @@ reviewed-release path is:
 
 ```sh
 cargo build --locked --release --features hardware-tpm
-sha256sum target/release/anp-keyd
-sudo python3 deploy/linux/install.py --binary target/release/anp-keyd \
+sha256sum target/release/anpio-key
+sudo python3 deploy/linux/install.py --binary target/release/anpio-key \
   --sha256 VERIFIED_SHA256 --admin-user operator --agent-user agent-a \
   --tpm-device
 ```
@@ -48,7 +48,7 @@ thing. The installer:
   symlink, TPM 2.0 sysfs entry, no access for users outside its group;
 - adds the service account to the device group (normally `tss`);
 - opens the device as the service account before enabling the unit;
-- writes `/etc/systemd/system/anp-keyd.service.d/10-tpm.conf` with
+- writes `/etc/systemd/system/anpio-key.service.d/10-tpm.conf` with
   `PrivateDevices=no`, `DevicePolicy=closed`, `DeviceAllow=/dev/tpmrm0 rw`,
   the service's supplementary groups, and an explicit
   `TPM2TOOLS_TCTI=device:/dev/tpmrm0`.
@@ -122,7 +122,7 @@ Not covered, and therefore still required for a physical protection claim:
   open elsewhere. The supported way to move a key is `export-seed` on the
   machine that still has it.
 - `could not open a TPM session`: the device is missing or unreadable by the
-  service UID. Check `systemctl show anp-keyd -p DeviceAllow -p Environment`,
+  service UID. Check `systemctl show anpio-key -p DeviceAllow -p Environment`,
   the device group, and `dmesg | grep -i tpm`.
 - Probe says the owner hierarchy cannot persist: check non-volatile space and
   owner auth. This build uses the well-known empty owner auth; a device with a

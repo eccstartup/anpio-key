@@ -62,8 +62,8 @@ def child_credentials(user, config, extra_admin_group=False):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--config', type=Path, default=Path('/Library/ANPKeyd/service.json'))
-    parser.add_argument('--binary', type=Path, default=Path('/Library/ANPKeyd/bin/anp-keyd'))
+    parser.add_argument('--config', type=Path, default=Path('/Library/ANPIOKey/service.json'))
+    parser.add_argument('--binary', type=Path, default=Path('/Library/ANPIOKey/bin/anpio-key'))
     parser.add_argument('--ui-preflight-only', action='store_true', help='only reproduce native preflight on an empty temporary service; cancel the single window if shown')
     parser.add_argument('--candidate-binary', type=Path, help='test a digest-pinned candidate in the temporary instance, without updating the installation')
     parser.add_argument('--candidate-sha256')
@@ -179,7 +179,7 @@ def main():
     def credentials(user, extra_admin_group=False):
         return child_credentials(user, installed, extra_admin_group)
     def run(user, *command):
-        if command and Path(str(command[0])).name == 'anp-keyd':
+        if command and Path(str(command[0])).name == 'anpio-key':
             print(f'CHECK uid={user.pw_uid} keyd ' + ' '.join(map(str, command[1:4])), flush=True)
         try:
             if args.se_ending in ('logout', 'reboot') and len(command) > 1 and command[1] == 'generate-se':
@@ -199,10 +199,10 @@ def main():
     if portable:
         parent = '/keyd-checks'
         Path(parent).mkdir(mode=0o755, exist_ok=True)
-    directory_context = (tempfile.TemporaryDirectory(prefix='ANPKeydChecks-', dir=parent)
+    directory_context = (tempfile.TemporaryDirectory(prefix='ANPIOKeyChecks-', dir=parent)
                          if args.se_ending != 'reboot'
                          else contextlib.nullcontext(
-                             tempfile.mkdtemp(prefix='ANPKeydChecks-', dir=parent)))
+                             tempfile.mkdtemp(prefix='ANPIOKeyChecks-', dir=parent)))
     with directory_context as directory:
         base = Path(directory)
         base.chmod(0o755)
@@ -213,7 +213,7 @@ def main():
                 raise ValueError('candidate binary digest mismatch')
             (base / 'bin').mkdir(mode=0o755)
             (base / 'bin').chmod(0o755)
-            candidate = base / 'bin/anp-keyd'
+            candidate = base / 'bin/anpio-key'
             with candidate.open('xb') as target:
                 target.write(content)
             candidate.chmod(0o755)

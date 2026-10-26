@@ -1,7 +1,7 @@
 #!/bin/sh
-# Install root-owned, mode 0755 at /usr/local/libexec/anp-keyd-audit-source.
+# Install root-owned, mode 0755 at /usr/local/libexec/anpio-key-audit-source.
 # Replace the instance ID with the value from trusted service provisioning.
 # The service account runs this exact command via a restricted sudo rule.
-exec /usr/local/bin/anp-keyd audit-source \
-  --database /var/lib/anp-keyd/state.sqlite \
+exec /usr/local/bin/anpio-key audit-source \
+  --database /var/lib/anpio-key/state.sqlite \
   --instance-id 12345678-1234-4234-8234-123456789abc

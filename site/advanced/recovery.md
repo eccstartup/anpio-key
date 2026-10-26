@@ -57,7 +57,7 @@ python3 deploy/linux/migrate-vault.py --source /root/frozen-vault \
 ## 出问题先看哪里
 
 - 受保护模式：`admin status`、`admin catalog`、`probe --security`。
-- 开发模式：`anp-keyd probe`。
+- 开发模式：`anpio-key probe`。
 - 公开文档：`verify-doc --did DID --file FILE`。本地校验通过不等于对方已经刷新。
 - 签名超时：用原 `request_id` 查询状态。`outcome_unknown` 不要自动重签。
 - 签名结果和业务结果分开看：签名成功不代表对方业务已经执行。

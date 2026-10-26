@@ -27,12 +27,12 @@ def release_stub():
 
 def make_bundle(path, payload):
     (path / 'Contents/MacOS').mkdir(parents=True)
-    (path / 'Contents/MacOS/anp-keyd').write_bytes(payload)
+    (path / 'Contents/MacOS/anpio-key').write_bytes(payload)
     return path
 
 
 def digest(bundle):
-    return hashlib.sha256((Path(bundle) / 'Contents/MacOS/anp-keyd').read_bytes()).hexdigest()
+    return hashlib.sha256((Path(bundle) / 'Contents/MacOS/anpio-key').read_bytes()).hexdigest()
 
 
 class UpgradeExercise(unittest.TestCase):

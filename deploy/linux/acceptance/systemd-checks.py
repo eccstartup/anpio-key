@@ -8,10 +8,10 @@ import time
 
 def run(config, check):
     def prop(name):
-        return subprocess.check_output(['systemctl','show','anp-keyd.service','-p',name,'--value'], text=True).strip()
+        return subprocess.check_output(['systemctl','show','anpio-key.service','-p',name,'--value'], text=True).strip()
     check(Path('/proc/1/comm').read_text().strip() == 'systemd', 'VM PID 1 is actual systemd')
-    tpm = Path('/etc/systemd/system/anp-keyd.service.d/10-tpm.conf').is_file()
-    expected = {'User':'anp-keyd','Group':'anp-keyd','NoNewPrivileges':'yes',
+    tpm = Path('/etc/systemd/system/anpio-key.service.d/10-tpm.conf').is_file()
+    expected = {'User':'anpio-key','Group':'anpio-key','NoNewPrivileges':'yes',
         'PrivateTmp':'yes','PrivateDevices':'no' if tpm else 'yes','ProtectSystem':'strict',
         'ProtectHome':'yes','ProtectKernelTunables':'yes','ProtectKernelModules':'yes',
         'ProtectControlGroups':'yes','RestrictSUIDSGID':'yes','RestrictNamespaces':'yes',
@@ -35,10 +35,10 @@ def run(config, check):
     for name, passed in report.items():
         check(passed is True, 'sandbox effect ' + name)
     check(not Path('/tmp/keyd-private-visible-marker').exists(), 'service private temp file is absent in host namespace')
-    check(subprocess.check_output(['systemctl','is-enabled','anp-keyd.service'],text=True).strip() == 'enabled', 'service is enabled for boot')
-    check(subprocess.run(['systemd-analyze','verify','/etc/systemd/system/anp-keyd.service'],capture_output=True).returncode == 0, 'installed unit passes systemd-analyze verify')
+    check(subprocess.check_output(['systemctl','is-enabled','anpio-key.service'],text=True).strip() == 'enabled', 'service is enabled for boot')
+    check(subprocess.run(['systemd-analyze','verify','/etc/systemd/system/anpio-key.service'],capture_output=True).returncode == 0, 'installed unit passes systemd-analyze verify')
     # A crash must restart through systemd, not a test's direct Popen launcher.
-    subprocess.run(['systemctl','kill','--kill-whom=main','--signal=SIGKILL','anp-keyd.service'],check=True)
+    subprocess.run(['systemctl','kill','--kill-whom=main','--signal=SIGKILL','anpio-key.service'],check=True)
     for _ in range(100):
         time.sleep(.1)
         current = int(prop('MainPID'))

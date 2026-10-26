@@ -137,7 +137,7 @@ class PersistenceHarness(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory) / 'state.json'
             body = {'schema': 1, 'tag_hint': 'acceptance-x',
-                    'root': {'kind': 'secure_enclave', 'tag': 'anp-keyd/acceptance-x'},
+                    'root': {'kind': 'secure_enclave', 'tag': 'anpio-key/acceptance-x'},
                     'ciphertext_b64': '', 'hs_sha256': '00'}
             state.write_text(json.dumps(body))
             os.chmod(state, 0o644)

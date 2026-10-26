@@ -14,20 +14,20 @@ framework, existing-identity cutover and real keys.
 
 ## Temporary acceptance, human terminal
 
-Build `anp-keyd` with `cargo build --locked --release --features mcp` and the public
+Build `anpio-key` with `cargo build --locked --release --features mcp` and the public
 fixture with `cargo build --locked --release --example local-preview-fixture`.
 Resolve the installed Claude symlink to its standalone binary, review provenance
 and SHA-256 for all three executables, then run from a trusted reviewed checkout:
 
 ```sh
 sudo bash deploy/macos/acceptance/check-agent.sh \
-  /ABS/target/release/anp-keyd CANDIDATE_SHA256 \
+  /ABS/target/release/anpio-key CANDIDATE_SHA256 \
   /ABS/target/release/examples/local-preview-fixture HELPER_SHA256 \
   /ABS/claude/versions/2.1.173 CLAUDE_SHA256
 ```
 
 Only the human enters sudo locally. This reuses existing accounts and creates
-isolated `/Library/ANPKeydChecks-*` state. It does not change the daily binary,
+isolated `/Library/ANPIOKeyChecks-*` state. It does not change the daily binary,
 keys, launchd job, account records, or model authentication. The default run does
 not exercise the native dialog. The optional seventh argument `--interactive-ui`
 explicitly runs all three windows: Cancel, an untouched 120-second timeout, then

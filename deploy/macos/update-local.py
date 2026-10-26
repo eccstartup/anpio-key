@@ -18,10 +18,10 @@ import sys
 import time
 import uuid
 
-BASE = Path('/Library/ANPKeyd')
-BINARY = BASE / 'bin/anp-keyd'
+BASE = Path('/Library/ANPIOKey')
+BINARY = BASE / 'bin/anpio-key'
 CONFIG = BASE / 'service.json'
-PLIST = Path('/Library/LaunchDaemons/org.anp-keyd.local.plist')
+PLIST = Path('/Library/LaunchDaemons/org.anpio-key.local.plist')
 ENV = {'PATH': '/usr/bin:/bin:/usr/sbin:/sbin'}
 
 
@@ -90,14 +90,14 @@ def main():
     config = json.loads(CONFIG.read_text())
     if config['mode'] != 'macos-boundary-preview':
         raise ValueError('explicit local macOS preview required')
-    previous = BINARY.with_name('anp-keyd.previous')
+    previous = BINARY.with_name('anpio-key.previous')
     archive = None
     if os.path.lexists(previous):
         trusted_file(previous)
         if not args.archive_previous:
             raise ValueError('previous backup exists; inspect it and use --archive-previous to preserve it')
         digest = hashlib.sha256(read_binary(previous)).hexdigest()
-        archive = previous.with_name('anp-keyd.archive-' + digest)
+        archive = previous.with_name('anpio-key.archive-' + digest)
         if os.path.lexists(archive):
             raise ValueError('backup archive already exists; retain both files and inspect separately')
     print(json.dumps({'binary': str(BINARY), 'candidate_sha256': args.sha256,
@@ -112,14 +112,14 @@ def main():
         archive_previous(previous, archive)
     service = pwd.getpwuid(config['service_uid'])
     admin = pwd.getpwuid(config['admin_uids'][0])
-    candidate = BINARY.with_name('.anp-keyd-update-' + str(uuid.uuid4()))
+    candidate = BINARY.with_name('.anpio-key-update-' + str(uuid.uuid4()))
     try:
         write_new(candidate, content)
         info = json.loads(subprocess.check_output(['/usr/bin/sudo', '-n', '-u', service.pw_name,
                           '--', str(candidate), 'build-info'], env=ENV, timeout=15))
         if not info['release'] or info['protected_supported'] or info['seed_export'] or info['hardware_software']:
             raise ValueError('expected preview release without export or test-double features')
-        subprocess.run(['/bin/launchctl', 'bootout', 'system/org.anp-keyd.local'], env=ENV, check=True, timeout=20)
+        subprocess.run(['/bin/launchctl', 'bootout', 'system/org.anpio-key.local'], env=ENV, check=True, timeout=20)
         deadline = time.monotonic() + 10
         while any(os.path.lexists(config[name]) for name in ['sign_socket', 'admin_socket']):
             if time.monotonic() >= deadline:

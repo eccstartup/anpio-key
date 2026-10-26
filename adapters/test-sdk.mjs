@@ -1,11 +1,11 @@
 // Optional live acceptance: Node runs under a real independent Linux Agent UID.
 import assert from 'node:assert/strict'
 import { pathToFileURL } from 'node:url'
-import { KeydV2Client, keydV2Connector } from './keyd-v2.mjs'
+import { AnpioKeyV2Client, anpioKeyV2Connector } from './anpio-key-v2.mjs'
 const [sdkPath, grant_id, key_id, request_id, rpc_request_id] = process.argv.slice(2)
 const sdk = await import(pathToFileURL(sdkPath))
-const client = new KeydV2Client()
-const connector = keydV2Connector({ client, grant_id, key_id, requestId: () => request_id, subjectOf: sdk.subjectOf })
+const client = new AnpioKeyV2Client()
+const connector = anpioKeyV2Connector({ client, grant_id, key_id, requestId: () => request_id, subjectOf: sdk.subjectOf })
 const config = sdk.createConfig([connector])
 const request = { method: 'POST', url: 'https://example.com/user-service/v1/did-auth/rpc', nonce: request_id,
   extraBody: { jsonrpc: '2.0', id: request_id, method: 'get_me', params: {} } }

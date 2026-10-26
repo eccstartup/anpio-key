@@ -133,7 +133,7 @@ def operator_logout(actor, old_session, check_away, read_session):
           'the login window appearing. Do not switch users, '
           'sleep or reboot. The system test runner continues without this terminal. '
           'After logging back in, open Terminal and run: '
-          'sudo sh /Library/ANPKeydLogoutChecks-post-relogin.sh '
+          'sudo sh /Library/ANPIOKeyLogoutChecks-post-relogin.sh '
           '(the runner waits up to 10 minutes for its result).', flush=True)
     new_session = wait_logout(actor, old_session, check_away, read_session,
         observe=lambda evidence: print('LOGOUT_EVIDENCE ' + json.dumps(evidence), flush=True))

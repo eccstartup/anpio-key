@@ -9,8 +9,8 @@ export RUST_LOG=info
 python3 deploy/linux/acceptance/test-migration.py
 cargo build --locked
 cargo test --locked --quiet
-ANP_KEYD_DISPOSABLE_LINUX_TEST=1 cargo test --locked --test security_boundary -- --ignored
-if [ "${ANP_KEYD_TEST_MCP:-0}" = 1 ]; then
+ANPIO_KEY_DISPOSABLE_LINUX_TEST=1 cargo test --locked --test security_boundary -- --ignored
+if [ "${ANPIO_KEY_TEST_MCP:-0}" = 1 ]; then
   cargo build --locked --features mcp
 fi
-python3 deploy/linux/acceptance/test-boundary.py --binary "$CARGO_TARGET_DIR/debug/anp-keyd"
+python3 deploy/linux/acceptance/test-boundary.py --binary "$CARGO_TARGET_DIR/debug/anpio-key"

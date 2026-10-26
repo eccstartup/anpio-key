@@ -26,10 +26,10 @@ def exact(stream, n):
 def main(phase):
     marker = Path('/var/lib/keyd-systemd-disposable')
     assert os.geteuid() == 0 and not Path('/.dockerenv').exists()
-    assert not marker.is_symlink() and marker.stat().st_uid == 0 and marker.read_text().strip() == 'anp-keyd-disposable-systemd-v1'
+    assert not marker.is_symlink() and marker.stat().st_uid == 0 and marker.read_text().strip() == 'anpio-key-disposable-systemd-v1'
     assert Path('/proc/1/comm').read_text().strip() == 'systemd'
-    config = json.loads(Path('/etc/anp-keyd/service.json').read_text())
-    binary = '/usr/local/libexec/anp-keyd'
+    config = json.loads(Path('/etc/anpio-key/service.json').read_text())
+    binary = '/usr/local/libexec/anpio-key'
     state = Path('/root/keyd-systemd-boot-evidence.json')
     results = []
 
@@ -86,12 +86,12 @@ print(exact(struct.unpack('!I',exact(4))[0]).decode())'''
         return {'operation':'SIGN_HTTP','grant_id':grant_id,'request_id':str(uuid.uuid4()),'http':{'method':'GET','url':'https://example.com/test','headers':{},'body':{'state':'absent'},'nonce':uuid.uuid4().hex}}
 
     if phase == 'prepare':
-        subprocess.run(['systemctl','enable','--now','anp-keyd.service'],check=True)
+        subprocess.run(['systemctl','enable','--now','anpio-key.service'],check=True)
         deadline = time.monotonic() + 10
         while not Path(config['admin_socket']).exists():
             assert time.monotonic() < deadline, 'service did not become ready'
             time.sleep(.05)
-        properties = subprocess.check_output(['systemctl','show','anp-keyd.service','-p','DropInPaths','--value'],text=True).strip()
+        properties = subprocess.check_output(['systemctl','show','anpio-key.service','-p','DropInPaths','--value'],text=True).strip()
         check(not properties, 'boot validation uses the original installed unit without test overrides')
         catalog = cli('boundary-admin','admin','catalog')['catalog']
         key = next(k for k in catalog['keys'] if k['role']=='hot' and k['state']=='active')
@@ -107,11 +107,11 @@ print(exact(struct.unpack('!I',exact(4))[0]).decode())'''
             'pre_epoch':cli('boundary-admin','admin','status')['boot_epoch'], 'key':key,'policy':policy,'principal':principal,'grant_id':g,'request_id':request['request_id']}
         state.write_text(json.dumps(evidence,indent=2))
         state.chmod(0o600)
-        check(subprocess.check_output(['systemctl','is-enabled','anp-keyd.service'],text=True).strip()=='enabled', 'original unit is enabled for actual guest boot')
+        check(subprocess.check_output(['systemctl','is-enabled','anpio-key.service'],text=True).strip()=='enabled', 'original unit is enabled for actual guest boot')
     else:
         evidence = json.loads(state.read_text())
         check(Path('/proc/sys/kernel/random/boot_id').read_text().strip()!=evidence['pre_boot_id'], 'kernel boot ID changed across real VM reboot')
-        check(subprocess.check_output(['systemctl','is-active','anp-keyd.service'],text=True).strip()=='active', 'service started automatically after real boot')
+        check(subprocess.check_output(['systemctl','is-active','anpio-key.service'],text=True).strip()=='active', 'service started automatically after real boot')
         check(subprocess.check_output(['systemctl','show','systemd-tmpfiles-setup.service','-p','Result','--value'],text=True).strip()=='success', 'boot tmpfiles setup completed successfully')
         for name in ('sign_socket','admin_socket'):
             path = Path(config[name]); meta = path.stat(); parent = path.parent.stat()

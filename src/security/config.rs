@@ -10,7 +10,7 @@ use super::paths;
 use crate::error::{KeydError, Result};
 use crate::principal::{validate_uuid, Principal};
 
-pub const DEFAULT_CONFIG: &str = "/etc/anp-keyd/service.json";
+pub const DEFAULT_CONFIG: &str = "/etc/anpio-key/service.json";
 
 /// Root-owned deployment config. Principals are initialization inputs only;
 /// live mutable principal state is read from SQLite on each data request.
@@ -159,9 +159,9 @@ mod tests {
             admin_uids: vec![0, 1002],
             agent_gid: 1003,
             admin_gid: 1004,
-            state_dir: "/var/lib/anp-keyd".into(),
-            sign_socket: "/run/anp-keyd/sign/sign.sock".into(),
-            admin_socket: "/run/anp-keyd/admin/admin.sock".into(),
+            state_dir: "/var/lib/anpio-key".into(),
+            sign_socket: "/run/anpio-key/sign/sign.sock".into(),
+            admin_socket: "/run/anpio-key/admin/admin.sock".into(),
             principals: vec![Principal {
                 principal_id: "12345678-1234-4234-8234-123456789abd".into(),
                 uid: 1005,
@@ -213,7 +213,7 @@ mod tests {
         config.admin_socket = config.sign_socket.clone();
         assert!(config.validate().is_err());
         let mut config = valid;
-        config.state_dir = "/var/lib/../lib/anp-keyd".into();
+        config.state_dir = "/var/lib/../lib/anpio-key".into();
         assert!(config.validate().is_err());
     }
 

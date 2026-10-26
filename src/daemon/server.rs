@@ -324,7 +324,7 @@ pub fn bind(sock_path: &Path) -> Result<std::os::unix::net::UnixListener> {
         match std::os::unix::net::UnixStream::connect(sock_path) {
             Ok(_) => {
                 return Err(KeydError::Misuse(format!(
-                    "{} is already served by another anp-keyd; refusing to start a second one",
+                    "{} is already served by another anpio-key; refusing to start a second one",
                     sock_path.display()
                 )))
             }
@@ -409,7 +409,7 @@ mod tests {
             pub fn new() -> Self {
                 let n = COUNTER.fetch_add(1, Ordering::Relaxed);
                 let path = std::env::temp_dir().join(format!(
-                    "anp-keyd-server-{}-{n}-{:?}",
+                    "anpio-key-server-{}-{n}-{:?}",
                     std::process::id(),
                     std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)

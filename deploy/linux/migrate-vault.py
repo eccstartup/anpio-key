@@ -235,7 +235,7 @@ def run(args, platform='linux', path_check=None):
                 for path in [*(args.source / 'audit').iterdir(), args.source / 'audit']:
                     os.chown(path, 0, 0, follow_symlinks=False)
                     path.chmod(0o700 if path.is_dir() else 0o600)
-            marker = args.source / '.anp-keyd-managed'
+            marker = args.source / '.anpio-key-managed'
             if not marker.exists():
                 atomic(marker, encoded({'migration': vault_id, 'legacy_disabled': True}))
             backup = args.recovery_dir / 'vault'
@@ -273,8 +273,8 @@ def run(args, platform='linux', path_check=None):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source', type=Path, required=True)
-    parser.add_argument('--config', type=Path, default=Path('/etc/anp-keyd/service.json'))
-    parser.add_argument('--binary', type=Path, default=Path('/usr/local/libexec/anp-keyd'))
+    parser.add_argument('--config', type=Path, default=Path('/etc/anpio-key/service.json'))
+    parser.add_argument('--binary', type=Path, default=Path('/usr/local/libexec/anpio-key'))
     parser.add_argument('--apply', action='store_true')
     parser.add_argument('--recovery-dir', type=Path)
     try:

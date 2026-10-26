@@ -16,8 +16,8 @@ results['no_effective_capabilities'] = 'CapEff:\t0000000000000000' in status
 results['core_limit_zero'] = resource.getrlimit(resource.RLIMIT_CORE) == (0, 0)
 results['memlock_limit_64m'] = resource.getrlimit(resource.RLIMIT_MEMLOCK) == (67108864, 67108864)
 for name, path in [('system_write_denied', '/etc/.keyd-systemd-probe'),
-                   ('program_write_denied', '/usr/local/libexec/anp-keyd'),
-                   ('config_write_denied', '/etc/anp-keyd/service.json'),
+                   ('program_write_denied', '/usr/local/libexec/anpio-key'),
+                   ('config_write_denied', '/etc/anpio-key/service.json'),
                    ('kernel_write_denied', '/proc/sys/kernel/hostname')]:
     try:
         fd = os.open(path, os.O_WRONLY | (os.O_CREAT if name == 'system_write_denied' else 0), 0o600)
@@ -47,7 +47,7 @@ left.close()
 right.close()
 results['unix_socket_allowed'] = True
 results['user_namespace_denied'] = ctypes.CDLL(None, use_errno=True).unshare(0x10000000) == -1
-config = json.loads(Path('/etc/anp-keyd/service.json').read_text())
+config = json.loads(Path('/etc/anpio-key/service.json').read_text())
 results['dedicated_service_uid'] = os.geteuid() == config['service_uid']
 report = Path(config['state_dir']) / 'systemd-sandbox-report.json'
 fd = os.open(report, os.O_CREAT | os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW, 0o600)

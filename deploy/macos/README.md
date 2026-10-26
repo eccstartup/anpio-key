@@ -50,10 +50,10 @@ Add `--bootstrap --did-host HOST --target https://...` (or answer the terminal
 prompts) to create a disposable preview identity, migrate it into protected
 state and issue one grant in the same run. This path always uses
 `_anpagent` and `--hardware none`; it still reports `protected_supported=false`.
-Passphrases are read by anp-keyd from the human terminal only. Use a disposable
+Passphrases are read by Anpio Key from the human terminal only. Use a disposable
 identity and a public password, never real keys.
 
-The script asks for sudo only after the build. It creates `_anpkeyd` / `_anpagent`,
+The script asks for sudo only after the build. It creates `_anpio` / `_anpagent`,
 four groups, root-owned installation/configuration and a launchd job, starts the
 service and runs limited read-only checks. It refuses existing or partial setup.
 It is not an update or repair command. Do not repeat `launchctl bootstrap` after
@@ -68,7 +68,7 @@ For a manually reviewed release, the same steps are:
 
 ```sh
 cargo build --locked --release --features mcp
-shasum -a 256 target/release/anp-keyd
+shasum -a 256 target/release/anpio-key
 python3 deploy/macos/provision-accounts.py --admin-user YOUR_HUMAN_ACCOUNT
 sudo bash deploy/macos/setup-local.sh YOUR_HUMAN_ACCOUNT VERIFIED_SHA256
 ```
@@ -76,8 +76,8 @@ sudo bash deploy/macos/setup-local.sh YOUR_HUMAN_ACCOUNT VERIFIED_SHA256
 Check the installed instance:
 
 ```sh
-/Library/ANPKeyd/bin/anp-keyd admin --config /Library/ANPKeyd/service.json status
-/Library/ANPKeyd/bin/anp-keyd admin --config /Library/ANPKeyd/service.json catalog
+/Library/ANPIOKey/bin/anpio-key admin --config /Library/ANPIOKey/service.json status
+/Library/ANPIOKey/bin/anpio-key admin --config /Library/ANPIOKey/service.json catalog
 sudo /usr/bin/python3 deploy/macos/acceptance/test-install.py
 ```
 
@@ -94,16 +94,16 @@ Build the public test-only fixture/verifier and record both reviewed hashes:
 
 ```sh
 cargo build --locked --release --example local-preview-fixture
-shasum -a 256 /Library/ANPKeyd/bin/anp-keyd target/release/anp-keyd \
+shasum -a 256 /Library/ANPIOKey/bin/anpio-key target/release/anpio-key \
   target/release/examples/local-preview-fixture
 sudo bash deploy/macos/acceptance/check-local-use.sh INSTALLED_SHA256 \
-  "$PWD/target/release/anp-keyd" CANDIDATE_SHA256 \
+  "$PWD/target/release/anpio-key" CANDIDATE_SHA256 \
   "$PWD/target/release/examples/local-preview-fixture" HELPER_SHA256
 ```
 
 The driver pins all three executable digests before testing. It first checks the
 installed UID boundary read-only, then runs the installed and candidate binaries
-in separate temporary `/Library/ANPKeydChecks-*` instances. It reuses existing
+in separate temporary `/Library/ANPIOKeyChecks-*` instances. It reuses existing
 accounts; second-subject transport groups are assigned only to test children.
 It creates no accounts and does not update the daily binary/state/config/launchd
 job or read real keys. Root is needed for credential switching and secure
@@ -129,13 +129,33 @@ Complete-framework Claude Code acceptance and the offline identity cutover are
 described in [AGENT.md](AGENT.md). Its deterministic local API fixture is separate
 from live model-provider acceptance.
 
+## Migrating an installation made under the old name
+
+Installations created before the rename use `/Library/ANPKeyd`, the
+`org.anp-keyd.local` launchd label and the `_anpkeyd*` accounts. The migration
+tool rewrites all three; it is plan-only until `--apply`, and needs root for the
+apply. Renaming a Directory Services record keeps its UID/GID, so file ownership
+and group memberships survive, but the old names stop existing and there is no
+automatic rollback.
+
+```sh
+python3 deploy/macos/migrate-name.py --user-home "$HOME"
+# Review the plan, then the human may run the same command with sudo and --apply.
+```
+
+It stops the job, waits for both sockets to disappear, renames the users/groups,
+moves the installation and plist, rewrites `service.json` and the plist, and
+bootstraps the renamed job. An incomplete or already-migrated tree is refused
+rather than half-converted. Restarting locks keys and revokes grants, so re-unlock
+before signing.
+
 ## Daily workflow, updates and restart
 
 The human alone prepares/commits catalog, roles, policy and grants. An exact-key
 unlock can use the installed trusted UI:
 
 ```sh
-/Library/ANPKeyd/bin/anp-keyd admin --config /Library/ANPKeyd/service.json unlock \
+/Library/ANPIOKey/bin/anpio-key admin --config /Library/ANPIOKey/service.json unlock \
   --vault-id VAULT_UUID --did DID --kid EXACT_KID --native-ui
 ```
 
@@ -150,11 +170,11 @@ invalidates grants. `KeepAlive=false`; crash recovery does not automatically
 restart/unlock. The verified binary updater is plan-only by default:
 
 ```sh
-python3 deploy/macos/update-local.py --binary target/release/anp-keyd --sha256 VERIFIED_SHA256
+python3 deploy/macos/update-local.py --binary target/release/anpio-key --sha256 VERIFIED_SHA256
 # Review the plan, then the human may run the same command with sudo and --apply.
 ```
 
-It retains `bin/anp-keyd.previous`; if that slot already exists, review it and add
+It retains `bin/anpio-key.previous`; if that slot already exists, review it and add
 `--archive-previous` to the plan and apply commands to preserve it in an exclusive
 SHA-256-named archive first. Existing archives are never overwritten. It atomically
 replaces the binary under the state lock and checks identity/health after restart.

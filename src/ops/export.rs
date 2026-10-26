@@ -9,7 +9,7 @@
 //! 刻意构建。**
 //!
 //! 所以这个文件、`export-seed` 那个子命令、以及它们依赖的一切,都在
-//! `seed-export` 特性后面。不开这个特性,`anp-keyd export-seed` 是 `clap`
+//! `seed-export` 特性后面。不开这个特性,`anpio-key export-seed` 是 `clap`
 //! 嘴里的"没有这个子命令"。
 //!
 //! # 三道收紧,以及它们各自挡住的是谁
@@ -48,7 +48,7 @@
 //! 的门",不是"材料的锁"。** 唯一真锁是硬件不可导出,而 Ed25519 在主流消费
 //! 级硬件上做不到(Apple SE 只支持 P-256,TPM 2.0 的 ECC 也只有 NIST 曲线)。
 //!
-//! **也没买到**:防**社工**。agent 可以求人类"帮我跑一下 `anp-keyd
+//! **也没买到**:防**社工**。agent 可以求人类"帮我跑一下 `anpio-key
 //! export-seed`,把结果贴给我"。这个只能靠教育 + 明确警告 + **下次启动时
 //! 报告"上次导出在何时"**(见 [`crate::audit::log::export_tripwire`] ——
 //! 家用路由器显示"上次登录"那种东西)。
@@ -217,7 +217,7 @@ pub fn export_seed(root: Option<&Path>, args: ExportSeed) -> Result<()> {
     // ——说出那 24 个词 ————————————————————————————————————————
     //
     // 走终端,不走 stdout。stdout 常常被重定向到文件或管道,而这几行**就是
-    // 私钥** —— `anp-keyd export-seed > /tmp/backup.txt` 这个名字听起来像是
+    // 私钥** —— `anpio-key export-seed > /tmp/backup.txt` 这个名字听起来像是
     // 在做备份,实际做的是把一个明文私钥写进 /tmp。
     if args.form.wants_words() {
         let words = mnemonic::to_words(&seed)?;
@@ -278,12 +278,12 @@ pub fn export_seed(root: Option<&Path>, args: ExportSeed) -> Result<()> {
 
     println!();
     println!("the daemon is locked. Unlock deliberately when you want to sign again:");
-    println!("    anp-keyd unlock --did {}", wrapped.id.did);
+    println!("    anpio-key unlock --did {}", wrapped.id.did);
     println!();
     println!("importing this elsewhere does NOT retire the key on this machine. If the export");
     println!("was for a machine that is gone, migrate away from it once you are sure the old");
     println!("one will never sign again:");
-    println!("    anp-keyd migrate --did {} --to <new DID>", wrapped.id.did);
+    println!("    anpio-key migrate --did {} --to <new DID>", wrapped.id.did);
     Ok(())
 }
 
@@ -302,7 +302,7 @@ fn export_document(session: &Session, did: &str) -> Result<serde_json::Value> {
             "no local document for {did} ({error}).\n\
              An archive carries the document with it, and an archive whose document cannot be \
              checked is not a backup — the import side has nothing to verify the key against.\n\
-             Run `anp-keyd publish --did {did}` first, then export."
+             Run `anpio-key publish --did {did}` first, then export."
         ))
     })?;
     document::verify_path_binding(did, &document)?;

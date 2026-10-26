@@ -15,7 +15,7 @@ import tempfile
 
 
 def job_spec(stage, python, arguments, diagnostic=False, post_relogin_probes=False):
-    return {'Label': 'org.anp-keyd.logout-check.' + stage.name,
+    return {'Label': 'org.anpio-key.logout-check.' + stage.name,
         'ProgramArguments': [str(python), '-u', str(stage / 'test-runtime.py'),
                              '--se-ending', 'logout', *(['--logout-diagnostics'] if diagnostic else []),
                              *(['--post-relogin-probes'] if post_relogin_probes else []), *arguments],
@@ -41,11 +41,11 @@ def main():
         raise ValueError('--post-relogin-probes requires a logout run, not --diagnose')
     if args.finish:
         stage = args.finish.absolute()
-        if stage.parent != Path('/Library') or not stage.name.startswith('ANPKeydLogoutChecks-'):
+        if stage.parent != Path('/Library') or not stage.name.startswith('ANPIOKeyLogoutChecks-'):
             raise ValueError('unexpected logout test directory')
         if stage.is_symlink() or stage.stat().st_uid != 0:
             raise ValueError('expected a root-owned test directory')
-        label = 'org.anp-keyd.logout-check.' + stage.name
+        label = 'org.anpio-key.logout-check.' + stage.name
         status = subprocess.run(['/bin/launchctl', 'print', 'system/' + label],
                                 capture_output=True, text=True, timeout=10)
         if status.returncode:
@@ -65,7 +65,7 @@ def main():
                '--helper-sha256', '--se-login-bundle', '--se-login-sha256'}
     if len(arguments) != 12 or set(arguments[::2]) != allowed:
         raise ValueError('supply exactly the six pinned SE candidate/helper options')
-    stage = Path(tempfile.mkdtemp(prefix='ANPKeydLogoutChecks-', dir='/Library'))
+    stage = Path(tempfile.mkdtemp(prefix='ANPIOKeyLogoutChecks-', dir='/Library'))
     stage.chmod(0o755)
     attempted = False
     try:

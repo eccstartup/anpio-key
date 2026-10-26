@@ -21,7 +21,7 @@ const REPO = (() => {
   } catch {
     // 没有 git(或没有 origin)就用兜底的那个。
   }
-  return 'https://github.com/eccstartup/anp-keyd'
+  return 'https://github.com/eccstartup/anpio-key'
 })()
 
 const BRANCH = 'master'

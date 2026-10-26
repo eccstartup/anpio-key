@@ -627,7 +627,7 @@ awiki-open-server 的注册,除了 DID 文档自签,还要一次一次性挑战�
    也就是**每一个验签方自己算出来的那一份**。理由、三方实现的对照、以及新发现的
    一条(JS 侧连 `@target-uri` 都留着原样,和我们最后选的不一样)在归档「追加二」。
 3. ~~**上游版本错位 —— 已核掉,签名基逐字节一致。** 整条 awiki 都在 `anp 1.0.3`
-   (Rust CLI 的 path 依赖 `=1.0.3` + Python 服务端的 wheel `anp-1.0.3`),只有 anp-keyd
+   (Rust CLI 的 path 依赖 `=1.0.3` + Python 服务端的 wheel `anp-1.0.3`),只有 Anpio Key
    钉 `=1.0.6`。拿 1.0.3 那个 pin 的 commit(`096ca3e`)和 crates.io 上的 1.0.6 对拉了
    keyd **真正产字节**的三个入口:`http_signatures.rs`(签名基 + `content-digest`)
    **两份文件逐字节相同**;`compute_multikey_fingerprint` 所在的 `did_wba.rs` 不在差异
@@ -819,7 +819,7 @@ biscuit 能力令牌),边界见 [DESIGN.md](DESIGN.md) §一 和 §六。
 | 服务端那一半 | `anp-sdk/scripts/keyd-server-acceptance.mjs` | 注册 + 登录对真的 `awiki-open-server`,十条全过 |
 
 两个脚本一个约定:自己的临时 root、自己的守护进程、`keyd-tty.py` 供 TTY、逐条
-PASS/SKIP/FAIL、跑完把自己的根删掉,不碰 `~/.anp-keyd`。第二个脚本要一台**已经在跑**
+PASS/SKIP/FAIL、跑完把自己的根删掉,不碰 `~/.anpio-key`。第二个脚本要一台**已经在跑**
 的服务端(`--target`),所以它不进 CI,是手动跑的验收 —— 这一点写在它自己的头一段里。
 
 ## 落地的形状
@@ -832,7 +832,7 @@ PASS/SKIP/FAIL、跑完把自己的根删掉,不碰 `~/.anp-keyd`。第二个脚
 | 线 | `anp-sdk/src/core/connectors/keydWire.ts` | 帧 + 结构化变体 + `signChallenge`(SIGN 0x03) |
 | 请求体 | `anp-sdk/src/core/protocol/anp.ts` | `buildAnpLoginBody` 提成一个函数,连接器和钱包那条路共用 |
 | 挑战签名 | 同上 + `types.ts` | `AnpConnector` 上的**可选**方法 `signChallenge?` |
-| `proofValue` | `anp-keyd/src/did/proof_value.rs` | 出站换 multibase,交回上游验签前换回去 |
+| `proofValue` | `anpio-key/src/did/proof_value.rs` | 出站换 multibase,交回上游验签前换回去 |
 
 **"适配器里只做转发和错误翻译,出现协议词就是边界划错了地方"这条守住了。** 请求体
 不是连接器拼的,是 SDK 自己的 `buildAnpLoginBody`;连接器里出现的唯一协议词就是那个
@@ -873,7 +873,7 @@ base64url,把文档交给它之前先换回去,它算出来的输入和我们签
 服务端要的字段和 ANP-02 的登录体不是一回事(`ADR-0003`)。
 
 所以验收**不为此新开 SDK API** —— 开的那个口子("签调用方自己拼的体")正是 §十 挡着的
-东西。走的是 CLI 那条**公开接缝**:`anp-keyd sign --url --header --body <FILE>`,
+东西。走的是 CLI 那条**公开接缝**:`anpio-key sign --url --header --body <FILE>`,
 调用方自己拼体,守护进程签**那串字节**。这条路本来就存在(结构化 `sign` 收的是文件),
 验收只是第一个这么用它的调用方。
 
@@ -916,9 +916,9 @@ base64url,把文档交给它之前先换回去,它算出来的输入和我们签
 | `anp-sdk/src/core/index.test.ts` | 公开导出清单里加上那两个新名字 |
 | `anp-sdk/scripts/keyd-acceptance.mjs` | 新增:对真守护进程的五条反证(九条检查) |
 | `anp-sdk/scripts/keyd-server-acceptance.mjs` | 新增:对真 awiki-open-server 的注册 + 登录(十条检查) |
-| `anp-keyd/src/did/proof_value.rs` | 新增:两种字母表互转 + 五个测试 |
-| `anp-keyd/src/did/document.rs` | 签名后换成 multibase;交给上游验签前换回去;一条新测试 |
-| `anp-keyd/tests/signature_end_to_end.rs` | 上游验签那一处也先换字母表 |
+| `anpio-key/src/did/proof_value.rs` | 新增:两种字母表互转 + 五个测试 |
+| `anpio-key/src/did/document.rs` | 签名后换成 multibase;交给上游验签前换回去;一条新测试 |
+| `anpio-key/tests/signature_end_to_end.rs` | 上游验签那一处也先换字母表 |
 
 ---
 
@@ -1035,7 +1035,7 @@ connectx / awiki-cli-rs2 这类工具的签名需求([ADAPTER.md](ADAPTER.md))�
 - ~~**验收是 §十一 那五条反证。** 核心是第一条:**停掉守护进程,connectx 必须失败**
   —— 不然只是多了一条可选路径,不叫抽出来了。~~ ✅ 五条都对真守护进程跑过
   (2026-10-14):`anp-sdk/scripts/keyd-acceptance.mjs`,自己一个临时 root 和 socket,
-  跑完删掉,不碰 `~/.anp-keyd`。第 1 条连错误码、消息里点名 `anp-keyd serve`、
+  跑完删掉,不碰 `~/.anpio-key`。第 1 条连错误码、消息里点名 `anpio-key serve`、
   以及"守护进程回来就恢复"一起验;第 2 条验的不只是"交出个 `Locked`",而是**同一个
   请求**在人工解锁之后签得出来(不验这半,"可重试"就只是个词);第 3 条不是数行数,
   是在 JS 里把整条哈希链重算了一遍;第 4 条把 connectx 的 DID 和 `document` 子命令的
@@ -1052,7 +1052,7 @@ connectx / awiki-cli-rs2 这类工具的签名需求([ADAPTER.md](ADAPTER.md))�
 
   ```bash
   npm run build
-  ANP_KEYD_BIN=/path/to/anp-keyd node scripts/keyd-server-acceptance.mjs \
+  ANPIO_KEY_BIN=/path/to/anpio-key node scripts/keyd-server-acceptance.mjs \
     --target http://127.0.0.1:8792
   ```
 
@@ -1113,7 +1113,7 @@ connectx / awiki-cli-rs2 这类工具的签名需求([ADAPTER.md](ADAPTER.md))�
     **纯 JSON-RPC 信封**,而 `JsonRpcRequest` 是 `extra="forbid"` 的 —— 形状对不上,
     在验签之前就被拒;`RequestEnvelope` 又跑在签名**之后**,改不了已经算进摘要的
     字节。所以验收脚本不为此新开 SDK API,而是走 CLI 那条**公开接缝**:
-    `anp-keyd sign --url --header --body <FILE>` —— 调用方自己拼体,守护进程签
+    `anpio-key sign --url --header --body <FILE>` —— 调用方自己拼体,守护进程签
     **那串字节**。开发服务器没有 TLS 时再补一个 `--signed-origin`:keyd 拒签非
     HTTPS 的 URL(`sign/rfc9421.rs::validate_url`),而服务端重算签名基用的是它自己
     的 `AWIKI_PUBLIC_BASE_URL`,两边要的是同一个串。脚本的 `--did-domain` 同理,

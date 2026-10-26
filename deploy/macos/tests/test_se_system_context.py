@@ -20,7 +20,7 @@ def state_bytes(tag=TAG, schema=1, root=None):
     return json.dumps({
         'schema': schema,
         'tag_hint': tag,
-        'root': root if root is not None else {'kind': 'secure_enclave', 'tag': 'anp-keyd/' + tag},
+        'root': root if root is not None else {'kind': 'secure_enclave', 'tag': 'anpio-key/' + tag},
         'ciphertext_b64': 'AA==',
         'hs_sha256': '00' * 32,
     }).encode()
@@ -29,7 +29,7 @@ def state_bytes(tag=TAG, schema=1, root=None):
 class StateValidation(unittest.TestCase):
     def test_acceptance_state_is_accepted(self):
         state, tag = probe.parse_state(state_bytes())
-        self.assertEqual(tag, 'anp-keyd/' + TAG)
+        self.assertEqual(tag, 'anpio-key/' + TAG)
 
     def test_non_acceptance_label_is_refused(self):
         for tag in ('production-key', ''):
@@ -45,9 +45,9 @@ class StateValidation(unittest.TestCase):
 
     def test_non_secure_enclave_root_is_refused(self):
         for root in ({'kind': 'tpm', 'handle': 7},
-                     {'kind': 'secure_enclave', 'tag': 'anp-keyd/acceptance-x',
+                     {'kind': 'secure_enclave', 'tag': 'anpio-key/acceptance-x',
                       'handle': 7},
-                     {'SecureEnclave': {'tag': 'anp-keyd/' + TAG}}):
+                     {'SecureEnclave': {'tag': 'anpio-key/' + TAG}}):
             with self.assertRaises(ValueError):
                 probe.parse_state(state_bytes(root=root))
 
@@ -75,7 +75,7 @@ class StateOwnership(unittest.TestCase):
             path = self.write(root)
             content, state, tag = probe.read_user_state(path, os.getuid())
             self.assertEqual(content, state_bytes())
-            self.assertEqual(tag, 'anp-keyd/' + TAG)
+            self.assertEqual(tag, 'anpio-key/' + TAG)
 
     def test_world_writable_state_is_refused(self):
         with tempfile.TemporaryDirectory() as root:
@@ -201,7 +201,7 @@ class Dispatch(unittest.TestCase):
                     run.assert_not_called()
 
     def test_finish_needs_no_signing_arguments(self):
-        args = SimpleNamespace(finish=Path('/Library/ANPKeydSystemContextChecks-x'),
+        args = SimpleNamespace(finish=Path('/Library/ANPIOKeySystemContextChecks-x'),
                                binary=None, sha256=None, team_id=None,
                                application_id=None)
         with patch.object(probe, 'finish_phase') as finish:

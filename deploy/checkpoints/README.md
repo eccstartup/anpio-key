@@ -7,7 +7,7 @@ remain trusted; this detects rollback of source-side evidence, not a lying daemo
 or a compromised keeper/admin. The source never receives the keeper database.
 
 The signing core does not connect to the network. An independently authenticated
-SSH fixed command invokes `anp-keyd audit-source` to validate the complete SQLite
+SSH fixed command invokes `anpio-key audit-source` to validate the complete SQLite
 chain and the keeper's retained prefix in one read transaction. The keeper binds
 instance ID, SSH destination, identity and host-key material at initial enrollment.
 It rejects source changes, malformed responses, conflicting/lower positions and
@@ -101,7 +101,7 @@ silently migrating or re-enrolling.
 
 ```sh
 python3 -m unittest discover -s deploy/checkpoints -p test_collector.py -v
-python3 deploy/checkpoints/acceptance.py --cargo-cache anp-keyd-m3-cargo
+python3 deploy/checkpoints/acceptance.py --cargo-cache anpio-key-m3-cargo
 ```
 
 The second command builds current Rust code and installs sshd only inside two

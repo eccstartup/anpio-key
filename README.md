@@ -1,6 +1,6 @@
-# anp-keyd
+# Anpio Key
 
-anp-keyd 是一个跑在本机的服务，替你的 AI Agent 保管 did:wba 的 Ed25519 私钥，并只在允许的范围内替它签名 HTTP 请求。
+Anpio Key 是一个跑在本机的服务，替你的 AI Agent 保管 did:wba 的 Ed25519 私钥，并只在允许的范围内替它签名 HTTP 请求。
 
 Agent 通过本地 socket 提交请求，拿回签名头。私钥不出服务进程，Agent 也拿不到。
 
@@ -8,7 +8,7 @@ Agent 通过本地 socket 提交请求，拿回签名头。私钥不出服务进
 
 Agent 要代表你访问网站，网站用 did:wba 验证签名。如果直接把私钥给 Agent，一次提示注入或一个坏依赖就可能把私钥带走。
 
-用 anp-keyd 后：
+用 Anpio Key 后：
 
 - 私钥存在本机服务里，Agent 读不到，也不能通过接口取出。
 - 你给 Agent 一张许可条（grant）：哪把钥匙、哪个网站和路径、有效期、最多几次。
@@ -21,27 +21,27 @@ Agent 要代表你访问网站，网站用 did:wba 验证签名。如果直接�
 ```bash
 cargo install --path .
 mkdir -p /tmp/keyd-lab
-anp-keyd --root /tmp/keyd-lab spec \
+anpio-key --root /tmp/keyd-lab spec \
   --host example.com --path agents/mybot --out /tmp/keyd-lab/mybot.spec.json
-anp-keyd --root /tmp/keyd-lab keygen --spec /tmp/keyd-lab/mybot.spec.json
+anpio-key --root /tmp/keyd-lab keygen --spec /tmp/keyd-lab/mybot.spec.json
 ```
 
 `keygen` 会让你输入两遍口令，然后打印一个 DID，记下来。
 
 ```bash
-anp-keyd --root /tmp/keyd-lab serve
+anpio-key --root /tmp/keyd-lab serve
 ```
 
 换一个终端，解锁钥匙：
 
 ```bash
-anp-keyd --root /tmp/keyd-lab unlock --did 你的DID
+anpio-key --root /tmp/keyd-lab unlock --did 你的DID
 ```
 
 签名：
 
 ```bash
-anp-keyd --root /tmp/keyd-lab sign --did 你的DID \
+anpio-key --root /tmp/keyd-lab sign --did 你的DID \
   --method GET --url https://service.example.net/orders/42
 ```
 
@@ -55,7 +55,7 @@ Signature: sig1=:...:
 把这两行原样放进 HTTP 请求头，不能改任何一个字符。试完关掉：
 
 ```bash
-anp-keyd --root /tmp/keyd-lab stop
+anpio-key --root /tmp/keyd-lab stop
 ```
 
 ## 正式安装
@@ -63,7 +63,7 @@ anp-keyd --root /tmp/keyd-lab stop
 Linux 上一条命令完成安装、创建身份、发布策略、创建 grant 并解锁：
 
 ```bash
-git clone https://github.com/eccstartup/anp-keyd.git && cd anp-keyd
+git clone https://github.com/eccstartup/anpio-key.git && cd anpio-key
 ./install.sh --bootstrap --did-host agents.example.com \
   --target https://api.example.com/v1/status
 ```
@@ -73,7 +73,7 @@ git clone https://github.com/eccstartup/anp-keyd.git && cd anp-keyd
 
 省略这两项时，脚本会在终端里询问。
 
-执行过程中会要求你输入几次口令：绑定钥匙、日常热钥匙、迁入受保护状态和解锁。口令只由 anp-keyd 从你的终端读取，不进入 Agent、命令行参数或环境变量。
+执行过程中会要求你输入几次口令：绑定钥匙、日常热钥匙、迁入受保护状态和解锁。口令只由 Anpio Key 从你的终端读取，不进入 Agent、命令行参数或环境变量。
 
 完成后打印 DID 文档地址、vault、grant 编号、有效期限、root 持有的恢复材料目录，以及一段可以直接交给 Agent 的请求示例。把 DID 文档上传到打印出的地址，把 grant 编号交给 Agent，它就可以开始签名。
 
@@ -135,7 +135,7 @@ Agent 在自己的系统账号下提交一个请求文件：
 ```
 
 ```bash
-anp-keyd data --config /etc/anp-keyd/service.json --file request.json
+anpio-key data --config /etc/anpio-key/service.json --file request.json
 ```
 
 `grant_id` 决定这次签名能用哪把钥匙、访问哪里、最多几次；`request_id` 是这次操作的唯一编号。
@@ -162,8 +162,8 @@ anp-keyd data --config /etc/anp-keyd/service.json --file request.json
 - [macOS 预览](deploy/macos/README.md)、[Secure Enclave](deploy/macos/SE-SESSION.md)
 - [独立审计采集器](deploy/checkpoints/README.md)
 - [Node 客户端与 SDK connector](adapters/README.md)
-- [给 Agent 的 skill](skills/anp-keyd/SKILL.md)
-- 文档站：[anp-keyd.vercel.app](https://anp-keyd.vercel.app)
+- [给 Agent 的 skill](skills/anpio-key/SKILL.md)
+- 文档站：[anpio-key.vercel.app](https://anpio-key.vercel.app)
 
 ## 许可
 

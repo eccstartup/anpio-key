@@ -2,7 +2,7 @@
 """Create a fresh macOS preview identity, migrate it into protected state and issue one grant.
 
 Run as root through install.sh --bootstrap on a fresh local-preview installation.
-Passphrases are read only by the anp-keyd binary from the human's terminal; this
+Passphrases are read only by the anpio-key binary from the human's terminal; this
 script never receives, stores or passes them on the command line.
 """
 import argparse
@@ -20,10 +20,10 @@ import uuid
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
-CONFIG = Path('/Library/ANPKeyd/service.json')
-BINARY = Path('/Library/ANPKeyd/bin/anp-keyd')
-PLIST = Path('/Library/LaunchDaemons/org.anp-keyd.local.plist')
-JOB = 'system/org.anp-keyd.local'
+CONFIG = Path('/Library/ANPIOKey/service.json')
+BINARY = Path('/Library/ANPIOKey/bin/anpio-key')
+PLIST = Path('/Library/LaunchDaemons/org.anpio-key.local.plist')
+JOB = 'system/org.anpio-key.local'
 ENV = {'PATH': '/usr/bin:/bin:/usr/sbin:/sbin'}
 ROOT_HOME = Path('/private/var/root')
 ACCEPTED_METHODS = {'GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'}
@@ -76,7 +76,7 @@ def apply_change(change, description):
     # The change contains only public identifiers. The administrator runs this
     # management command, so the file must be readable by that account.
     handle = tempfile.NamedTemporaryFile(
-        prefix='anp-keyd-admin-', suffix='.json', dir='/private/tmp', mode='w', delete=False
+        prefix='anpio-key-admin-', suffix='.json', dir='/private/tmp', mode='w', delete=False
     )
     try:
         json.dump(change, handle)
@@ -237,8 +237,8 @@ def main():
         fail('--body-bytes 必须在 1 到 16777216 之间')
     policy = build_policy(args.target, methods, args.body_bytes, args.grant_days, args.max_uses)
 
-    staging = Path(tempfile.mkdtemp(prefix='anp-keyd-bootstrap-', dir=str(ROOT_HOME)))
-    recovery = ROOT_HOME / ('anp-keyd-recovery-' + datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S'))
+    staging = Path(tempfile.mkdtemp(prefix='anpio-key-bootstrap-', dir=str(ROOT_HOME)))
+    recovery = ROOT_HOME / ('anpio-key-recovery-' + datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S'))
     service_stopped = False
     try:
         spec = staging / 'identity.spec.json'

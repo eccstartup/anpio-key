@@ -12,15 +12,15 @@ for account in signing-admin signing-agent; do
 done
 cargo build --locked
 cargo build --locked --release --example local-preview-fixture
-python3 deploy/linux/install.py --binary "$CARGO_TARGET_DIR/debug/anp-keyd" \
-  --sha256 "$(sha256sum "$CARGO_TARGET_DIR/debug/anp-keyd" | cut -d' ' -f1)" \
+python3 deploy/linux/install.py --binary "$CARGO_TARGET_DIR/debug/anpio-key" \
+  --sha256 "$(sha256sum "$CARGO_TARGET_DIR/debug/anpio-key" | cut -d' ' -f1)" \
   --allow-development-build --admin-user signing-admin --agent-user signing-agent
 framework_args=()
-if [ -n "${ANP_KEYD_TEST_CLAUDE:-}" ]; then
-  framework_args=(--claude-binary "$ANP_KEYD_TEST_CLAUDE" --claude-sha256 "$(sha256sum "$ANP_KEYD_TEST_CLAUDE" | cut -d' ' -f1)")
+if [ -n "${ANPIO_KEY_TEST_CLAUDE:-}" ]; then
+  framework_args=(--claude-binary "$ANPIO_KEY_TEST_CLAUDE" --claude-sha256 "$(sha256sum "$ANPIO_KEY_TEST_CLAUDE" | cut -d' ' -f1)")
 fi
 python3 deploy/macos/acceptance/test-runtime.py "${framework_args[@]}" --container-regression \
-  --binary /usr/local/libexec/anp-keyd --config /etc/anp-keyd/service.json \
+  --binary /usr/local/libexec/anpio-key --config /etc/anpio-key/service.json \
   --migrate-fixture \
   --signing-helper "$CARGO_TARGET_DIR/release/examples/local-preview-fixture" \
   --helper-sha256 "$(sha256sum "$CARGO_TARGET_DIR/release/examples/local-preview-fixture" | cut -d' ' -f1)"

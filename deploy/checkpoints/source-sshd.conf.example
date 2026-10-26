@@ -4,8 +4,8 @@ Match User keyd-observer
     AuthenticationMethods publickey
     PasswordAuthentication no
     KbdInteractiveAuthentication no
-    AuthorizedKeysFile /etc/anp-keyd/audit-authorized-keys/%u
-    ForceCommand /usr/bin/sudo -n -u anp-keyd -- /usr/local/libexec/anp-keyd-audit-source
+    AuthorizedKeysFile /etc/anpio-key/audit-authorized-keys/%u
+    ForceCommand /usr/bin/sudo -n -u anpio-key -- /usr/local/libexec/anpio-key-audit-source
     DisableForwarding yes
     PermitTTY no
     PermitUserEnvironment no

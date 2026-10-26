@@ -80,7 +80,7 @@ pub fn probe(root: Option<&Path>, did: Option<&str>) -> Result<()> {
     };
 
     crate::security::paths::deny_managed_directory(layout.root())?;
-    println!("anp-keyd memory & layout probe");
+    println!("anpio-key memory & layout probe");
     println!("root: {}", layout.root().display());
     println!("(this command never prints key material)");
     println!();

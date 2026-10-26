@@ -17,8 +17,8 @@ import sys
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--config', type=Path, default=Path('/Library/ANPKeyd/service.json'))
-    parser.add_argument('--binary', type=Path, default=Path('/Library/ANPKeyd/bin/anp-keyd'))
+    parser.add_argument('--config', type=Path, default=Path('/Library/ANPIOKey/service.json'))
+    parser.add_argument('--binary', type=Path, default=Path('/Library/ANPIOKey/bin/anpio-key'))
     args = parser.parse_args()
     args.config = args.config.absolute()
     args.binary = args.binary.absolute()

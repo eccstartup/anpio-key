@@ -229,7 +229,7 @@ mod tests {
     /// 这里之所以要一个**真的子进程**,是因为"控制终端"是**会话**的属性:
     /// 在一个已经有终端的进程里怎么改 fd 都模拟不出来。`setsid` 让子进程
     /// 脱离会话,于是它真的没有控制终端 —— 不是假装没有。
-    const NO_TTY_PROBE: &str = "ANP_KEYD_TTY_PROBE";
+    const NO_TTY_PROBE: &str = "ANPIO_KEY_TTY_PROBE";
 
     fn probe_without_a_terminal() -> ! {
         match open() {
@@ -359,7 +359,7 @@ mod tests {
     ///
     /// 关回显时如果用 `TCSAFLUSH`,已经到达但还没被读走的输入会被丢掉。
     /// 而"人看到提示之前就打完了"和"密码管理器粘贴"给出的正是这种输入 ——
-    /// 于是口令被无声地扔掉,读操作永远等下去,`anp-keyd keygen` 就这么
+    /// 于是口令被无声地扔掉,读操作永远等下去,`anpio-key keygen` 就这么
     /// 挂在提示语后面,屏幕上没有半句解释。
     #[test]
     fn input_that_arrived_before_the_prompt_is_not_discarded() {

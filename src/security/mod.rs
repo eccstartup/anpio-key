@@ -183,7 +183,7 @@ impl Write for DeadlineStream {
 }
 
 pub fn probe(path: &Path) -> Result<()> {
-    println!("anp-keyd security boundary probe");
+    println!("anpio-key security boundary probe");
     require_boundary_platform()?;
     let config = config::ServiceConfig::load(path)?;
     println!("config: root-owned, symlink-free, immutable to service and Agents");

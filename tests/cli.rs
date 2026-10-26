@@ -1,4 +1,4 @@
-//! CLI 层:真起一个 `anp-keyd` 进程,真的在一个终端上敲命令。
+//! CLI 层:真起一个 `anpio-key` 进程,真的在一个终端上敲命令。
 //!
 //! # 为什么这一层必须存在,以及为什么它必须用**真终端**
 //!
@@ -35,7 +35,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-const BIN: &str = env!("CARGO_BIN_EXE_anp-keyd");
+const BIN: &str = env!("CARGO_BIN_EXE_anpio-key");
 const PASSPHRASE: &str = "a passphrase that the echo must never show";
 
 // ————————————————————————————————————————————————————————————————————————
@@ -155,7 +155,7 @@ fn run_in_terminal(root: &Path, args: &[&str], rules: &[(&str, String)]) -> Outc
         });
     }
 
-    let mut child = command.spawn().expect("spawn anp-keyd");
+    let mut child = command.spawn().expect("spawn anpio-key");
     // **父进程手里那几份从设备必须关掉。** 留着它们,子进程退出之后主设备
     // 那头也不会给出 EOF,读线程就只能靠超时收场。
     drop(command);
@@ -207,7 +207,7 @@ fn drive(master: &File, child: &mut Child, rules: &[(&str, String)]) -> Outcome 
         })
     };
 
-    let status = child.wait().expect("wait for anp-keyd");
+    let status = child.wait().expect("wait for anpio-key");
     exited.store(true, Ordering::Relaxed);
     let _ = reader.join();
 
@@ -290,7 +290,7 @@ fn set_nonblocking(file: &File) {
 
 /// 跑一条不需要终端的命令,也不带 `--root`:只有参数解析会被走到。
 fn run_bare(args: &[&str]) -> Outcome {
-    let output = Command::new(BIN).args(args).output().expect("spawn anp-keyd");
+    let output = Command::new(BIN).args(args).output().expect("spawn anpio-key");
     Outcome {
         stdout_and_stderr: format!(
             "{}{}",
@@ -669,7 +669,7 @@ fn republishing_keeps_the_declarations_already_in_the_local_document() {
 // 四、守护进程:解锁、签名、上锁
 // ========================================================================
 
-/// 一个跑着的 `anp-keyd serve`。
+/// 一个跑着的 `anpio-key serve`。
 struct Daemon {
     child: Child,
 }
@@ -694,7 +694,7 @@ impl Daemon {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .expect("spawn `anp-keyd serve`");
+            .expect("spawn `anpio-key serve`");
 
         let socket = dir.path().join("run").join("keyd.sock");
         for _ in 0..600 {
@@ -778,7 +778,7 @@ fn run(root: &Path, args: &[&str]) -> Outcome {
     full.push("--root".into());
     full.push(root.display().to_string());
 
-    let output = Command::new(&full[0]).args(&full[1..]).output().expect("spawn anp-keyd");
+    let output = Command::new(&full[0]).args(&full[1..]).output().expect("spawn anpio-key");
     Outcome {
         stdout_and_stderr: format!(
             "{}{}",
@@ -1101,7 +1101,7 @@ fn the_challenge_flag_is_its_own_door() {
     let multibase = document["verificationMethod"][0]["publicKeyMultibase"]
         .as_str()
         .expect("the published document carries the public key");
-    let key = anp_keyd::crypto::thumbprint::ed25519_from_multibase(multibase)
+    let key = anpio_key::crypto::thumbprint::ed25519_from_multibase(multibase)
         .expect("the document's key must decode");
 
     let signature = {
@@ -1170,7 +1170,7 @@ fn the_same_digest_links_the_publish_to_the_read() {
         .to_string();
     let on_disk: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).expect("the published document")).unwrap();
-    let expected = anp_keyd::did::lifecycle::document_digest(&on_disk).expect("a digest");
+    let expected = anpio_key::did::lifecycle::document_digest(&on_disk).expect("a digest");
 
     let _daemon = Daemon::start(&dir);
     run(dir.path(), &["document", "--did", &did]).expect_ok();
@@ -1549,7 +1549,7 @@ fn a_caller_can_add_coverage_but_the_daemon_keeps_its_own() {
     .to_string();
 
     let input = |text: &str| -> String {
-        let parsed = anp_keyd::client::parse_signed_headers(text.as_bytes())
+        let parsed = anpio_key::client::parse_signed_headers(text.as_bytes())
             .expect("the daemon returns header lines");
         parsed
             .iter()
@@ -1595,7 +1595,7 @@ fn serve_hands_the_terminal_back_and_leaves_a_working_daemon() {
         "the command reports where it listens and which pid to thank for it:\n{output}"
     );
     assert!(
-        output.contains("anp-keyd stop"),
+        output.contains("anpio-key stop"),
         "and it says how to get rid of it:\n{output}"
     );
 
@@ -1756,7 +1756,7 @@ fn the_serve_log_records_the_start_and_is_not_world_readable() {
         & 0o777;
     assert_eq!(
         mode,
-        anp_keyd::keystore::layout::SECRET_FILE_MODE,
+        anpio_key::keystore::layout::SECRET_FILE_MODE,
         "the serve log must not be world readable"
     );
 }

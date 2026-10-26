@@ -12,11 +12,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use anp_keyd::crypto::kdf::Argon2Config;
-use anp_keyd::did::document::DidDocumentSpec;
-use anp_keyd::keystore::layout::KeydLayout;
-use anp_keyd::keystore::hardware::HardwareChoice;
-use anp_keyd::keystore::{create, device};
+use anpio_key::crypto::kdf::Argon2Config;
+use anpio_key::did::document::DidDocumentSpec;
+use anpio_key::keystore::layout::KeydLayout;
+use anpio_key::keystore::hardware::HardwareChoice;
+use anpio_key::keystore::{create, device};
 
 const PASSPHRASE: &[u8] = b"probe passphrase";
 
@@ -67,12 +67,12 @@ fn probe(root: &Path, did: Option<&str>) -> std::process::Output {
     let _one_at_a_time = ONE_PROBE_AT_A_TIME
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let mut command = Command::new(env!("CARGO_BIN_EXE_anp-keyd"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_anpio-key"));
     command.arg("probe").arg("--root").arg(root);
     if let Some(did) = did {
         command.arg("--did").arg(did);
     }
-    command.output().expect("run `anp-keyd probe`")
+    command.output().expect("run `anpio-key probe`")
 }
 
 /// 一台装好了一把钥匙的机器。
@@ -313,7 +313,7 @@ fn core_dumps_enabled_make_the_probe_fail() {
     use std::os::unix::process::CommandExt;
 
     let dir = TempDir::new("coredump-on");
-    let mut command = Command::new(env!("CARGO_BIN_EXE_anp-keyd"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_anpio-key"));
     command.arg("probe").arg("--root").arg(dir.path().join("never-created"));
     unsafe {
         command.pre_exec(|| {

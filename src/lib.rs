@@ -1,4 +1,4 @@
-//! anp-keyd —— 持有 did:wba Ed25519 私钥、替 agent 签 RFC 9421 消息签名的本地守护进程。
+//! anpio-key —— 持有 did:wba Ed25519 私钥、替 agent 签 RFC 9421 消息签名的本地守护进程。
 //!
 //! socket 不返回私钥；同 UID 任意代码执行的隔离取决于独立的部署边界。
 

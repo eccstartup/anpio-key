@@ -1,5 +1,5 @@
 """Opt-in real framework smoke: no model call, real identity or privileged UID.
-ANP_KEYD_TEST_CLAUDE must name a reviewed standalone executable. For full
+ANPIO_KEY_TEST_CLAUDE must name a reviewed standalone executable. For full
 cross-UID signing acceptance use test-runtime.py, not this smoke check.
 """
 import sys
@@ -15,10 +15,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'acceptance'))
 import claude_fixture
 
 
-@unittest.skipUnless(os.environ.get('ANP_KEYD_TEST_CLAUDE'), 'opt-in standalone Claude Code executable required')
+@unittest.skipUnless(os.environ.get('ANPIO_KEY_TEST_CLAUDE'), 'opt-in standalone Claude Code executable required')
 class ActualFramework(unittest.TestCase):
     def test_actual_bash_tool_runs_with_clean_home(self):
-        binary = Path(os.environ['ANP_KEYD_TEST_CLAUDE']).resolve(strict=True)
+        binary = Path(os.environ['ANPIO_KEY_TEST_CLAUDE']).resolve(strict=True)
         with tempfile.TemporaryDirectory(prefix='keyd-claude-smoke-') as directory:
             home = Path(directory)
             (home / 'tmp').mkdir()

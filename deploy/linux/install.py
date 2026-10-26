@@ -15,14 +15,14 @@ import subprocess
 import sys
 import uuid
 
-SERVICE = "anp-keyd"
-AGENTS = "anp-keyd-agent"
-ADMINS = "anp-keyd-admin"
-CONFIG = Path("/etc/anp-keyd/service.json")
-STATE = Path("/var/lib/anp-keyd")
-BINARY = Path("/usr/local/libexec/anp-keyd")
-SYSTEMD = Path("/etc/systemd/system/anp-keyd.service")
-TPM_DROPIN = Path("/etc/systemd/system/anp-keyd.service.d/10-tpm.conf")
+SERVICE = "anpio-key"
+AGENTS = "anpio-key-agent"
+ADMINS = "anpio-key-admin"
+CONFIG = Path("/etc/anpio-key/service.json")
+STATE = Path("/var/lib/anpio-key")
+BINARY = Path("/usr/local/libexec/anpio-key")
+SYSTEMD = Path("/etc/systemd/system/anpio-key.service")
+TPM_DROPIN = Path("/etc/systemd/system/anpio-key.service.d/10-tpm.conf")
 
 
 def load(name, filename):
@@ -74,7 +74,7 @@ def verified_binary(args):
         raise RuntimeError('binary digest mismatch or size exceeds bound')
     # Execute exactly the digest-checked bytes from a private root-owned location.
     with tempfile.TemporaryDirectory(prefix='keyd-build-check-') as temp:
-        candidate = Path(temp) / 'anp-keyd'
+        candidate = Path(temp) / 'anpio-key'
         candidate.write_bytes(content)
         candidate.chmod(0o700)
         info = json.loads(subprocess.check_output([str(candidate), 'build-info'], timeout=10))
@@ -125,7 +125,7 @@ def install(args):
         raise RuntimeError("installation requires Linux root")
     if CONFIG.exists() or CONFIG.is_symlink() or STATE.exists() or STATE.is_symlink() or BINARY.exists() or BINARY.is_symlink():
         raise RuntimeError("existing installation/state detected; refusing overwrite or implicit migration")
-    for path in [CONFIG.parent, STATE.parent, BINARY.parent, Path('/etc/systemd/system'), Path('/etc/tmpfiles.d'), Path('/run/anp-keyd')]:
+    for path in [CONFIG.parent, STATE.parent, BINARY.parent, Path('/etc/systemd/system'), Path('/etc/tmpfiles.d'), Path('/run/anpio-key')]:
         trusted_parent(path)
     tpm = None
     if args.tpm_device:
@@ -133,7 +133,7 @@ def install(args):
         # failed deployment must not leave half a TPM grant behind.
         tpm = TPM_DEVICE.report(args.tpm_device)
         trusted_parent(TPM_DROPIN.parent)
-    for path in [Path('/etc/tmpfiles.d/anp-keyd.conf'), SYSTEMD]:
+    for path in [Path('/etc/tmpfiles.d/anpio-key.conf'), SYSTEMD]:
         if path.exists() or path.is_symlink():
             raise RuntimeError(f"existing deployment file: {path}")
     if tpm and (TPM_DROPIN.exists() or TPM_DROPIN.is_symlink()):
@@ -182,9 +182,9 @@ def install(args):
     directory(BINARY.parent)
     directory(STATE, service.pw_uid, service.pw_gid, 0o700)
     directory(STATE / "vaults", service.pw_uid, service.pw_gid, 0o700)
-    directory(Path('/run/anp-keyd'))
-    directory(Path('/run/anp-keyd/sign'), service.pw_uid, agent_gid, 0o750)
-    directory(Path('/run/anp-keyd/admin'), service.pw_uid, admin_gid, 0o750)
+    directory(Path('/run/anpio-key'))
+    directory(Path('/run/anpio-key/sign'), service.pw_uid, agent_gid, 0o750)
+    directory(Path('/run/anpio-key/admin'), service.pw_uid, admin_gid, 0o750)
     fd = os.open(BINARY, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o755)
     os.fchmod(fd, 0o755)
     with os.fdopen(fd, 'wb') as dest:
@@ -194,14 +194,14 @@ def install(args):
         "schema_version": 1, "mode": "linux-protected-v1" if build_info["protected_supported"] else "linux-boundary-preview", "instance_id": str(uuid.uuid4()),
         "service_uid": service.pw_uid, "admin_uids": sorted(admin_uids),
         "agent_gid": agent_gid, "admin_gid": admin_gid, "state_dir": str(STATE),
-        "sign_socket": "/run/anp-keyd/sign/sign.sock", "admin_socket": "/run/anp-keyd/admin/admin.sock",
+        "sign_socket": "/run/anpio-key/sign/sign.sock", "admin_socket": "/run/anpio-key/admin/admin.sock",
         "principals": [{"principal_id": str(uuid.uuid4()), "uid": p.pw_uid, "generation": 1, "enabled": True} for p in agents],
         "vault_ids": [],
     }
     write(CONFIG, json.dumps(config, indent=2) + "\n")
-    write(Path('/etc/tmpfiles.d/anp-keyd.conf'),
-          f"d /run/anp-keyd 0755 root root -\nd /run/anp-keyd/sign 0750 {SERVICE} {AGENTS} -\nd /run/anp-keyd/admin 0750 {SERVICE} {ADMINS} -\n")
-    write(Path('/etc/systemd/system/anp-keyd.service'), Path(__file__).with_name('anp-keyd.service').read_text())
+    write(Path('/etc/tmpfiles.d/anpio-key.conf'),
+          f"d /run/anpio-key 0755 root root -\nd /run/anpio-key/sign 0750 {SERVICE} {AGENTS} -\nd /run/anpio-key/admin 0750 {SERVICE} {ADMINS} -\n")
+    write(Path('/etc/systemd/system/anpio-key.service'), Path(__file__).with_name('anpio-key.service').read_text())
     def service_identity():
         os.initgroups(SERVICE, service.pw_gid)
         os.setgid(service.pw_gid)
@@ -223,7 +223,7 @@ def install(args):
         supplementary = [AGENTS, ADMINS]
         if tpm['group'] not in supplementary:
             supplementary.append(tpm['group'])
-        template = Path(__file__).with_name('anp-keyd-tpm.conf.in').read_text()
+        template = Path(__file__).with_name('anpio-key-tpm.conf.in').read_text()
         rendered = (template.replace('@TPM_DEVICE@', tpm['path'])
                     .replace('@SUPPLEMENTARY_GROUPS@', ' '.join(supplementary)))
         directory(TPM_DROPIN.parent)
@@ -233,7 +233,7 @@ def install(args):
     if tpm:
         print(f"TPM device {tpm['path']} granted through {TPM_DROPIN} (group {tpm['group']}).")
         print("Run the separate physical-TPM acceptance before claiming hardware protection.")
-    print("Review config, then run: systemctl daemon-reload && systemctl enable --now anp-keyd")
+    print("Review config, then run: systemctl daemon-reload && systemctl enable --now anpio-key")
     print("Agents/admins need fresh login sessions for group membership. Keep Agents away from sudo, Docker and admin IPC.")
 
 
@@ -245,8 +245,8 @@ def uninstall():
         raise RuntimeError("managed configuration missing")
     trusted_parent(BINARY.parent)
     # Fail if an active service cannot be stopped. Never remove identity/state.
-    run("systemctl", "disable", "--now", "anp-keyd.service")
-    for path in [Path('/etc/systemd/system/anp-keyd.service'), Path('/etc/tmpfiles.d/anp-keyd.conf'), BINARY]:
+    run("systemctl", "disable", "--now", "anpio-key.service")
+    for path in [Path('/etc/systemd/system/anpio-key.service'), Path('/etc/tmpfiles.d/anpio-key.conf'), BINARY]:
         if path.is_symlink():
             raise RuntimeError(f"unexpected symlink: {path}")
         path.unlink()

@@ -344,7 +344,7 @@ mod tests {
     fn sample_bound() -> WrappedKey {
         let mut k = sample();
         k.version = RECORD_VERSION_HARDWARE;
-        k.hardware = Some(HardwareRoot::SecureEnclave { tag: "anp-keyd:e1_abc".into() });
+        k.hardware = Some(HardwareRoot::SecureEnclave { tag: "anpio-key:e1_abc".into() });
         k.hs_ciphertext = Some(encode_b64(&[0x77u8; 80]));
         k
     }
@@ -471,7 +471,7 @@ mod tests {
         k.aead.aad_digest = encode_b64(&k.aad_digest().unwrap());
         assert!(k.verify_aad().is_ok());
 
-        k.hardware = Some(HardwareRoot::SecureEnclave { tag: "anp-keyd:someone-else".into() });
+        k.hardware = Some(HardwareRoot::SecureEnclave { tag: "anpio-key:someone-else".into() });
         assert!(matches!(k.verify_aad(), Err(KeydError::AadMismatch)));
     }
 

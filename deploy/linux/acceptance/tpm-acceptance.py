@@ -38,9 +38,9 @@ import sys
 import tempfile
 import uuid
 
-SERVICE = 'anp-keyd'
-DROPIN = Path('/etc/systemd/system/anp-keyd.service.d/10-tpm.conf')
-UNIT = Path('/etc/systemd/system/anp-keyd.service')
+SERVICE = 'anpio-key'
+DROPIN = Path('/etc/systemd/system/anpio-key.service.d/10-tpm.conf')
+UNIT = Path('/etc/systemd/system/anpio-key.service')
 
 PENDING = [
     'logout/relogin and user switching',
@@ -143,7 +143,7 @@ def service_tcti():
     """The transport the installed unit actually uses, if it is pinned."""
     try:
         result = subprocess.run(
-            ['systemctl', 'show', 'anp-keyd.service', '-p', 'Environment', '--value'],
+            ['systemctl', 'show', 'anpio-key.service', '-p', 'Environment', '--value'],
             capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.SubprocessError):
         return None
@@ -202,7 +202,7 @@ def systemd_report(device):
 
     def prop(name):
         result = subprocess.run(
-            ['systemctl', 'show', 'anp-keyd.service', '-p', name, '--value'],
+            ['systemctl', 'show', 'anpio-key.service', '-p', name, '--value'],
             capture_output=True, text=True, timeout=10)
         return result.stdout.strip()
 

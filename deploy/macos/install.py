@@ -19,10 +19,10 @@ import subprocess
 import sys
 import uuid
 
-BASE = Path('/Library/ANPKeyd')
+BASE = Path('/Library/ANPIOKey')
 CONFIG = BASE / 'service.json'
-BINARY = BASE / 'bin/anp-keyd'
-PLIST = Path('/Library/LaunchDaemons/org.anp-keyd.local.plist')
+BINARY = BASE / 'bin/anpio-key'
+PLIST = Path('/Library/LaunchDaemons/org.anpio-key.local.plist')
 
 
 def check_chain(path):
@@ -88,7 +88,7 @@ def configuration(service, admin, agents, sign_group, admin_group):
 
 
 def launch_job(service):
-    return {'Label': 'org.anp-keyd.local', 'UserName': service.pw_name,
+    return {'Label': 'org.anpio-key.local', 'UserName': service.pw_name,
             'GroupName': grp.getgrgid(service.pw_gid).gr_name,
             'ProgramArguments': [str(BINARY), 'serve-protected', '--config', str(CONFIG)],
             'WorkingDirectory': str(BASE), 'RunAtLoad': True, 'KeepAlive': False,

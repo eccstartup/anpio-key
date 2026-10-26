@@ -1,15 +1,15 @@
 # 它是什么
 
-anp-keyd 是一个跑在本机的服务，替 AI Agent 保管 did:wba 的 Ed25519 私钥。
+Anpio Key 是一个跑在本机的服务，替 AI Agent 保管 did:wba 的 Ed25519 私钥。
 
-Agent 要代表你访问网站时，把请求交给 anp-keyd；anp-keyd 检查许可后生成签名头，Agent 拿签名头去发请求。私钥始终在服务里，不会交给 Agent。
+Agent 要代表你访问网站时，把请求交给 Anpio Key；Anpio Key 检查许可后生成签名头，Agent 拿签名头去发请求。私钥始终在服务里，不会交给 Agent。
 
 ## 为什么需要它
 
 网站靠数字签名确认“这是你”。签名需要私钥。
 
 - 把私钥直接交给 Agent：它能长期保存、复制、外传；一次提示注入或一个坏依赖就可能带走。
-- 用 anp-keyd：Agent 只有一个 grant。它只能在你批准的网站、路径、期限和次数内签名。
+- 用 Anpio Key：Agent 只有一个 grant。它只能在你批准的网站、路径、期限和次数内签名。
 
 ## 它怎么工作
 
@@ -17,7 +17,7 @@ Agent 要代表你访问网站时，把请求交给 anp-keyd；anp-keyd 检查�
 管理员
   │ 创建身份、发布策略、创建 grant、解锁
   ▼
-anp-keyd 守护进程 ── 私钥、状态、审计
+anpio-key 守护进程 ── 私钥、状态、审计
   ▲
   │ 提交请求，拿回签名头
 Agent
