@@ -96,6 +96,12 @@ required-features = ["hardware-se", "se-acceptance"]
 name = "tpm-persistence"
 required-features = ["hardware-tpm", "tpm-acceptance"]
 
+# 签名核心的吞吐基线。没有 harness(不需要 criterion):只打印每操作耗时,
+# 用来判断连接模型和锁范围该不该动,不做回归门禁。
+[[bench]]
+name = "sign_throughput"
+harness = false
+
 # ————————————————————————————————————————————————————————————————————————
 # 平台相关的依赖。**放在文件末尾是有意的** —— TOML 的 `[table]` 一直管到
 # 下一个表头,把 `[target...]` 插在 `[dependencies]` 中间会让后面那些行

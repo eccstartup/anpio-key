@@ -16,6 +16,8 @@ use std::collections::BTreeMap;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 
+pub mod v2;
+
 use crate::daemon::wire::{self, KeySummary, Request, Response, SignRequest, UnlockedKey};
 use crate::error::{KeydError, Result};
 
