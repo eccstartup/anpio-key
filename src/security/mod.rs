@@ -2,6 +2,7 @@
 pub mod client;
 pub mod config;
 mod coordinator;
+pub mod ecdh;
 pub(crate) mod executor;
 pub mod http;
 pub mod json;

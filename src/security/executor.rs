@@ -1,7 +1,9 @@
 //! Single coordinated signing operation, with injectable clock and backend.
+use super::ecdh::{EcdhRequest, SharedSecretReply};
 use super::http::CanonicalHttpRequest;
 use super::origin::{audit_options, OriginProof, SignedOrigin};
 use super::purpose::{PurposeRequest, SignedPurpose};
+use crate::crypto::hygiene::LockedBytes;
 use crate::error::{KeydError, Result};
 use crate::persistence::{
     catalog::KeyRecord, clock::Clock, requests::RequestStatus, requests::Reservation, Database,
@@ -152,6 +154,75 @@ pub(crate) fn execute_purpose(
             })
         },
     )
+}
+
+/// `ECDH`:算一次共享密钥,交给调用方**一次**。
+///
+/// 和上面几条路不同,它不走 [`run`]:`run` 的结果写进 `requests.result` 再读
+/// 回来,而共享密钥不能落库(见 `Database::complete_ecdh`)。所以这里自己写
+/// 预留 → 算 → 完成 → 用内存里的那份结果作答;重放拿到的是
+/// `completed` + 空结果,由客户端判成 `OUTCOME_UNKNOWN`。
+///
+/// 完成后才构造应答:完成事件写不进去,密钥就一个字节都不出去。
+pub(crate) fn execute_ecdh(
+    db: &mut Database,
+    principal: &str,
+    grant_id: &str,
+    request_id: &str,
+    request: &EcdhRequest,
+    clock: &dyn Clock,
+    backend: impl FnOnce(&KeyRecord, &EcdhRequest) -> Result<LockedBytes>,
+) -> Result<RequestStatus> {
+    let start = clock.now()?;
+    let reservation = db.reserve_ecdh(principal, grant_id, request_id, request, start)?;
+    let (grant, key, deadline) = match reservation {
+        Reservation::Existing(status) => return Ok(status),
+        Reservation::New {
+            grant,
+            key,
+            deadline,
+        } => (grant, key, deadline),
+    };
+    let before = clock.now()?;
+    if before.wall >= grant.expiry || before.monotonic_ms >= deadline {
+        db.fail_reserved(principal, request_id, false, before)?;
+        return Err(KeydError::Misuse("GRANT_EXPIRED".into()));
+    }
+    let shared = match backend(&key, request) {
+        Ok(shared) => shared,
+        Err(error) => {
+            let after = clock.now()?;
+            let known = matches!(error, KeydError::Locked);
+            db.fail_reserved(principal, request_id, !known, after)?;
+            return Err(KeydError::Misuse(
+                if known {
+                    "KEY_LOCKED"
+                } else {
+                    "OUTCOME_UNKNOWN"
+                }
+                .into(),
+            ));
+        }
+    };
+    let mut options = request.audit_options();
+    options["grant_id"] = json!(grant_id);
+    options["key_id"] = json!(key.key_id);
+    options["kid"] = json!(key.kid);
+    if let Err(error) = db.complete_ecdh(principal, request_id, options, clock.now()?) {
+        if let Ok(status) = db.request_status(principal, request_id, clock.now()?) {
+            if status.state == "reserved" {
+                let _ = db.fail_reserved(principal, request_id, true, clock.now()?);
+            }
+        }
+        return Err(error);
+    }
+    Ok(RequestStatus {
+        request_id: request_id.into(),
+        state: "completed".into(),
+        result: Some(
+            serde_json::to_value(SharedSecretReply::new(&shared, request)?)?,
+        ),
+    })
 }
 
 fn run(

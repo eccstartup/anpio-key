@@ -20,6 +20,15 @@ enum Material {
     X25519 { public: PublicKey },
 }
 
+/// 从 seed 推出 X25519 公钥。
+///
+/// **信封生成与解锁两条路共用这一个推导** —— 分头各写一遍是这类代码最容易
+/// 出错的地方:生成时夹紧、解锁时不夹紧,症状是"信封上写的公钥不是这把
+/// seed 的公钥",而那要等到第一次解封才发作。
+pub fn x25519_public_from_seed(seed: &LockedBytes) -> PublicKey {
+    seed.expose(|bytes| PublicKey::from(&StaticSecret::from(*bytes)))
+}
+
 pub struct LockedSigningKey {
     id: KeyId,
     seed: LockedBytes,
@@ -50,7 +59,7 @@ impl LockedSigningKey {
                 // `StaticSecret::from` 不夹紧,夹紧发生在 `PublicKey::from(&secret)`
                 // 与 `diffie_hellman` 里 —— 所以这里算出的公钥和真正做 DH 时
                 // 用的标量一定是同一个。
-                let public = seed.expose(|bytes| PublicKey::from(&StaticSecret::from(*bytes)));
+                let public = x25519_public_from_seed(&seed);
                 (Material::X25519 { public }, x25519_multibase(&public))
             }
             KeyAlgorithm::P256 => {

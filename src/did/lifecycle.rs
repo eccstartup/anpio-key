@@ -20,7 +20,7 @@ use std::collections::BTreeSet;
 
 use serde_json::Value;
 
-use crate::did::document::{DidDocumentSpec, ExtraKey, ROOT_FRAGMENT};
+use crate::did::document::{DidDocumentSpec, ExtraKey, ExtraKeyMaterial, ROOT_FRAGMENT};
 use crate::did::parse::parse_did_wba;
 use crate::error::{KeydError, Result};
 
@@ -102,12 +102,14 @@ pub fn extra_keys(document: &Value, did: &str) -> Result<Vec<ExtraKey>> {
 
         let material = anp::authentication::extract_public_key(method)
             .map_err(|e| KeydError::Did(format!("{id}: unreadable public key: {e}")))?;
-        let public_key = match material {
-            anp::PublicKeyMaterial::Ed25519(key) => key,
+        let material = match material {
+            anp::PublicKeyMaterial::Ed25519(key) => ExtraKeyMaterial::Ed25519(key),
+            anp::PublicKeyMaterial::X25519(key) => ExtraKeyMaterial::X25519(key),
             _ => {
                 return Err(KeydError::Did(format!(
-                    "{id} is not an Ed25519 key, and this build cannot re-sign a document \
-                     containing one — re-signing would silently drop it"
+                    "{id} is an Ed25519 or X25519 key only in this build, and re-signing a \
+                     document that carries anything else at this position would silently \
+                     drop it"
                 )))
             }
         };
@@ -127,7 +129,7 @@ pub fn extra_keys(document: &Value, did: &str) -> Result<Vec<ExtraKey>> {
             }
         }
 
-        out.push(ExtraKey { fragment, public_key, relationships });
+        out.push(ExtraKey { fragment, material, relationships });
     }
     Ok(out)
 }
@@ -456,7 +458,6 @@ mod tests {
     use crate::keystore::wrap::seed_to_public;
     use crate::sign::LockedSigningKey;
     use anp::authentication::DidVerificationRelationship as R;
-    use anp::PublicKeyMaterial;
 
     fn root_key(byte: u8) -> LockedSigningKey {
         let seed = LockedBytes::fill(|d| *d = [byte; 32]).unwrap();
@@ -817,9 +818,9 @@ mod tests {
         assert_eq!(before, document_digest(&document).unwrap());
     }
 
-    /// `PublicKeyMaterial` 的 Ed25519 分支是我们唯一会接受的那一支。
+    /// 读回来的曲线必须和文档里写的一致;签名密钥就是 Ed25519。
     #[test]
-    fn an_extra_key_carries_an_ed25519_public_key() {
+    fn an_extra_key_carries_the_curve_its_method_declares() {
         let (_, did, document) = published(0x73);
         let key = extra_keys(&document, &did).unwrap().remove(0);
         assert!(matches!(
@@ -829,8 +830,8 @@ mod tests {
         // 上游看到的必须是 Ed25519,而不是别的曲线 —— 换一条曲线就得换
         // 一整套指纹算法,而 DID 的最后一段是按 Ed25519 的多基指纹算的。
         assert!(matches!(
-            PublicKeyMaterial::Ed25519(key.public_key),
-            PublicKeyMaterial::Ed25519(_)
+            key.material,
+            ExtraKeyMaterial::Ed25519(_)
         ));
     }
 }

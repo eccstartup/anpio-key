@@ -113,7 +113,8 @@ struct RootContent {}
 
 /// 校验过的 content。`purpose` 由它是哪个变体决定,不再单独存一份可以写错的副本。
 ///
-/// `ecdh` 的内容今天只做校验,求值要等 P3 的 `ECDH` 操作落地。
+/// 每个变体只由对应的 `evaluate_*` 求值:拿到别的变体就是拒绝,不是"差不多的
+/// 策略也能用"。
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 enum Content {
@@ -551,6 +552,20 @@ pub(super) fn evaluate_signing(content: Value, purpose: &str) -> Result<()> {
         return Err(denied());
     };
     if !s.purposes.iter().any(|name| name == purpose) {
+        return Err(denied());
+    }
+    Ok(())
+}
+
+/// 一次 ECDH 的 peer 能不能落在这条策略里。白名单是 32 字节公钥的**逐字节**
+/// 比对:没有通配、没有前缀、没有曲线之外的等价写法。
+pub(super) fn evaluate_ecdh(content: Value, peer: &[u8; 32]) -> Result<()> {
+    let p = parse(content)?;
+    let Content::Ecdh(e) = &p.content else {
+        return Err(denied());
+    };
+    let hex: String = peer.iter().map(|b| format!("{b:02x}")).collect();
+    if !e.peers.iter().any(|allowed| allowed == &hex) {
         return Err(denied());
     }
     Ok(())

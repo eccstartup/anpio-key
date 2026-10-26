@@ -29,8 +29,20 @@ pub use crate::did::spec::{DidDocumentSpec, SpecFile, ROOT_FRAGMENT};
 #[derive(Debug, Clone)]
 pub struct ExtraKey {
     pub fragment: String,
-    pub public_key: ed25519_dalek::VerifyingKey,
+    pub material: ExtraKeyMaterial,
     pub relationships: Vec<anp::authentication::DidVerificationRelationship>,
+}
+
+/// 附加密钥可以是两种曲线之一,而且**哪种只由文档里的验证方法类型决定**。
+///
+/// 上游把这事定成了硬配对:Ed25519 只能当签名角色,X25519 只能当
+/// `keyAgreement`。所以这里保留曲线信息,给 [`role_for`] 拿去配对 ——
+/// 一个"签名角色配 X25519"的组合在本地就拒,不必等上游回一句
+/// `UnsupportedProfile`。
+#[derive(Debug, Clone, Copy)]
+pub enum ExtraKeyMaterial {
+    Ed25519(ed25519_dalek::VerifyingKey),
+    X25519([u8; 32]),
 }
 
 impl ExtraKey {
@@ -39,7 +51,24 @@ impl ExtraKey {
         public_key: ed25519_dalek::VerifyingKey,
         relationships: Vec<anp::authentication::DidVerificationRelationship>,
     ) -> Self {
-        Self { fragment: fragment.into(), public_key, relationships }
+        Self {
+            fragment: fragment.into(),
+            material: ExtraKeyMaterial::Ed25519(public_key),
+            relationships,
+        }
+    }
+
+    /// 协商密钥:文档里是 `X25519KeyAgreementKey2019`,关系只有 `keyAgreement`。
+    pub fn agreement(
+        fragment: impl Into<String>,
+        public: [u8; 32],
+        relationships: Vec<anp::authentication::DidVerificationRelationship>,
+    ) -> Self {
+        Self {
+            fragment: fragment.into(),
+            material: ExtraKeyMaterial::X25519(public),
+            relationships,
+        }
     }
 }
 
@@ -48,18 +77,17 @@ impl ExtraKey {
 /// 上游把这两者定成了**一对一**:每个角色在 `validate_supplied_key` 里对应
 /// 恰好一组关系,多一个少一个都直接 `InvalidDidDocument`。而 role 本身
 /// **不写进文档** —— 落盘的只有关系数组。所以关系是权威,role 是从它推出来
-/// 的:谁想给一把 Ed25519 附加密钥,就只能选这三种组合之一。
+/// 的。曲线也参与配对:X25519 只认 `keyAgreement`,Ed25519 不认它。
 ///
-/// | 关系 | role | 用途 |
-/// |---|---|---|
-/// | `authentication` | `RequestSigning` | 热密钥:日常签名 |
-/// | `assertionMethod` | `E2eeSigning` | 恢复密钥:预授权签一次迁移 |
-/// | 两者都有 | `DeviceSigning` | 既是热密钥又预授权 |
-///
-/// `KeyAgreement` 那一档是 X25519 的,Ed25519 挂不上去 —— 本工具不做
-/// 密钥协商,所以直接报出来而不是让上游用一句 `UnsupportedProfile` 打发。
+/// | 关系 | 曲线 | role | 用途 |
+/// |---|---|---|---|
+/// | `authentication` | Ed25519 | `RequestSigning` | 热密钥:日常签名 |
+/// | `assertionMethod` | Ed25519 | `E2eeSigning` | 恢复密钥:预授权签一次迁移 |
+/// | 两者都有 | Ed25519 | `DeviceSigning` | 既是热密钥又预授权 |
+/// | `keyAgreement` | X25519 | `E2eeAgreement` | 会话密钥协商 |
 fn role_for(
     relationships: &[anp::authentication::DidVerificationRelationship],
+    material: ExtraKeyMaterial,
 ) -> Result<anp::authentication::DidKeyRole> {
     use anp::authentication::{DidKeyRole, DidVerificationRelationship as R};
 
@@ -73,12 +101,20 @@ fn role_for(
         ));
     }
 
-    match set.as_slice() {
-        [R::Authentication] => Ok(DidKeyRole::RequestSigning),
-        [R::AssertionMethod] => Ok(DidKeyRole::E2eeSigning),
-        [R::Authentication, R::AssertionMethod] => Ok(DidKeyRole::DeviceSigning),
-        [R::KeyAgreement] => Err(KeydError::Did(
-            "a `keyAgreement` key has to be X25519, and this build only makes Ed25519 keys".into(),
+    match (set.as_slice(), material) {
+        ([R::Authentication], ExtraKeyMaterial::Ed25519(_)) => Ok(DidKeyRole::RequestSigning),
+        ([R::AssertionMethod], ExtraKeyMaterial::Ed25519(_)) => Ok(DidKeyRole::E2eeSigning),
+        ([R::Authentication, R::AssertionMethod], ExtraKeyMaterial::Ed25519(_)) => {
+            Ok(DidKeyRole::DeviceSigning)
+        }
+        ([R::KeyAgreement], ExtraKeyMaterial::X25519(_)) => Ok(DidKeyRole::E2eeAgreement),
+        ([R::KeyAgreement], ExtraKeyMaterial::Ed25519(_)) => Err(KeydError::Did(
+            "a `keyAgreement` key has to be X25519, and this one is Ed25519".into(),
+        )),
+        (_, ExtraKeyMaterial::X25519(_)) => Err(KeydError::Did(
+            "an X25519 key may only sit under `keyAgreement` — it cannot sign, and a document \
+             that lists it anywhere else would claim otherwise"
+                .into(),
         )),
         _ => Err(KeydError::Did(
             "an extra key has no relationships at all, so no document would list it — \
@@ -111,12 +147,16 @@ pub fn build_unsigned_with(
             // 上游拒收 role 为 `RootControl` 的附加密钥(index > 0 时直接
             // `InvalidDidDocument`)。这不是我们可以绕的:一个 DID 只能有
             // 一个根,其余的都得是别的角色 —— 而具体是哪个角色,由它
-            // 挂在哪些关系下决定(见 [`role_for`])。
-            let role = role_for(&key.relationships)?;
+            // 挂在哪些关系下、以及它是哪种曲线决定(见 [`role_for`])。
+            let role = role_for(&key.relationships, key.material)?;
+            let public_key = match key.material {
+                ExtraKeyMaterial::Ed25519(key) => anp::PublicKeyMaterial::Ed25519(key),
+                ExtraKeyMaterial::X25519(key) => anp::PublicKeyMaterial::X25519(key),
+            };
             Ok(anp::authentication::SuppliedDidKey {
                 fragment: key.fragment,
                 role,
-                public_key: anp::PublicKeyMaterial::Ed25519(key.public_key),
+                public_key,
                 relationships: key.relationships,
             })
         })

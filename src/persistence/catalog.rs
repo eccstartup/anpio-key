@@ -1,6 +1,10 @@
 //! Trusted catalog management. Paths and digests are derived inside the service.
 use super::*;
-use crate::keystore::{layout::KeydLayout, record::WrappedKey, store};
+use crate::keystore::{
+    layout::KeydLayout,
+    record::{KeyAlgorithm, WrappedKey},
+    store,
+};
 use std::os::unix::fs::MetadataExt;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -177,13 +181,28 @@ fn verify_role(wrapped: &WrappedKey, doc: &Value, role: &KeyRole) -> Result<()> 
     let method =
         anp::authentication::find_verification_method(doc, &wrapped.id.kid).ok_or_else(invalid)?;
     let material = anp::authentication::extract_public_key(&method).map_err(|_| invalid())?;
-    let anp::PublicKeyMaterial::Ed25519(pk) = material else {
-        return Err(invalid());
+
+    // 指纹按曲线各算一遍,并且**必须**和信封上写着的那一种曲线一起对:
+    // 一个 `e1_` 信封配一把 X25519 方法(或反过来)在这里就拒绝,而不是等到
+    // 签名时才发现拿错了钥匙。DID 路径段绑的永远是根 Ed25519 键,所以
+    // `root` 只有 Ed25519 那一支可能为真。
+    let e1 = crate::crypto::thumbprint::e1_segment;
+    let (root, fingerprint_matches) = match (wrapped.algorithm, material) {
+        (KeyAlgorithm::Ed25519, anp::PublicKeyMaterial::Ed25519(pk)) => (
+            crate::daemon::state::thumbprint_of(&wrapped.id.did)? == wrapped.id.thumbprint,
+            e1(&pk)? == wrapped.id.thumbprint,
+        ),
+        (KeyAlgorithm::X25519, anp::PublicKeyMaterial::X25519(pk)) => (
+            false,
+            crate::crypto::thumbprint::x1_segment(&x25519_dalek::PublicKey::from(pk))
+                == wrapped.id.thumbprint,
+        ),
+        _ => return Err(invalid()),
     };
-    if crate::crypto::thumbprint::e1_segment(&pk)? != wrapped.id.thumbprint {
+    if !fingerprint_matches {
         return Err(invalid());
     }
-    let root = crate::daemon::state::thumbprint_of(&wrapped.id.did)? == wrapped.id.thumbprint;
+
     let authorized = |name: &str| {
         doc.get(name)
             .and_then(Value::as_array)
@@ -194,19 +213,21 @@ fn verify_role(wrapped: &WrappedKey, doc: &Value, role: &KeyRole) -> Result<()> 
                 })
             })
     };
+    // 签名角色只认 Ed25519,协商角色只认 X25519 —— 文档里把一条曲线挂到
+    // 另一条的关系下,这里要把那一档整体判死。
+    let signs = wrapped.algorithm == KeyAlgorithm::Ed25519;
+    let agrees = wrapped.algorithm == KeyAlgorithm::X25519;
     let valid = match role {
         KeyRole::Unclassified => true,
         KeyRole::Root => root,
-        KeyRole::Hot | KeyRole::Challenge => !root && authorized("authentication"),
-        KeyRole::Recovery => !root && authorized("assertionMethod"),
+        KeyRole::Hot | KeyRole::Challenge => signs && !root && authorized("authentication"),
+        KeyRole::Recovery => signs && !root && authorized("assertionMethod"),
         // A device key asserts on behalf of the device and speaks for the group;
         // the DID document must carry it under both relationships.
         KeyRole::DeviceSigning => {
-            !root && authorized("authentication") && authorized("assertionMethod")
+            signs && !root && authorized("authentication") && authorized("assertionMethod")
         }
-        // No X25519 key exists yet, so nothing may be classified this way; the
-        // role is admitted by the schema ahead of P3.
-        KeyRole::KeyAgreement => false,
+        KeyRole::KeyAgreement => agrees && !root && authorized("keyAgreement"),
     };
     if !valid {
         return Err(invalid());

@@ -80,14 +80,16 @@ fn principal(db: &Connection, id: &str) -> Result<()> {
     Ok(())
 }
 
-/// 一个 purpose 允许用哪种角色的键。P3 之前的 purpose 只有形状,没有操作:
+/// 一个 purpose 允许用哪种角色的键。还没有操作面的 purpose 只有形状:
 /// 建 grant 会被拒。
 fn role_for(purpose: super::policy::Purpose) -> Result<catalog::KeyRole> {
     use super::policy::Purpose;
     Ok(match purpose {
         Purpose::HttpAuthentication | Purpose::OriginProof => catalog::KeyRole::Hot,
         Purpose::PurposeSigning => catalog::KeyRole::DeviceSigning,
-        Purpose::Ecdh | Purpose::ObjectProof | Purpose::DocumentProof | Purpose::Root => {
+        // 协商键是唯一一种 X25519 键,它不做别的。
+        Purpose::Ecdh => catalog::KeyRole::KeyAgreement,
+        Purpose::ObjectProof | Purpose::DocumentProof | Purpose::Root => {
             return Err(refused("GRANT_INVALID"))
         }
     })
@@ -100,7 +102,8 @@ pub(super) fn operation_for(purpose: super::policy::Purpose) -> Result<&'static 
         Purpose::HttpAuthentication => "SIGN_HTTP",
         Purpose::OriginProof => "SIGN_ORIGIN_PROOF",
         Purpose::PurposeSigning => "SIGN_PURPOSE",
-        Purpose::ObjectProof | Purpose::DocumentProof | Purpose::Ecdh | Purpose::Root => {
+        Purpose::Ecdh => "ECDH",
+        Purpose::ObjectProof | Purpose::DocumentProof | Purpose::Root => {
             return Err(refused("GRANT_INVALID"))
         }
     })
@@ -520,6 +523,26 @@ impl Database {
             return Err(refused("KEY_ROLE_FORBIDDEN"));
         }
         super::policy::evaluate_signing(content, purpose.name())?;
+        Ok((g, key))
+    }
+
+    /// `ECDH`。peer 由策略白名单逐字节判定 —— 这一条不是"能不能做",而是
+    /// "允许和谁做";白名单在 grant 活着的时候不能改。
+    pub fn authorize_ecdh(
+        &mut self,
+        principal_id: &str,
+        id: &str,
+        request: &crate::security::ecdh::EcdhRequest,
+        now: Time,
+    ) -> Result<(Grant, catalog::KeyRecord)> {
+        let (g, key, content) = self.authorize(
+            principal_id,
+            id,
+            super::policy::Purpose::Ecdh,
+            "ECDH",
+            now,
+        )?;
+        super::policy::evaluate_ecdh(content, request.peer())?;
         Ok((g, key))
     }
 

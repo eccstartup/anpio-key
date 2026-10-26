@@ -639,6 +639,21 @@ impl DaemonState {
         })
     }
 
+    /// X25519 协商一次。共享密钥只从这条返回值交给执行器,**不进**
+    /// `unlocked` 之外的任何地方 —— 尤其是不能落库。
+    pub(crate) fn derive_shared_secret(
+        &self,
+        uid: u32,
+        key_record: &crate::persistence::catalog::KeyRecord,
+        request: &crate::security::ecdh::EcdhRequest,
+    ) -> Result<crate::crypto::hygiene::LockedBytes> {
+        self.with_vault(uid, |vault| {
+            vault.with_key(&key_record.kid, self.autolock, Instant::now(), |key| {
+                request.derive(key)
+            })
+        })
+    }
+
     /// 借出钥匙做一次原始签名(`--allow-raw-signing` 那条路)。
     ///
     /// 开关的检查**在这里**,不在 handlers —— 让"能不能走这条路"和

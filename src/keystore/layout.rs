@@ -224,9 +224,9 @@ pub fn read_secret_file(path: &Path) -> Result<Vec<u8>> {
     Ok(fs::read(path)?)
 }
 
-/// 指纹当文件名时的白名单。`e1_` 前缀 + base58btc 字母表。
+/// 指纹当文件名时的白名单。`e1_`(签名键)或 `x1_`(协商键)前缀 + base58btc 字母表。
 fn is_safe_thumbprint(t: &str) -> bool {
-    let Some(rest) = t.strip_prefix("e1_") else {
+    let Some(rest) = t.strip_prefix("e1_").or_else(|| t.strip_prefix("x1_")) else {
         return false;
     };
     !rest.is_empty()

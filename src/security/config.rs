@@ -46,6 +46,9 @@ pub struct Features {
     /// `SIGN_PURPOSE`。每个 purpose 一个独立开关,默认全关。
     #[serde(default)]
     pub sign_purpose: PurposeSwitches,
+    /// `ECDH`。唯一一条会吐出秘密的路径,默认关,单独一条 `ECDH_ENABLED` 审计。
+    #[serde(default)]
+    pub ecdh: bool,
 }
 
 /// 每用途一个开关。开哪一路审计里就多一条 `SIGN_PURPOSE_ENABLED`。

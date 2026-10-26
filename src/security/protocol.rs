@@ -51,6 +51,13 @@ pub enum DataRequest {
         /// 小写 hex,≤4096 字节。
         payload: String,
     },
+    /// X25519 协商。`peer` 是 32 字节公钥的小写 hex;共享密钥只回一次,不落库。
+    #[serde(rename = "ECDH")]
+    Ecdh {
+        grant_id: String,
+        request_id: String,
+        peer: String,
+    },
     /// 长生命周期 grant 续期。只能往上顶到策略给的天花板。
     #[serde(rename = "RENEW_GRANT")]
     RenewGrant { grant_id: String, expiry: i64 },
@@ -365,6 +372,31 @@ mod v2_tests {
         }
         let mut bad = base.clone();
         bad["request"].as_object_mut().unwrap().remove("payload");
+        assert!(decode(&bad).is_err());
+    }
+
+    /// ECDH 只收一把 peer 公钥。没有 did/kid,也没有第二把钥匙的余地 ——
+    /// 用哪把协商键由 grant 决定。
+    #[test]
+    fn ecdh_takes_one_peer_key_and_nothing_else() {
+        let base = serde_json::json!({"version":2,"request":{"operation":"ECDH","grant_id":"g","request_id":"r","peer":format!("{:064x}", 0x11)}});
+        let decode = |v: &serde_json::Value| {
+            let payload = serde_json::to_vec(v).unwrap();
+            let mut frame = (payload.len() as u32).to_be_bytes().to_vec();
+            frame.extend(payload);
+            read::<_, Envelope<DataRequest>>(&mut &frame[..])
+        };
+        assert!(matches!(
+            decode(&base).unwrap().request,
+            DataRequest::Ecdh { .. }
+        ));
+        for field in ["did", "kid", "key_id", "public_multibase"] {
+            let mut bad = base.clone();
+            bad["request"][field] = serde_json::json!("override");
+            assert!(decode(&bad).is_err(), "{field}");
+        }
+        let mut bad = base.clone();
+        bad["request"].as_object_mut().unwrap().remove("peer");
         assert!(decode(&bad).is_err());
     }
 }

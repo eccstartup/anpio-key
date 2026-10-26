@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use zeroize::Zeroizing;
 
 use crate::error::{KeydError, Result};
 use crate::persistence::grants::Grant;
@@ -118,6 +119,60 @@ pub struct SignedPurpose {
     pub purpose: Value,
 }
 
+/// 一次 X25519 协商的结果:**只有这一次**,服务端不存第二份。
+///
+/// 没有 `Debug`、没有 `Serialize`、没有把字节拷出去的访问器 —— 共享密钥在
+/// `Zeroizing` 里活到被 drop,要用只能在 [`SharedSecret::expose`] 的闭包里。
+/// 这个类型存在的意义就是让"不小心打了一行日志"编译不过。
+pub struct SharedSecret {
+    secret: Zeroizing<[u8; 32]>,
+    peer_fingerprint: String,
+}
+
+impl SharedSecret {
+    pub fn expose<T>(&self, f: impl FnOnce(&[u8; 32]) -> T) -> T {
+        f(&self.secret)
+    }
+
+    /// 对端公钥的 `x1_…` 指纹。可以记进日志,用来确认协商的是谁。
+    pub fn peer_fingerprint(&self) -> &str {
+        &self.peer_fingerprint
+    }
+
+    fn from_reply(reply: Value) -> Result<Self> {
+        let reply: EcdhReply = serde_json::from_value(reply)
+            .map_err(|_| KeydError::Protocol("unexpected ecdh reply".into()))?;
+        let secret = decode_hex_32(&reply.shared_secret)
+            .ok_or_else(|| KeydError::Protocol("ecdh reply carried no usable secret".into()))?;
+        Ok(Self {
+            secret,
+            peer_fingerprint: reply.peer_fingerprint,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+struct EcdhReply {
+    shared_secret: String,
+    peer_fingerprint: String,
+}
+
+fn decode_hex_32(text: &str) -> Option<Zeroizing<[u8; 32]>> {
+    if text.len() != 64 {
+        return None;
+    }
+    let mut out = Zeroizing::new([0u8; 32]);
+    for (index, pair) in text.as_bytes().chunks_exact(2).enumerate() {
+        let digit = |byte: u8| match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            _ => None,
+        };
+        out[index] = digit(pair[0])? << 4 | digit(pair[1])?;
+    }
+    Some(out)
+}
+
 /// 被服务端明确拒绝的类别。
 ///
 /// 只分到"该做什么"这一层:该等(忙)、该找管理员(没授权)、该停(过期、
@@ -165,6 +220,9 @@ impl Refusal {
             "AUDIT_UNAVAILABLE" | "PERSISTENCE_UNAVAILABLE" => Self::Stopped,
             "POLICY_DENIED" | "KEY_ROLE_FORBIDDEN" | "PRINCIPAL_DISABLED" => Self::Policy,
             "OUTCOME_UNKNOWN" | "ORIGIN_INVALID" | "PURPOSE_INVALID" | "REQUEST_ID_INVALID" => {
+                Self::Other(code.into())
+            }
+            "ECDH_INVALID" | "ECDH_KEY_INVALID" | "ECDH_PEER_INVALID" | "ECDH_PEER_FORBIDDEN" => {
                 Self::Other(code.into())
             }
             _ => return None,
@@ -275,6 +333,25 @@ impl Client {
         from_signed(data, "purpose signature")
     }
 
+    /// 一次 X25519 协商。`peer` 是对方的 32 字节公钥,结果只回这一次。
+    ///
+    /// 用同一个 `request_id` 重放**拿不回来**共享密钥 —— 服务端库里根本没存,
+    /// 第二次会得到 `completed` + 空结果,这里把它翻成 `OUTCOME_UNKNOWN`。
+    /// 所以调用方要先把 `request_id` 和结果一起落地,再往下走。
+    pub fn ecdh(
+        &self,
+        grant_id: &str,
+        request_id: &str,
+        peer: &[u8; 32],
+    ) -> Result<SharedSecret> {
+        let data = self.call(DataRequest::Ecdh {
+            grant_id: grant_id.to_owned(),
+            request_id: request_id.to_owned(),
+            peer: peer.iter().map(|b| format!("{b:02x}")).collect(),
+        })?;
+        from_ecdh(data)
+    }
+
     /// 续期一条 session grant。服务端会把到期日夹到策略天花板以内。
     pub fn renew_grant(&self, grant_id: &str, expiry: i64) -> Result<Grant> {
         let data = self.call(DataRequest::RenewGrant {
@@ -305,6 +382,20 @@ impl Client {
     /// 这是哪份配置。给错误消息用。
     pub fn config(&self) -> &Path {
         &self.config
+    }
+}
+
+/// 协商应答和签名应答同形:`RequestStatus` 套结果。区别在"完成了但没结果"
+/// —— 那是一次重放,秘密已经交出去了,不能再造一份。
+fn from_ecdh(data: Value) -> Result<SharedSecret> {
+    if data.get("state").and_then(Value::as_str) != Some("completed") {
+        return Err(KeydError::Protocol(format!(
+            "unexpected ecdh state: {data}"
+        )));
+    }
+    match data.get("result").filter(|value| !value.is_null()) {
+        Some(result) => SharedSecret::from_reply(result.clone()),
+        None => Err(KeydError::Misuse("OUTCOME_UNKNOWN".into())),
     }
 }
 
@@ -459,5 +550,40 @@ mod tests {
         });
         let error = from_signed::<SignedHttp>(data, "signed request").unwrap_err();
         assert!(matches!(error, KeydError::Protocol(_)));
+    }
+
+    /// 共享密钥只在闭包里能用;长度和字符两个都不对就是坏应答,不是"差不多"。
+    #[test]
+    fn a_shared_secret_is_borrowed_not_copied() {
+        let reply = serde_json::json!({
+            "shared_secret": "4a".repeat(32),
+            "peer_fingerprint": "x1_abc"
+        });
+        let secret = SharedSecret::from_reply(reply).unwrap();
+        assert_eq!(secret.peer_fingerprint(), "x1_abc");
+        assert_eq!(secret.expose(|bytes| bytes[0]), 0x4a);
+        assert_eq!(secret.expose(|bytes| bytes[31]), 0x4a);
+
+        for bad in [
+            serde_json::json!({"shared_secret": "4a".repeat(31), "peer_fingerprint": "x1_a"}),
+            serde_json::json!({"shared_secret": "4A".repeat(32), "peer_fingerprint": "x1_a"}),
+            serde_json::json!({"shared_secret": "zz".repeat(32), "peer_fingerprint": "x1_a"}),
+        ] {
+            assert!(SharedSecret::from_reply(bad).is_err());
+        }
+    }
+
+    /// 重放拿到的是 `completed` + 空结果 —— 那不是"再来一份密钥"。
+    #[test]
+    fn a_replayed_ecdh_reply_carries_no_secret() {
+        let error = match from_ecdh(serde_json::json!({"request_id": "r", "state": "completed"})) {
+            Err(error) => error,
+            Ok(_) => panic!("a completed status with no result must not yield a secret"),
+        };
+        assert!(matches!(error, KeydError::Misuse(code) if code == "OUTCOME_UNKNOWN"));
+        assert!(from_ecdh(serde_json::json!({"request_id": "r", "state": "reserved"})).is_err());
+        let live = serde_json::json!({"request_id": "r", "state": "completed",
+            "result": {"shared_secret": "4a".repeat(32), "peer_fingerprint": "x1_abc"}});
+        assert_eq!(from_ecdh(live).unwrap().expose(|b| b[0]), 0x4a);
     }
 }

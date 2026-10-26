@@ -185,6 +185,80 @@ pub fn create_extra(
     Ok((wrapped, key))
 }
 
+/// 给一个既有 DID 造一把**协商键**(`{device}-agreement`)。
+///
+/// 和 [`generate_extra`] 只差曲线:seed 还是那 32 字节,信封的
+/// `algorithm` 写 `0x03`,指纹走 `x1_`(X25519 的 JWK 指纹)。文档那边的
+/// 角色由 [`ExtraKey::agreement`] 定死成 `keyAgreement` —— 上游只认这一种
+/// 组合,而 X25519 也确实不能签名。
+#[allow(clippy::too_many_arguments)] // 与 `generate_extra` 同一批决定
+pub fn generate_agreement(
+    did: &str,
+    fragment: &str,
+    label: &str,
+    passphrase: &[u8],
+    device_secret: &LockedBytes,
+    argon: Argon2Config,
+    hardware: HardwareChoice,
+) -> Result<(WrappedKey, ExtraKey)> {
+    let seed = LockedBytes::generate()?;
+    let (public, public_multibase) = wrap::seed_to_x25519_public(&seed);
+    let thumbprint = crate::crypto::thumbprint::x1_segment(&x25519_dalek::PublicKey::from(public));
+
+    let hardware = hardware::seal_new(hardware, &thumbprint)?;
+
+    let wrapped = wrap::seal(wrap::SealRequest {
+        id: KeyId {
+            did: did.to_string(),
+            kid: format!("{did}#{fragment}"),
+            thumbprint,
+        },
+        algorithm: KeyAlgorithm::X25519,
+        public_multibase,
+        label: label.to_string(),
+        passphrase,
+        device_secret,
+        seed: &seed,
+        argon,
+        hardware,
+    })?;
+
+    Ok((
+        wrapped,
+        ExtraKey::agreement(
+            fragment,
+            public,
+            vec![anp::authentication::DidVerificationRelationship::KeyAgreement],
+        ),
+    ))
+}
+
+/// [`generate_agreement`] 再落盘。
+#[allow(clippy::too_many_arguments)] // 见 `generate_extra` 上面那一段
+pub fn create_agreement(
+    layout: &KeydLayout,
+    did: &str,
+    fragment: &str,
+    label: &str,
+    passphrase: &[u8],
+    argon: Argon2Config,
+    hardware: HardwareChoice,
+) -> Result<(WrappedKey, ExtraKey)> {
+    layout.ensure()?;
+    let device_secret = device::load_or_create(layout)?;
+    let (wrapped, key) = generate_agreement(
+        did,
+        fragment,
+        label,
+        passphrase,
+        &device_secret,
+        argon,
+        hardware,
+    )?;
+    store::save_new(layout, &wrapped)?;
+    Ok((wrapped, key))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -143,6 +143,16 @@ pub enum Event {
         kid: String,
         document_digest: String,
     },
+    /// 加了一把协商密钥(X25519,只进 `keyAgreement`)。
+    ///
+    /// 单独一条,不并进 [`Event::AddRecoveryKey`]:事后要看得出"这个 DID 从
+    /// 什么时候起有一把能做 ECDH 的钥匙",而 `ECDH` 是唯一一条会把秘密交出去
+    /// 的路。
+    AddAgreementKey {
+        did: String,
+        kid: String,
+        document_digest: String,
+    },
     /// 摘掉一把非绑定密钥。
     RemoveKey {
         did: String,

@@ -16,7 +16,7 @@
 | 外部 SDK 高层热密钥解析 | `@connectx-sdk/core` 0.4.2 起兼容 | 更早版本仍不兼容；最低兼容版本 0.4.2 |
 | awiki JSON-RPC | Node v2 client 可按实际 RPC body 签名 | SDK 原生 ANP-02 body 不能直接当作 RPC envelope |
 
-awiki-cli-rs2 的 Rust 侧（`IdentitySigner`）**没有适配器**，今天能对上的只有结构化那两条：`http_signature_headers` ↔ `SIGN` 的 `Structured` 变体，`did_document`/`optional_did_document` ↔ `GET_DOCUMENT`。`sign_device_assertion` 从 P2 起有对应操作 `SIGN_PURPOSE`（每用途一个开关，默认关，见 §11.3/§11.7）；其余接缝仍没有对应能力：`sign`/`sign_root` 只能落到默认关闭的 `Raw` 或 `Challenge`；`sign_object_proof`/`sign_document_proof` 在 socket 上没有请求类型（`REQUEST_TYPES` 不含）；`ecdh` 要 `keyAgreement` 的 X25519 私钥，本工具只造 Ed25519，进程里也没有这条协议路径。登录/RPC 签名可以走 CLI 接缝，端到端加密那半接不了。补齐这些缺口的接口形状已冻结在 §11：P1 的两条（`SIGN_ORIGIN_PROOF`、`RENEW_GRANT`）与 P2 的 `SIGN_PURPOSE` 已经实现，其余仍在规划。
+awiki-cli-rs2 的 Rust 侧（`IdentitySigner`）**没有适配器**，今天能对上的只有结构化那两条：`http_signature_headers` ↔ `SIGN` 的 `Structured` 变体，`did_document`/`optional_did_document` ↔ `GET_DOCUMENT`。`sign_device_assertion` 从 P2 起有对应操作 `SIGN_PURPOSE`（每用途一个开关，默认关，见 §11.3/§11.7）；`ecdh` 从 P3 起有对应操作 `ECDH`（X25519 协商键由 `add-agreement-key` 生成，见 §11.3/§11.5）。其余接缝仍没有对应能力：`sign`/`sign_root` 只能落到默认关闭的 `Raw` 或 `Challenge`；`sign_object_proof`/`sign_document_proof` 在 socket 上没有请求类型（`REQUEST_TYPES` 不含）。登录/RPC 签名可以走 CLI 接缝。补齐这些缺口的接口形状已冻结在 §11：P1 的两条（`SIGN_ORIGIN_PROOF`、`RENEW_GRANT`）、P2 的 `SIGN_PURPOSE` 与 P3 的 `ECDH` 已经实现，其余仍在规划。
 
 正式 Linux release 且配置显式为 `linux-protected-v1` 时支持保护声明。调试、preview、macOS、软件硬件替身及 seed-export 不在声明内。同 UID 不受限 Agent 之间没有隔离。
 
@@ -353,9 +353,9 @@ anpio-key mcp --config /etc/anpio-key/service.json
 
 新增对端、SDK 版本、平台或策略形态时重新验证相应路径，不能沿用历史记录扩大支持范围。
 
-## 11. 强对接契约（P1、P2 已实现，P3–P5 规划中）
+## 11. 强对接契约（P1–P3 已实现，P4–P5 规划中）
 
-本节冻结与 awiki-cli-rs2、anpio-cli 强对接的接口形状。**P1 已实现**：`SIGN_ORIGIN_PROOF`、`RENEW_GRANT`、session grant、策略 v2、能力协商；**P2 已实现**：`device_signing` 角色与 `SIGN_PURPOSE`（每用途一个开关）。P3–P5 的部分仍只有形状。每阶段结束更新本节的状态列和 §1 的兼容表。已冻结的名字、字节和版本号不再改；新增能力只能追加新名字。
+本节冻结与 awiki-cli-rs2、anpio-cli 强对接的接口形状。**P1 已实现**：`SIGN_ORIGIN_PROOF`、`RENEW_GRANT`、session grant、策略 v2、能力协商；**P2 已实现**：`device_signing` 角色与 `SIGN_PURPOSE`（每用途一个开关）；**P3 已实现**：X25519 `key_agreement` 角色、`ECDH`（默认关）、`add-agreement-key`。P4–P5 的部分仍只有形状。每阶段结束更新本节的状态列和 §1 的兼容表。已冻结的名字、字节和版本号不再改；新增能力只能追加新名字。
 
 ### 11.1 三层接口
 
@@ -373,13 +373,13 @@ anpio-key mcp --config /etc/anpio-key/service.json
 
 ```json
 {"capability_schema":1,
- "operations":["GET_CAPABILITIES","LIST_AUTHORIZED_KEYS","GET_GRANT_STATUS","GET_DOCUMENT","SIGN_HTTP","GET_REQUEST_STATUS","SIGN_ORIGIN_PROOF","RENEW_GRANT","SIGN_PURPOSE"],
- "purposes":["http-authentication","origin-proof","purpose-signing"],
+ "operations":["GET_CAPABILITIES","LIST_AUTHORIZED_KEYS","GET_GRANT_STATUS","GET_DOCUMENT","SIGN_HTTP","GET_REQUEST_STATUS","SIGN_ORIGIN_PROOF","RENEW_GRANT","SIGN_PURPOSE","ECDH"],
+ "purposes":["http-authentication","origin-proof","purpose-signing","ecdh"],
  "signing_purposes":["device_assertion"],
  "grant_kinds":["request","session"]}
 ```
 
-`capability_schema` 是这组字段自己的版本。`operations` 里必有基线六个和 `RENEW_GRANT`；`SIGN_ORIGIN_PROOF` 只在开关打开时出现（关着时发这个操作会收到 `OPERATION_DISABLED`）。P3–P5 的操作按阶段追加。客户端按 `operations` 里有没有某个名字决定能不能用，不按 `protocol_version` 或构建版本猜；名字不在列表里就是该项不支持，不能降级到别的操作。列表只增不减。
+`capability_schema` 是这组字段自己的版本。`operations` 里必有基线六个和 `RENEW_GRANT`；`SIGN_ORIGIN_PROOF`、`SIGN_PURPOSE`、`ECDH` 只在各自开关打开时出现（关着时发这些操作会收到 `OPERATION_DISABLED`）。P4–P5 的操作按阶段追加。客户端按 `operations` 里有没有某个名字决定能不能用，不按 `protocol_version` 或构建版本猜；名字不在列表里就是该项不支持，不能降级到别的操作。列表只增不减。
 
 `signing_purposes` 是 `SIGN_PURPOSE` 的细分开关（P2 起）：只有列出来的用途能签，没列的用途发过去就是 `OPERATION_DISABLED`（用途名本身不认识则是 `PURPOSE_INVALID`）。它和 `purposes` 不是一回事：后者是策略的 purpose，前者是一次 `SIGN_PURPOSE` 的用途标签。
 
@@ -396,7 +396,7 @@ anpio-key mcp --config /etc/anpio-key/service.json
 | `SIGN_PURPOSE` | `grant_id`、`request_id`、`purpose`、`domain`（只有 `application_assertion` 给）、`payload`（hex，≤4096 字节） | `{request_id, signature, public_multibase, purpose}` | P2 已实现 |
 | `SIGN_OBJECT_PROOF` | `value`（对象）、`proof_purpose` | `{proof}`（整份带 proof 的对象） | P5 |
 | `SIGN_DOCUMENT_PROOF` | 完整文档、`proof_purpose` | `{document}` | P5 |
-| `ECDH` | `peer`（32 字节 hex X25519 公钥） | `{shared_secret, peer_fingerprint}` | P3 |
+| `ECDH` | `peer`（32 字节 hex X25519 公钥） | `{shared_secret, peer_fingerprint}` | P3 已实现 |
 
 `SIGN_ORIGIN_PROOF` 的待签事实是 `{method, meta, body}` 这个对象，**不是**一条 HTTP 请求：没有 URL、没有 header，逻辑目标 URI 由 `meta.target.{kind,did}` 决定（`kind` ∈ `agent`/`group`/`service`）。`created` 一律用 daemon 的钟；`expires` 可省，给了就必须落在 300 秒内。签名基、`signature_input`、`signature` 全由 daemon 拼，调用方只给事实，不能覆盖 `did`/`kid`/`key_id`/`signature_profile`。`expires` 在没给时就是 `null`。
 
@@ -406,7 +406,7 @@ anpio-key mcp --config /etc/anpio-key/service.json
 
 `SIGN_OBJECT_PROOF`/`SIGN_DOCUMENT_PROOF` 只接受 `id == did`、`verificationMethod == kid` 的输入，cryptosuite 固定，不接受调用方指定。
 
-`ECDH` 是**唯一一个把秘密输出给调用方的操作**：单次、短到期、grant 内绑定 peer 白名单；审计记 `peer_fingerprint` 和 grant，**不记共享密钥**。没有 grant 的 `ECDH` 直接拒绝，不存在"只查公钥不协商"的路径。
+`ECDH` 是**唯一一个把秘密输出给调用方的操作**：单次、短到期、grant 内绑定 peer 白名单；审计记 `peer_fingerprint` 和 grant，**不记共享密钥**。没有 grant 的 `ECDH` 直接拒绝，不存在"只查公钥不协商"的路径。共享密钥**不落库**：`requests.result` 永远是 NULL，同一个 `request_id` 重放得到的是 `completed` + 空结果（客户端翻成 `OUTCOME_UNKNOWN`），不是同一把密钥的第二次交付。低阶 peer（共享密钥退化成公开值）返回 `ECDH_PEER_INVALID`；peer 不在白名单是 `POLICY_DENIED`。
 
 ### 11.4 授权模型
 
@@ -421,7 +421,7 @@ grant 的构造、撤销和查看仍在管理平面（§2.1 的 prepare/commit�
 
 ### 11.5 密钥、角色与算法字节
 
-`KeyAlgorithm` 的线字节一次定死：`0x01` Ed25519、`0x02` P256、`0x03` **X25519**（冻结，P3 之前没有生产者）。X25519 公钥的 multikey 头是 `0xec01`，thumbprint 仍走 RFC 7638。
+`KeyAlgorithm` 的线字节一次定死：`0x01` Ed25519、`0x02` P256、`0x03` **X25519**（P3 起由 `add-agreement-key` 生产）。X25519 公钥的 multikey 头是 `0xec01`，thumbprint 仍走 RFC 7638。
 
 catalog 角色追加 `device_signing`、`key_agreement`（现有五个不变）。操作到角色的放行表：
 
@@ -434,7 +434,11 @@ catalog 角色追加 `device_signing`、`key_agreement`（现有五个不变）�
 
 `SIGN_PURPOSE` 本质是签名 oracle，所以**一个 purpose 一把专用键**，注册时绑定，事后改不了；开关不塞进 `SigningGates`，也不占 legacy `REQUEST_TYPES`。
 
-绑定发生在管理平面的 `Catalog` → `ConfirmRole`：`device_signing` 必须同时给 `purpose`（`device_assertion` 或 `application_assertion`），其余角色必须留空；DID 文档里这把键要同时挂在 `authentication` 和 `assertionMethod` 下，否则拒绝。绑一次就定死：同一把键再确认成另一个 purpose 会失败，`hot`↔`device_signing` 互相改也失败（要换就换键）。`SIGN_PURPOSE` 只认 grant 上那把键，而且要求请求里的 `purpose` 和绑定的那个逐字相等——策略里的 `purposes` 只在绑定之后再做一次收窄，不能让一把键顶两个用途。存储层从 schema 4 升到 5 时重建 `keys` 表加 `purpose` 列（默认空串），既有的 grant 和 FK 原样保留。
+绑定发生在管理平面的 `Catalog` → `ConfirmRole`：`device_signing` 必须同时给 `purpose`（`device_assertion` 或 `application_assertion`），其余角色必须留空；DID 文档里这把键要同时挂在 `authentication` 和 `assertionMethod` 下，否则拒绝。绑定一次就定死：同一把键再确认成另一个 purpose 会失败，`hot`↔`device_signing` 互相改也失败（要换就换键）。`SIGN_PURPOSE` 只认 grant 上那把键，而且要求请求里的 `purpose` 和绑定的那个逐字相等——策略里的 `purposes` 只在绑定之后再做一次收窄，不能让一把键顶两个用途。存储层从 schema 4 升到 5 时重建 `keys` 表加 `purpose` 列（默认空串），既有的 grant 和 FK 原样保留。
+
+`key_agreement` 同理：这把键必须是 X25519、`purpose` 留空、只挂在文档的 `keyAgreement` 下。曲线在注册和授权两处各判一次——一把 Ed25519 信封配一把 X25519 文档方法（或反过来）在角色判断之前就被拒，所以"挂错关系"和"换条曲线冒充"都到不了签名路径。X25519 键的 thumbprint 是 `x1_` 前缀（RFC 7638，本地算，上游 `compute_multikey_fingerprint` 只认 Ed25519），信封文件名随之也是 `x1_…json`。
+
+`add-agreement-key` 是数据面之外的管理命令（和 `add-recovery-key` 同一条脊柱）：它只造 X25519、只写 `keyAgreement`、重签文档。名字默认 `device-agreement`，再加法顺序是 `device-agreement-2`、`-3`……不复用编号。
 
 策略 v2（P1 起）：
 
@@ -473,15 +477,15 @@ catalog 角色追加 `device_signing`、`key_agreement`（现有五个不变）�
 
 ### 11.7 默认关清单
 
-每个新签名路单独一个开关，默认关，开的时候单独一条审计。已实现两路：`SIGN_ORIGIN_PROOF`（`features.sign_origin_proof`）和 `SIGN_PURPOSE`（`features.sign_purpose`，每个用途一个布尔量）。`SIGN_OBJECT_PROOF`、`SIGN_DOCUMENT_PROOF`、`ECDH` 仍是待实现的开关。
+每个新签名路单独一个开关，默认关，开的时候单独一条审计。已实现三路：`SIGN_ORIGIN_PROOF`（`features.sign_origin_proof`）、`SIGN_PURPOSE`（`features.sign_purpose`，每个用途一个布尔量）、`ECDH`（`features.ecdh`，唯一一条会把秘密吐出来的路）。`SIGN_OBJECT_PROOF`、`SIGN_DOCUMENT_PROOF` 仍是待实现的开关。
 
 `SIGN_PURPOSE` 的开关是逐用途的，列出来的才有，没列出来或整段缺省都是关：
 
 ```json
-{"features":{"sign_origin_proof":true,"sign_purpose":{"device_assertion":true}}}
+{"features":{"sign_origin_proof":true,"sign_purpose":{"device_assertion":true},"ecdh":true}}
 ```
 
-两路开关各自在启动时往审计链追加一条：`{"event":"FEATURES","sign_origin_proof":…}` 和每个开着的用途一条 `{"event":"SIGN_PURPOSE_ENABLED","purpose":…}`。关着时该操作不出现在 `operations` 里（`signing_purposes` 相应为空），发了就是 `OPERATION_DISABLED`，事后从审计能回答"这版服务开过哪些签名路"。开关只决定数据面收不收这个操作，不改变 `SIGN_HTTP` 的行为。开一路不带开另一路：两个开关互不牵连，配的是哪路就只多哪路。
+三路开关各自在启动时往审计链追加一条：`{"event":"FEATURES","sign_origin_proof":…}`、每个开着的用途一条 `{"event":"SIGN_PURPOSE_ENABLED","purpose":…}`、`ECDH` 一条 `{"event":"ECDH_ENABLED"}`。关着时该操作不出现在 `operations` 里（`signing_purposes` 相应为空），发了就是 `OPERATION_DISABLED`，事后从审计能回答"这版服务开过哪些签名路"。开关只决定数据面收不收这个操作，不改变 `SIGN_HTTP` 的行为。开一路不带开另一路：三个开关互不牵连，配的是哪路就只多哪路。
 
 `signing_available=true` 不表示这些路开着，客户端仍以 `operations` 为准。**根的管理操作**（换设备、轮换根、注册）只在管理平面，要求在场（SE 租约或等价物）。数据面唯一能用 root 键的是 `SIGN_DOCUMENT_PROOF`，且它的 grant 只能由管理平面签发——数据面自己没有任何途径造出 root 授权。
 

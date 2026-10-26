@@ -107,6 +107,7 @@ fn help_template() -> String {
          \n\
          Keys and DID lifecycle:\n\
          \x20 add-recovery-key    Add a recovery key to a DID (pre-authorize one migration).\n\
+         \x20 add-agreement-key   Add an X25519 key-agreement key (ECDH only; it cannot sign).\n\
          \x20 rotate-hot-key      Rotate the hot key used for everyday signing.\n\
          \x20 remove-key          Remove a non-binding key from the document.\n\
          \x20 migrate             Migrate to a new DID: the old document is deactivated and points at it.\n\
@@ -230,6 +231,8 @@ pub enum Command {
 
     /// Add a recovery key to a DID (pre-authorize one migration).
     AddRecoveryKey(AddRecoveryKeyArgs),
+    /// Add an X25519 key-agreement key (for ECDH; it cannot sign).
+    AddAgreementKey(AddAgreementKeyArgs),
     /// Rotate the hot key used for everyday signing.
     RotateHotKey(RotateHotKeyArgs),
     /// Remove a non-binding key from the document.
@@ -699,6 +702,21 @@ pub struct AddRecoveryKeyArgs {
 }
 
 #[derive(Args, Debug)]
+pub struct AddAgreementKeyArgs {
+    /// The DID to add a key-agreement key to.
+    #[arg(long, value_name = "DID")]
+    pub did: String,
+
+    /// A human-readable label. It goes into the AAD, so changing it means
+    /// re-wrapping — it is not a comment.
+    #[arg(long, default_value = "device-agreement", value_name = "LABEL")]
+    pub label: String,
+
+    #[command(flatten)]
+    pub hardware: HardwareArgs,
+}
+
+#[derive(Args, Debug)]
 pub struct RotateHotKeyArgs {
     /// The DID whose hot key to rotate.
     #[arg(long, value_name = "DID")]
@@ -1067,6 +1085,14 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::AddRecoveryKey(args) => crate::ops::keys::add_recovery_key(
             root,
             crate::ops::keys::AddRecoveryKey {
+                did: args.did,
+                label: args.label,
+                hardware: args.hardware.choice,
+            },
+        ),
+        Command::AddAgreementKey(args) => crate::ops::keys::add_agreement_key(
+            root,
+            crate::ops::keys::AddAgreementKey {
                 did: args.did,
                 label: args.label,
                 hardware: args.hardware.choice,

@@ -93,6 +93,22 @@ impl Database {
         })
     }
 
+    /// 同一个 request_id 重放拿到的是"做过"而不是那把密钥 —— 见
+    /// [`Database::complete_ecdh`]。
+    pub fn reserve_ecdh(
+        &mut self,
+        principal: &str,
+        grant_id: &str,
+        id: &str,
+        request: &crate::security::ecdh::EcdhRequest,
+        now: Time,
+    ) -> Result<Reservation> {
+        let digest = request.digest();
+        self.reserve(principal, grant_id, id, digest, "ecdh", now, |db| {
+            db.authorize_ecdh(principal, grant_id, request, now)
+        })
+    }
+
     /// 两种签名共用的预留:先看是不是老请求,再判权,再扣配额。
     #[allow(clippy::too_many_arguments)]
     fn reserve(
@@ -233,6 +249,29 @@ impl Database {
         if let Some((field, options)) = options {
             event[field] = options;
         }
+        append(&tx, &event)?;
+        tx.commit().map_err(db_error)
+    }
+    /// ECDH 的完成事件**不存结果**。
+    ///
+    /// 共享密钥只从执行器那条返回值交给调用方一次;库里那条记录写的是
+    /// `completed` + `result IS NULL`,所以同一个 `request_id` 再来一次拿到的是
+    /// "做过,但结果不在库里"。这不是缺陷,是唯一一种不会让秘密在数据库里
+    /// 多留一份的写法 —— 而那个库里存着所有签名结果,是备份和投影都会读的地方。
+    pub fn complete_ecdh(
+        &mut self,
+        principal: &str,
+        id: &str,
+        options: Value,
+        now: Time,
+    ) -> Result<()> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(db_error)?;
+        if tx.execute("UPDATE requests SET state='completed',result=NULL,result_expiry=NULL WHERE principal_id=?1 AND request_id=?2 AND state='reserved'",params![principal,id]).map_err(db_error)? != 1 { return Err(unavailable()); }
+        let mut event = json!({"event":"SIGN_COMPLETED","principal_id":principal,"request_id":id,"delivery":"not_observed","at":now.wall});
+        event["ecdh"] = options;
         append(&tx, &event)?;
         tx.commit().map_err(db_error)
     }

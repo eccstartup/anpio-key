@@ -147,6 +147,14 @@ pub fn seed_to_public(seed: &LockedBytes) -> (ed25519_dalek::VerifyingKey, Strin
     (verifying, multibase)
 }
 
+/// 协商键的同一趟:seed → 公钥 → multibase。推导本身在
+/// [`crate::sign::key::x25519_public_from_seed`],和解锁那条路是同一个。
+pub fn seed_to_x25519_public(seed: &LockedBytes) -> ([u8; 32], String) {
+    let public = crate::sign::key::x25519_public_from_seed(seed);
+    let multibase = crate::crypto::thumbprint::x25519_multibase(&public);
+    (*public.as_bytes(), multibase)
+}
+
 /// 信封里解出来的负载必须是正好 32 字节。
 ///
 /// 这一步在 AEAD 认证**之后** —— 所以走到这里长度还不对,意味着信封本身

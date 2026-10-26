@@ -665,6 +665,10 @@ impl Boundary {
                         operations.push("SIGN_PURPOSE");
                         purposes.push("purpose-signing");
                     }
+                    if self.config.features.ecdh {
+                        operations.push("ECDH");
+                        purposes.push("ecdh");
+                    }
                     reply.data = Some(
                         json!({"protocol_version":2,"profile":"anp-http-v2","max_body_bytes":16384,"transaction_executor_available":true,"audit_projection_healthy":self.projection_healthy.load(Ordering::SeqCst),"capability_schema":1,"operations":operations,"purposes":purposes,"signing_purposes":signing_purposes,"grant_kinds":["request","session"]}),
                     );
@@ -814,6 +818,43 @@ impl Boundary {
                                 KeydError::Protocol("missing managed vault".into())
                             })?;
                             state.sign_purpose(self.config.service_uid, key, request)
+                        },
+                    )?;
+                    reply.data = Some(serde_json::to_value(status)?);
+                }
+                DataRequest::Ecdh { .. } if !self.config.features.ecdh => {
+                    return Err(KeydError::Misuse("OPERATION_DISABLED".into()));
+                }
+                DataRequest::Ecdh {
+                    grant_id,
+                    request_id,
+                    peer,
+                } => {
+                    if !crate::principal::validate_uuid(&request_id) {
+                        return Err(KeydError::Misuse("REQUEST_ID_INVALID".into()));
+                    }
+                    let request = super::ecdh::EcdhRequest::from_wire(&peer)?;
+                    let status = super::executor::execute_ecdh(
+                        &mut db,
+                        principal,
+                        &grant_id,
+                        &request_id,
+                        &request,
+                        &SystemClock,
+                        |key, request| {
+                            if self
+                                .se_session
+                                .lock()
+                                .map_err(|_| KeydError::Locked)?
+                                .as_ref()
+                                .is_some_and(|lease| !lease.live())
+                            {
+                                return Err(KeydError::Locked);
+                            }
+                            let state = self.vaults.get(&key.vault_id).ok_or_else(|| {
+                                KeydError::Protocol("missing managed vault".into())
+                            })?;
+                            state.derive_shared_secret(self.config.service_uid, key, request)
                         },
                     )?;
                     reply.data = Some(serde_json::to_value(status)?);
@@ -1340,6 +1381,9 @@ pub async fn serve(config: ServiceConfig, mut stop: watch::Receiver<bool>) -> Re
     )?;
     for purpose in config.features.sign_purpose.enabled_names() {
         database.record(json!({"event":"SIGN_PURPOSE_ENABLED","purpose":purpose}))?;
+    }
+    if config.features.ecdh {
+        database.record(json!({"event":"ECDH_ENABLED"}))?;
     }
     let (sign, _sign_guard) = bind(&config.sign_socket, config.service_uid, config.agent_gid)?;
     let (admin, _admin_guard) = bind(&config.admin_socket, config.service_uid, config.admin_gid)?;

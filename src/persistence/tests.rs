@@ -1815,7 +1815,7 @@ fn missing_monotonic_deadline_stops_authorization() {
 fn every_nonhot_role_is_forbidden_for_grants_and_data() {
     let (mut f, key, policy) = grant_fixture();
     let g = new_grant(&mut f, &key, &policy);
-    for role in ["root", "recovery", "unclassified", "challenge"] {
+    for role in ["root", "recovery", "unclassified", "challenge", "key_agreement"] {
         f.db.connection
             .execute(
                 "UPDATE keys SET role=?1 WHERE key_id=?2",
@@ -1993,6 +1993,106 @@ fn a_hot_key_cannot_be_classified_as_device_signing() {
         .is_err());
 }
 
+/// P3 的夹具:一把 `#device-agreement`(X25519,挂在 `keyAgreement` 下)
+/// 加一份重新签过的文档。返回 (fixture, agreement key_id)。
+fn agreement_fixture() -> (Fixture, String) {
+    use crate::crypto::kdf::Argon2Config;
+    use crate::keystore::{
+        create, device, hardware::HardwareChoice, layout::KeydLayout, store, unwrap,
+    };
+    use catalog::*;
+    let mut f = Fixture::new();
+    let (vault, did, doc) = vault_fixture(&mut f);
+    let layout = KeydLayout::at(f.dir.join("vaults").join(&vault));
+    let (_, extra) = create::create_agreement(
+        &layout,
+        &did,
+        "device-agreement",
+        "test",
+        b"test-pass",
+        Argon2Config {
+            m_cost: 1024,
+            t_cost: 1,
+            p_cost: 1,
+        },
+        HardwareChoice::None,
+    )
+    .unwrap();
+    let root = store::resolve(&layout, &did, None).unwrap();
+    let secret = device::load(&layout).unwrap();
+    let key = unwrap::unlock(&root, b"test-pass", &secret).unwrap();
+    let unsigned = crate::did::lifecycle::strip_proof(&doc).unwrap();
+    let unsigned = crate::did::lifecycle::with_extra_key(
+        &unsigned,
+        &did,
+        &key.verifying_key().unwrap(),
+        extra,
+    )
+    .unwrap();
+    let signed = crate::did::document::sign_document(&unsigned, &key, &root.id.kid).unwrap();
+    store::write_did_document(&layout, &did, &signed).unwrap();
+
+    apply_change(&mut f, CatalogChange::EnrollVault { vault_id: vault });
+    let agreement =
+        f.db.catalog()
+            .unwrap()
+            .keys
+            .into_iter()
+            .find(|k| k.kid.ends_with("#device-agreement"))
+            .unwrap()
+            .key_id;
+    apply_change(
+        &mut f,
+        CatalogChange::ConfirmRole {
+            key_id: agreement.clone(),
+            role: KeyRole::KeyAgreement,
+            purpose: String::new(),
+        },
+    );
+    (f, agreement)
+}
+
+#[test]
+fn an_agreement_key_is_only_ever_classified_as_key_agreement() {
+    use catalog::*;
+    let (mut f, agreement) = agreement_fixture();
+    let catalog = f.db.catalog().unwrap();
+    let record = catalog
+        .keys
+        .iter()
+        .find(|k| k.key_id == agreement)
+        .unwrap();
+    assert_eq!(record.role, KeyRole::KeyAgreement);
+    assert!(record.purpose.is_empty(), "only device keys are bound to a purpose");
+    // 协商键的信封文件名走 `x1_`:它的指纹是 X25519 的 JWK 指纹,不是 DID 那段。
+    let root = catalog.keys.iter().find(|k| k.key_id != agreement).unwrap();
+    assert!(root.kid.ends_with("#key-1"));
+
+    // 同一条曲线不能改挂别的角色,根密钥也不能认成协商键。
+    for (key_id, role) in [
+        (agreement.clone(), KeyRole::Hot),
+        (agreement.clone(), KeyRole::DeviceSigning),
+        (root.key_id.clone(), KeyRole::KeyAgreement),
+    ] {
+        let refused = f
+            .db
+            .prepare(
+                1002,
+                Change::Catalog {
+                    change: CatalogChange::ConfirmRole {
+                        key_id,
+                        role: role.clone(),
+                        purpose: String::new(),
+                    },
+                },
+                now(),
+            )
+            .is_err();
+        assert!(refused, "{role:?} on the wrong curve must be refused");
+    }
+    verify_audit(&f.db.connection).unwrap();
+}
+
 #[test]
 fn purpose_signing_selects_the_bound_device_key_and_refuses_other_tags() {
     use crate::security::purpose::PurposeRequest;
@@ -2117,6 +2217,125 @@ fn purpose_reservations_deduplicate_and_never_share_an_id_with_another_purpose()
         )
         .unwrap();
     assert!(!text.contains("00ff"));
+    verify_audit(&f.db.connection).unwrap();
+}
+
+/// P3 的夹具:一把 `#device-agreement` 加一条 `ecdh` 策略。
+fn ecdh_fixture() -> (Fixture, String, String) {
+    let (mut f, agreement) = agreement_fixture();
+    let peer = "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f";
+    let policy = uuid();
+    apply_change(
+        &mut f,
+        catalog::CatalogChange::PublishPolicy {
+            policy_id: policy.clone(),
+            version: 1,
+            content: json!({"schema_version":2,"name":"secure-direct","purpose":"ecdh",
+              "limits":{"max_duration_seconds":900,"max_uses":100000,"max_lifetime_seconds":86400,"max_renewals":16},
+              "content":{"peers":[peer]}}),
+        },
+    );
+    (f, agreement, policy)
+}
+
+/// 协商只认策略里列出的那一把 peer 公钥;换成任何另一把都是拒绝,不是"警告"。
+#[test]
+fn ecdh_is_bound_to_one_peer_and_one_agreement_key() {
+    use crate::security::ecdh::EcdhRequest;
+    let (mut f, agreement, policy) = ecdh_fixture();
+    let g = new_session(&mut f, &agreement, &policy, 1_900);
+    let operation: String =
+        f.db.connection
+            .query_row(
+                "SELECT operation FROM grant_operations WHERE grant_id=?1",
+                [&g.grant_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+    assert_eq!(operation, "ECDH");
+
+    let allowed =
+        EcdhRequest::from_wire("de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f")
+            .unwrap();
+    let (_, key) =
+        f.db.authorize_ecdh(&g.principal_id, &g.grant_id, &allowed, now())
+            .unwrap();
+    assert_eq!(key.key_id, agreement);
+    assert_eq!(key.role, catalog::KeyRole::KeyAgreement);
+
+    let stranger = EcdhRequest::from_wire(&"11".repeat(32)).unwrap();
+    assert!(matches!(
+        f.db.authorize_ecdh(&g.principal_id, &g.grant_id, &stranger, now()),
+        Err(KeydError::Misuse(c)) if c == "POLICY_DENIED"
+    ));
+    // 这条 grant 的操作集里只有 ECDH。
+    assert!(f
+        .db
+        .authorize_http(&g.principal_id, &g.grant_id, &canonical(), now())
+        .is_err());
+    verify_audit(&f.db.connection).unwrap();
+}
+
+/// 协商的完成事件**不留结果**:同一个 id 再来一次拿到的是"做过",不是密钥。
+#[test]
+fn an_ecdh_completion_keeps_the_secret_out_of_the_database() {
+    use crate::security::ecdh::EcdhRequest;
+    let (mut f, agreement, policy) = ecdh_fixture();
+    let g = new_session(&mut f, &agreement, &policy, 1_900);
+    let request =
+        EcdhRequest::from_wire("de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f")
+            .unwrap();
+    let principal = g.principal_id.clone();
+    let id = uuid();
+    let mut options = request.audit_options();
+    options["grant_id"] = json!(g.grant_id);
+    options["key_id"] = json!(agreement);
+    f.db.reserve_ecdh(&principal, &g.grant_id, &id, &request, now())
+        .unwrap();
+    // 同一个 peer 重放命中预留;换一把 peer 是同一个 id 配了不同输入。
+    assert!(matches!(
+        f.db.reserve_ecdh(&principal, &g.grant_id, &id, &request, now())
+            .unwrap(),
+        requests::Reservation::Existing(_)
+    ));
+    assert!(matches!(
+        f.db.reserve_ecdh(
+            &principal,
+            &g.grant_id,
+            &id,
+            &EcdhRequest::from_wire(&"22".repeat(32)).unwrap(),
+            now()
+        ),
+        Err(KeydError::Misuse(c)) if c == "REQUEST_ID_CONFLICT"
+    ));
+    f.db.complete_ecdh(&principal, &id, options.clone(), now())
+        .unwrap();
+    let status = f.db.request_status(&principal, &id, now()).unwrap();
+    assert_eq!(status.state, "completed");
+    assert!(status.result.is_none(), "the shared secret must not be stored");
+    let stored: Option<Vec<u8>> = f
+        .db
+        .connection
+        .query_row(
+            "SELECT result FROM requests WHERE request_id=?1",
+            [&id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(stored.is_none());
+    // 审计里有 peer 指纹,没有共享密钥的字节。
+    let text: String = f
+        .db
+        .connection
+        .query_row(
+            "SELECT CAST(event_data AS TEXT) FROM audit_events WHERE json_extract(CAST(event_data AS TEXT),'$.event')='SIGN_COMPLETED'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(text.contains(request.peer_fingerprint()));
+    assert!(text.contains(&g.grant_id));
+    assert!(!text.contains("4a5d9d5ba4ce2de1"));
     verify_audit(&f.db.connection).unwrap();
 }
 
