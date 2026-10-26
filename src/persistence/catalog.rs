@@ -62,6 +62,207 @@ pub enum CatalogChange {
         document: Value,
     },
 }
+
+/// `ReissueDocument` 里"把这一把加进文档"的请求。
+///
+/// 关系是公开信息,却**不能**由 daemon 按角色推:加一把钥匙进文档时它多半还
+/// 没进目录(顺序是先出文档、再登记、再确认角色),此刻没有角色可推。所以由
+/// 管理员写明,daemon 只负责和曲线配对、和已经登记的角色核对。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Addition {
+    /// `did#fragment`。信封必须已经在这个 vault 里。
+    pub kid: String,
+    /// `authentication` / `assertionMethod` / `keyAgreement`,至少一个。
+    pub relationships: Vec<String>,
+}
+
+/// 角色 → 文档里必须挂的那组关系。和 [`verify_role`] 是同一张表。
+///
+/// `Root` 由 DID 路径段绑定、`Unclassified` 还没有角色,两者都没有可核的约束。
+fn relationships_for_role(role: &KeyRole) -> Option<&'static [&'static str]> {
+    match role {
+        KeyRole::Hot | KeyRole::Challenge => Some(&["authentication"]),
+        KeyRole::Recovery => Some(&["assertionMethod"]),
+        KeyRole::DeviceSigning => Some(&["authentication", "assertionMethod"]),
+        KeyRole::KeyAgreement => Some(&["keyAgreement"]),
+        KeyRole::Root | KeyRole::Unclassified => None,
+    }
+}
+
+fn parse_relationships(
+    names: &[String],
+) -> Result<Vec<anp::authentication::DidVerificationRelationship>> {
+    use anp::authentication::DidVerificationRelationship as R;
+
+    if names.is_empty() || names.len() > 3 {
+        return Err(invalid());
+    }
+    let mut out = Vec::with_capacity(names.len());
+    for name in names {
+        let relationship = match name.as_str() {
+            "authentication" => R::Authentication,
+            "assertionMethod" => R::AssertionMethod,
+            "keyAgreement" => R::KeyAgreement,
+            _ => return Err(invalid()),
+        };
+        if out.contains(&relationship) {
+            return Err(invalid());
+        }
+        out.push(relationship);
+    }
+    Ok(out)
+}
+
+pub(super) fn find_key(
+    db: &Connection,
+    vault: &str,
+    did: &str,
+    kid: &str,
+) -> Result<Option<KeyRecord>> {
+    let key: Option<String> = db
+        .query_row(
+            "SELECT key_id FROM keys WHERE vault_id=?1 AND did=?2 AND kid=?3",
+            [vault, did, kid],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(db_error)?;
+    match key {
+        Some(key) => Ok(Some(get_key(db, &key)?)),
+        None => Ok(None),
+    }
+}
+
+/// `ReissueDocument` 准备出来的东西:根记录,和一份**还没签名**的新文档。
+pub(super) struct Reissue {
+    pub root: KeyRecord,
+    pub unsigned: Value,
+}
+
+/// 把"加这几把、撤这几把"变成一份新的、还没签名的文档。
+///
+/// 这和 [`CatalogChange::InstallDocument`] 是同一件事的两端:那个收别人签好的
+/// 文档,这个让 daemon 自己拼、把根密钥的签名留给完成那一步。多出来的这条路
+/// 是给受保护部署的 —— 那里根密钥只在服务进程里,调用方手里根本没有能签文档
+/// 的东西,`InstallDocument` 因此在那种部署里永远用不上,而"换设备、撤销旧
+/// 设备"又恰恰必须有它。
+///
+/// 输入一侧全部当公开信息核:要加的 `kid` 必须解析得到**本 vault 里**的信封,
+/// 关系必须和曲线配得上(由文档重建那一步判),已经登记过的还要和它的角色
+/// 对得上;要撤的必须是文档里确实挂着的方法,且不是根。
+pub(super) fn reissue(
+    tx: &Connection,
+    root_path: &Path,
+    root_key_id: &str,
+    add: &[Addition],
+    remove: &[String],
+) -> Result<Reissue> {
+    let root_key = get_key(tx, root_key_id)?;
+    active_vault(tx, &root_key.vault_id)?;
+    validate_key(root_path, &root_key)?;
+    if root_key.state != "active" || root_key.role != KeyRole::Root {
+        return Err(invalid());
+    }
+    if add.is_empty() && remove.is_empty() {
+        return Err(invalid());
+    }
+
+    let layout = layout(root_path, &root_key.vault_id)?;
+    let did = root_key.did.clone();
+    let doc = document(&layout, &did).map_err(|_| invalid())?;
+    if crate::did::lifecycle::is_deactivated(&doc) {
+        return Err(invalid());
+    }
+    let fragment = root_key
+        .kid
+        .strip_prefix(&format!("{did}#"))
+        .ok_or_else(invalid)?;
+    let root_envelope = store::resolve(&layout, &did, Some(fragment)).map_err(|_| invalid())?;
+    let root_verifying = root_envelope.verifying_key().map_err(|_| invalid())?;
+
+    let mut unsigned = crate::did::lifecycle::strip_proof(&doc).map_err(|_| invalid())?;
+    // 核对的是**输入**那份:它带着根的签名,能过规范绑定检查;输出那份还没有
+    // 签名,规范检查必然过不去,而 `InstallDocument` 会在签好之后原样再核一次。
+    // 中间这段不可能把根换掉 —— `with_extra_key` 和 `without_method` 只动根之外
+    // 的附加方法,碰根就报错。
+    crate::did::document::verify_path_binding(&did, &doc).map_err(|_| invalid())?;
+
+    for kid in remove {
+        let name = kid
+            .strip_prefix(&format!("{did}#"))
+            .ok_or_else(invalid)?;
+        if kid == &root_key.kid || name == crate::did::document::ROOT_FRAGMENT {
+            return Err(invalid());
+        }
+        if anp::authentication::find_verification_method(&unsigned, kid).is_none() {
+            return Err(invalid());
+        }
+        if let Some(record) = find_key(tx, &root_key.vault_id, &did, kid)? {
+            validate_key(root_path, &record)?;
+            if record.state != "active" || record.role == KeyRole::Root {
+                return Err(invalid());
+            }
+        }
+        unsigned =
+            crate::did::lifecycle::without_method(&unsigned, &did, &root_verifying, kid)
+                .map_err(|_| invalid())?;
+    }
+
+    for addition in add {
+        let name = addition
+            .kid
+            .strip_prefix(&format!("{did}#"))
+            .ok_or_else(invalid)?;
+        if name.is_empty() || name == crate::did::document::ROOT_FRAGMENT {
+            return Err(invalid());
+        }
+        let wrapped = store::resolve(&layout, &did, Some(name)).map_err(|_| invalid())?;
+        let extra = match wrapped.algorithm {
+            KeyAlgorithm::Ed25519 => crate::did::document::ExtraKey::new(
+                name,
+                wrapped.verifying_key().map_err(|_| invalid())?,
+                parse_relationships(&addition.relationships)?,
+            ),
+            KeyAlgorithm::X25519 => crate::did::document::ExtraKey::agreement(
+                name,
+                crate::crypto::thumbprint::x25519_from_multibase(&wrapped.public_multibase)
+                    .map_err(|_| invalid())?,
+                parse_relationships(&addition.relationships)?,
+            ),
+            KeyAlgorithm::P256 => return Err(invalid()),
+        };
+        // 已经登记过的,关系必须和它的角色完全一致 —— 否则一条命令就能让
+        // "文档说它是恢复密钥"和"目录说它是设备签名键"同时成立,而两个用途
+        // 的授权范围差着一整个租约。
+        if let Some(record) = find_key(tx, &root_key.vault_id, &did, &addition.kid)? {
+            if record.state != "active" {
+                return Err(invalid());
+            }
+            if let Some(required) = relationships_for_role(&record.role) {
+                let mut given: Vec<&str> =
+                    addition.relationships.iter().map(String::as_str).collect();
+                given.sort_unstable();
+                let mut required = required.to_vec();
+                required.sort_unstable();
+                if given != required {
+                    return Err(invalid());
+                }
+            }
+        }
+        unsigned = crate::did::lifecycle::with_extra_key(&unsigned, &did, &root_verifying, extra)
+            .map_err(|_| invalid())?;
+    }
+
+    if serde_json::to_vec(&unsigned).map_err(|_| invalid())?.len() > 32_768 {
+        return Err(invalid());
+    }
+    Ok(Reissue {
+        root: root_key,
+        unsigned,
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct KeyRecord {
@@ -419,8 +620,13 @@ pub(super) fn resolve(
                     .ok_or_else(invalid)?;
                 let wrapped = store::resolve(&l, &did, Some(fragment))?;
                 if !crate::did::lifecycle::is_deactivated(&doc) {
-                    if matches!(key.role, KeyRole::Hot | KeyRole::DeviceSigning)
-                        && anp::authentication::find_verification_method(&doc, &key.kid).is_none()
+                    // A root-signed replacement may retire a hot key, a device
+                    // key or an agreement key. Root and recovery methods cannot
+                    // quietly disappear through this operation.
+                    if matches!(
+                        key.role,
+                        KeyRole::Hot | KeyRole::DeviceSigning | KeyRole::KeyAgreement
+                    ) && anp::authentication::find_verification_method(&doc, &key.kid).is_none()
                     {
                         continue;
                     }
@@ -580,6 +786,15 @@ pub(super) fn recover_files(db: &mut Connection, root: &Path) -> Result<()> {
                 && key.document_digest == before
                 && crate::did::lifecycle::strip_proof(&target)? == unsigned
                 && target["proof"]["verificationMethod"] == key.kid => {}
+            Resolved::ReissueDocument {
+                root: key,
+                unsigned,
+                ..
+            } if key.vault_id == vault
+                && key.did == did
+                && key.document_digest == before
+                && crate::did::lifecycle::strip_proof(&target)? == unsigned
+                && target["proof"]["verificationMethod"] == key.kid => {}
             Resolved::Catalog { effect } => match *effect {
                 CatalogEffect::InstallDocument {
                     vault_id,
@@ -641,7 +856,10 @@ pub(super) fn recover_files(db: &mut Connection, root: &Path) -> Result<()> {
         for key in list(&tx)?.keys.into_iter().filter(|k| {
             k.vault_id == vault
                 && k.did == did
-                && matches!(k.role, KeyRole::Hot | KeyRole::DeviceSigning)
+                && matches!(
+                    k.role,
+                    KeyRole::Hot | KeyRole::DeviceSigning | KeyRole::KeyAgreement
+                )
         }) {
             if anp::authentication::find_verification_method(&target, &key.kid).is_none() {
                 tx.execute(

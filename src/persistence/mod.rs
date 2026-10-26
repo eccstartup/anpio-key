@@ -38,6 +38,16 @@ pub enum Change {
         old_key_id: String,
         next_key_id: String,
     },
+    /// Add and/or retire non-binding methods, root-signed when the approval is
+    /// completed. This is how a device joins or leaves: its signing and
+    /// agreement keys are published or retired together.
+    ReissueDocument {
+        root_key_id: String,
+        #[serde(default)]
+        add: Vec<catalog::Addition>,
+        #[serde(default)]
+        remove: Vec<String>,
+    },
     /// Exact awiki registration proof, authorized only through management.
     RegistrationChallenge {
         key_id: String,
@@ -64,6 +74,12 @@ enum Resolved {
         root: Box<catalog::KeyRecord>,
         old: Box<catalog::KeyRecord>,
         next: Box<catalog::KeyRecord>,
+        unsigned: Value,
+    },
+    ReissueDocument {
+        root: Box<catalog::KeyRecord>,
+        add: Vec<catalog::Addition>,
+        remove: Vec<String>,
         unsigned: Value,
     },
     RegistrationChallenge {
@@ -577,6 +593,19 @@ impl Database {
             Change::Catalog { change } => Resolved::Catalog {
                 effect: Box::new(catalog::resolve(&tx, &root, change)?),
             },
+            Change::ReissueDocument {
+                root_key_id,
+                add,
+                remove,
+            } => {
+                let reissue = catalog::reissue(&tx, &root, &root_key_id, &add, &remove)?;
+                Resolved::ReissueDocument {
+                    root: Box::new(reissue.root),
+                    add,
+                    remove,
+                    unsigned: reissue.unsigned,
+                }
+            }
             Change::RegisterPrincipal { uid } => {
                 if uid == 0 || uid == u32::MAX || tx.query_row("SELECT EXISTS(SELECT 1 FROM principals WHERE uid=?1 AND state='enabled')", [uid], |r| r.get::<_,bool>(0)).map_err(db_error)? { return Err(invalid()); }
                 let generation: u32 = tx
@@ -662,7 +691,9 @@ impl Database {
         Ok(match payload {
             Some(p) => matches!(
                 serde_json::from_str::<Resolved>(&p).map_err(|_| unavailable())?,
-                Resolved::Catalog { .. } | Resolved::RotateHotKey { .. }
+                Resolved::Catalog { .. }
+                    | Resolved::RotateHotKey { .. }
+                    | Resolved::ReissueDocument { .. }
             ),
             None => false,
         })
@@ -735,7 +766,9 @@ impl Database {
         if secret.is_some()
             != matches!(
                 &resolved,
-                Resolved::RegistrationChallenge { .. } | Resolved::RotateHotKey { .. }
+                Resolved::RegistrationChallenge { .. }
+                    | Resolved::RotateHotKey { .. }
+                    | Resolved::ReissueDocument { .. }
             )
         {
             return Err(invalid());
@@ -779,6 +812,54 @@ impl Database {
                 result = Some(
                     json!({"document":document,"retired_key_id":old.key_id,"next_key_id":next.key_id,"publication_required":true}),
                 );
+            }
+            Resolved::ReissueDocument {
+                root,
+                add,
+                remove,
+                unsigned,
+            } => {
+                if catalog::get_key(&tx, &root.key_id)? != *root {
+                    return Err(invalid());
+                }
+                // Between approval and completion the document or an envelope
+                // can move. Recompute from the same inputs; only an unsigned
+                // document that comes out byte-identical to the approved one
+                // may be signed.
+                let fresh = catalog::reissue(&tx, &self.root, &root.key_id, &add, &remove)?;
+                if fresh.unsigned != unsigned {
+                    return Err(invalid());
+                }
+                let layout = crate::keystore::layout::KeydLayout::at(
+                    self.root.join("vaults").join(&root.vault_id),
+                );
+                let fragment = root
+                    .kid
+                    .strip_prefix(&format!("{}#", root.did))
+                    .ok_or_else(invalid)?;
+                let wrapped = crate::keystore::store::resolve(&layout, &root.did, Some(fragment))?;
+                let signer = crate::keystore::unwrap::unlock(
+                    &wrapped,
+                    secret.ok_or_else(invalid)?.as_bytes(),
+                    &crate::keystore::device::load(&layout)?,
+                )?;
+                let document = crate::did::document::sign_document(&unsigned, &signer, &root.kid)?;
+                let effect = catalog::resolve(
+                    &tx,
+                    &self.root,
+                    catalog::CatalogChange::InstallDocument {
+                        vault_id: root.vault_id.clone(),
+                        document: document.clone(),
+                    },
+                )
+                .map_err(|_| invalid())?;
+                catalog::apply(&tx, &self.root, operation_id, effect)?;
+                result = Some(json!({
+                    "document": document,
+                    "added": add.iter().map(|addition| addition.kid.clone()).collect::<Vec<_>>(),
+                    "removed": remove,
+                    "publication_required": true,
+                }));
             }
             Resolved::RegistrationChallenge {
                 key,

@@ -3105,6 +3105,319 @@ fn trusted_hot_rotation_retires_old_key_revokes_grants_and_recovers_approved_doc
     verify_audit(&f.db.connection).unwrap();
 }
 
+/// 一台设备在文档里的样子:签名键挂两处,协商键只挂 `keyAgreement`。
+///
+/// 换设备是"撤掉旧的两把、加上新的两把"。撤的时候必须两把都撤 —— 只撤签名
+/// 键的话,旧设备仍然能谈会话密钥,而会话密钥能读的东西比签名多。
+struct Device {
+    sign: crate::did::document::ExtraKey,
+    agreement: crate::did::document::ExtraKey,
+}
+
+fn reissue_fixture(
+    f: &mut Fixture,
+) -> (
+    String,
+    String,
+    crate::keystore::layout::KeydLayout,
+    String,
+    Device,
+    Device,
+) {
+    use crate::keystore::{create, hardware::HardwareChoice, layout::KeydLayout};
+    use anp::authentication::DidVerificationRelationship as R;
+
+    let (vault, did, doc) = vault_fixture(f);
+    let layout = KeydLayout::at(f.dir.join("vaults").join(&vault));
+    let root_envelope = crate::keystore::store::resolve(&layout, &did, None).unwrap();
+    let root_signer = crate::keystore::unwrap::unlock(
+        &root_envelope,
+        b"test-pass",
+        &crate::keystore::device::load(&layout).unwrap(),
+    )
+    .unwrap();
+    let argon = crate::crypto::kdf::Argon2Config {
+        m_cost: 1024,
+        t_cost: 1,
+        p_cost: 1,
+    };
+    let device = |fragment: &str| {
+        let (_, sign) = create::create_extra(
+            &layout,
+            &did,
+            &format!("{fragment}-sign"),
+            vec![R::Authentication, R::AssertionMethod],
+            "test",
+            b"test-pass",
+            argon,
+            HardwareChoice::None,
+        )
+        .unwrap();
+        let (_, agreement) = create::create_agreement(
+            &layout,
+            &did,
+            &format!("{fragment}-agreement"),
+            "test",
+            b"test-pass",
+            argon,
+            HardwareChoice::None,
+        )
+        .unwrap();
+        Device { sign, agreement }
+    };
+    let (old, kept) = (device("old-device"), device("this-device"));
+
+    let mut unsigned = crate::did::lifecycle::strip_proof(&doc).unwrap();
+    for extra in [
+        old.sign.clone(),
+        old.agreement.clone(),
+        kept.sign.clone(),
+        kept.agreement.clone(),
+    ] {
+        unsigned = crate::did::lifecycle::with_extra_key(
+            &unsigned,
+            &did,
+            &root_signer.verifying_key().unwrap(),
+            extra,
+        )
+        .unwrap();
+    }
+    let installed =
+        crate::did::document::sign_document(&unsigned, &root_signer, &root_envelope.id.kid).unwrap();
+    crate::keystore::store::write_did_document(&layout, &did, &installed).unwrap();
+    apply_change(
+        f,
+        catalog::CatalogChange::EnrollVault {
+            vault_id: vault.clone(),
+        },
+    );
+    let keys = f.db.catalog().unwrap().keys;
+    let root_key_id = keys
+        .iter()
+        .find(|k| k.kid == root_envelope.id.kid)
+        .unwrap()
+        .key_id
+        .clone();
+    apply_change(
+        f,
+        catalog::CatalogChange::ConfirmRole {
+            key_id: root_key_id.clone(),
+            role: catalog::KeyRole::Root,
+            purpose: String::new(),
+        },
+    );
+    for (extra, role, purpose) in [
+        (
+            &old.sign,
+            catalog::KeyRole::DeviceSigning,
+            "device_assertion",
+        ),
+        (&old.agreement, catalog::KeyRole::KeyAgreement, ""),
+        (
+            &kept.sign,
+            catalog::KeyRole::DeviceSigning,
+            "device_assertion",
+        ),
+        (&kept.agreement, catalog::KeyRole::KeyAgreement, ""),
+    ] {
+        let kid = format!("{did}#{}", extra.fragment);
+        let key = keys.iter().find(|k| k.kid == kid).unwrap();
+        apply_change(
+            f,
+            catalog::CatalogChange::ConfirmRole {
+                key_id: key.key_id.clone(),
+                role,
+                purpose: purpose.to_string(),
+            },
+        );
+    }
+    let root_key_id = keys
+        .iter()
+        .find(|k| k.kid == root_envelope.id.kid)
+        .unwrap()
+        .key_id
+        .clone();
+    (vault, did, layout, root_key_id, old, kept)
+}
+
+/// 撤销一台设备 = 从文档里撤掉它的**两把**钥匙,根当场重签。撤掉的目录记录
+/// 在文件投影完成时退休;协商键不退休的话,旧设备还能继续谈会话密钥。
+#[test]
+fn reissue_retires_both_keys_of_a_revoked_device() {
+    let mut f = Fixture::new();
+    let (_vault, did, layout, root_key_id, old, kept) = reissue_fixture(&mut f);
+    let kids = |device: &Device| {
+        [
+            format!("{did}#{}", device.sign.fragment),
+            format!("{did}#{}", device.agreement.fragment),
+        ]
+    };
+    let change = Change::ReissueDocument {
+        root_key_id,
+        add: Vec::new(),
+        remove: kids(&old).to_vec(),
+    };
+    let p = f.db.prepare(1002, change, now()).unwrap();
+    assert!(f
+        .db
+        .commit(1002, &p.operation_id, &p.digest, now())
+        .is_err());
+    let original = crate::keystore::store::read_did_document(&layout, &did).unwrap();
+    let result = f
+        .db
+        .commit_secret(1002, &p.operation_id, &p.digest, now(), Some("test-pass"))
+        .unwrap()
+        .unwrap();
+    // 批准之后、投影之前:磁盘上还是旧文档。根签出的那一份在操作记录里。
+    assert_eq!(
+        crate::keystore::store::read_did_document(&layout, &did).unwrap(),
+        original
+    );
+    f.db.recovery(&f.config, now()).unwrap();
+    let installed = crate::keystore::store::read_did_document(&layout, &did).unwrap();
+    assert_eq!(installed, result["document"]);
+    for kid in kids(&old) {
+        assert!(
+            anp::authentication::find_verification_method(&installed, &kid).is_none(),
+            "{kid} is still published"
+        );
+    }
+    for kid in kids(&kept) {
+        assert!(
+            anp::authentication::find_verification_method(&installed, &kid).is_some(),
+            "{kid} disappeared with the old device"
+        );
+    }
+    let keys = f.db.catalog().unwrap().keys;
+    for kid in kids(&old) {
+        assert_eq!(
+            keys.iter().find(|k| k.kid == kid).unwrap().state,
+            "retired",
+            "{kid}"
+        );
+    }
+    for kid in kids(&kept) {
+        assert_eq!(keys.iter().find(|k| k.kid == kid).unwrap().state, "active");
+    }
+    verify_audit(&f.db.connection).unwrap();
+}
+
+/// 把一把已经封装好的钥匙公布进文档。这是换设备的另一半:daemon 里新铸的
+/// 钥匙先在这里进文档,之后才登记、才确认角色 —— 顺序反了的话 `EnrollVault`
+/// 找不到文档方法,而那正是它核对信封的方式。
+#[test]
+fn reissue_publishes_a_key_that_has_no_role_yet_and_refuses_the_binding_key() {
+    let mut f = Fixture::new();
+    let (_vault, did, layout, root_key_id, _old, _kept) = reissue_fixture(&mut f);
+    let (fresh, _) = crate::keystore::create::create_extra(
+        &layout,
+        &did,
+        "new-device-sign",
+        vec![
+            anp::authentication::DidVerificationRelationship::Authentication,
+            anp::authentication::DidVerificationRelationship::AssertionMethod,
+        ],
+        "test",
+        b"test-pass",
+        crate::crypto::kdf::Argon2Config {
+            m_cost: 1024,
+            t_cost: 1,
+            p_cost: 1,
+        },
+        crate::keystore::hardware::HardwareChoice::None,
+    )
+    .unwrap();
+    let kid = format!("{did}#new-device-sign");
+    let p = f
+        .db
+        .prepare(
+            1002,
+            Change::ReissueDocument {
+                root_key_id: root_key_id.clone(),
+                add: vec![catalog::Addition {
+                    kid: kid.clone(),
+                    relationships: vec!["authentication".into(), "assertionMethod".into()],
+                }],
+                remove: Vec::new(),
+            },
+            now(),
+        )
+        .unwrap();
+    f.db.complete_secret_operation(1002, &p.operation_id, &p.digest, now(), "test-pass")
+        .unwrap();
+    let installed = crate::keystore::store::read_did_document(&layout, &did).unwrap();
+    let method = anp::authentication::find_verification_method(&installed, &kid).unwrap();
+    assert_eq!(
+        method["publicKeyMultibase"].as_str(),
+        Some(fresh.public_multibase.as_str())
+    );
+    // 根由 DID 路径段绑定,不在关系数组里:想"加进文档"或者"撤掉"都必须拒绝。
+    let root_kid = format!("{did}#{}", crate::did::document::ROOT_FRAGMENT);
+    for change in [
+        Change::ReissueDocument {
+            root_key_id: root_key_id.clone(),
+            add: vec![catalog::Addition {
+                kid: root_kid.clone(),
+                relationships: vec!["authentication".into()],
+            }],
+            remove: Vec::new(),
+        },
+        Change::ReissueDocument {
+            root_key_id: root_key_id.clone(),
+            add: Vec::new(),
+            remove: vec![root_kid],
+        },
+        Change::ReissueDocument {
+            root_key_id,
+            add: Vec::new(),
+            remove: Vec::new(),
+        },
+    ] {
+        assert!(f.db.prepare(1002, change, now()).is_err());
+    }
+}
+
+/// 批准之后文档被换过一份 → 拒绝签字。根密钥的签名是**当场对一个具体文档**
+/// 做出的:拿它去签一份批准时没人看过的文档,就是把在场那一下偷换成别的意思。
+#[test]
+fn reissue_refuses_a_document_that_moved_after_approval() {
+    let mut f = Fixture::new();
+    let (_vault, did, layout, root_key_id, old, _kept) = reissue_fixture(&mut f);
+    let removal = format!("{did}#{}", old.sign.fragment);
+    let p = f
+        .db
+        .prepare(
+            1002,
+            Change::ReissueDocument {
+                root_key_id,
+                add: Vec::new(),
+                remove: vec![removal.clone()],
+            },
+            now(),
+        )
+        .unwrap();
+    // 批准之后,别人(另一次合法的重发)已经把这份文档改掉了。内容上等价,
+    // 但这已经不是批准时的那一份。
+    let moved = crate::keystore::store::read_did_document(&layout, &did).unwrap();
+    let without =
+        crate::did::lifecycle::remove_method(&crate::did::lifecycle::strip_proof(&moved).unwrap(), &removal)
+            .unwrap();
+    let root_envelope = crate::keystore::store::resolve(&layout, &did, None).unwrap();
+    let root_signer = crate::keystore::unwrap::unlock(
+        &root_envelope,
+        b"test-pass",
+        &crate::keystore::device::load(&layout).unwrap(),
+    )
+    .unwrap();
+    let signed = crate::did::document::sign_document(&without, &root_signer, &root_envelope.id.kid)
+        .unwrap();
+    crate::keystore::store::write_did_document(&layout, &did, &signed).unwrap();
+    assert!(f
+        .db
+        .complete_secret_operation(1002, &p.operation_id, &p.digest, now(), "test-pass")
+        .is_err());
+}
+
 #[test]
 fn durable_http_result_preserves_covered_type_but_not_private_application_headers() {
     let (mut f, key, policy) = grant_fixture();
