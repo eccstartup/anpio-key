@@ -82,7 +82,7 @@ pub fn add_recovery_key(root: Option<&Path>, args: AddRecoveryKey) -> Result<()>
     )?;
 
     let updated =
-        lifecycle::with_extra_key(&document, &args.did, &binding.verifying_key(), key)?;
+        lifecycle::with_extra_key(&document, &args.did, &binding.verifying_key()?, key)?;
 
     let digest = sign_confirm_and_write(
         &session,
@@ -170,7 +170,7 @@ pub fn rotate_hot_key(root: Option<&Path>, args: RotateHotKey) -> Result<()> {
     )?;
 
     let mut updated =
-        lifecycle::with_extra_key(&document, &args.did, &binding.verifying_key(), key)?;
+        lifecycle::with_extra_key(&document, &args.did, &binding.verifying_key()?, key)?;
 
     if let Some(retired) = &retired {
         if args.keep_old {
@@ -179,7 +179,7 @@ pub fn rotate_hot_key(root: Option<&Path>, args: RotateHotKey) -> Result<()> {
             updated = lifecycle::without_method(
                 &updated,
                 &args.did,
-                &binding.verifying_key(),
+                &binding.verifying_key()?,
                 &format!("{}#{}", args.did, retired.fragment),
             )?;
         }
@@ -238,7 +238,7 @@ pub fn remove_key(root: Option<&Path>, args: RemoveKey) -> Result<()> {
     let (_, binding) = session.unlock_with(&args.did, None, binding_passphrase.as_bytes())?;
 
     let updated =
-        lifecycle::without_method(&document, &args.did, &binding.verifying_key(), &full)?;
+        lifecycle::without_method(&document, &args.did, &binding.verifying_key()?, &full)?;
 
     // 本地的信封**不删**。摘掉的是"文档认它",不是"我们不再有它":删文件
     // 不可逆,而摘引用是可逆的(再 publish 一次就回来了)。把不可逆的那一步

@@ -178,7 +178,7 @@ impl OriginProof {
             &self.method,
             &self.meta,
             &self.body,
-            &key.anp_public_key(),
+            &key.anp_public_key()?,
             &key.id().kid,
             options,
         )

@@ -89,7 +89,7 @@ fn generate(path: PathBuf, secure_enclave: bool) {
     let unsigned = anpio_key::did::lifecycle::with_extra_key(
         &unsigned,
         &created.did,
-        &key.verifying_key(),
+        &key.verifying_key().unwrap(),
         extra,
     )
     .unwrap();
@@ -111,7 +111,7 @@ fn generate(path: PathBuf, secure_enclave: bool) {
     let unsigned = anpio_key::did::lifecycle::with_extra_key(
         &unsigned,
         &created.did,
-        &key.verifying_key(),
+        &key.verifying_key().unwrap(),
         next,
     )
     .unwrap();

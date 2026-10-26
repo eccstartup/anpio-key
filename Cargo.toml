@@ -30,6 +30,9 @@ bip39 = { version = "3", default-features = false, features = ["zeroize"] }
 
 # —— 密码学(版本对齐 anp 1.0.6,避免同一 crate 出现两份)
 ed25519-dalek = { version = "=2.1.1", features = ["zeroize", "rand_core"] }
+# X25519 协商键(`{device}-agreement`)。`static_secrets` 不在默认特性里,而
+# 信封解出来的就是一把**长期**私钥 —— 少了它连 `StaticSecret` 这个类型都不存在。
+x25519-dalek = { version = "=2.0.1", features = ["static_secrets"] }
 argon2 = "0.5"
 chacha20poly1305 = "0.10"
 hkdf = "0.12"

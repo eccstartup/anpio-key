@@ -122,6 +122,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tss-esapi",
+ "x25519-dalek",
  "zeroize",
 ]
 

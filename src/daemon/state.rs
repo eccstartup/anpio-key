@@ -30,7 +30,7 @@ use crate::daemon::wire::{KeySummary, UnlockedKey};
 use crate::did::parse::parse_did_wba;
 use crate::error::{KeydError, Result};
 use crate::keystore::{device, layout::KeydLayout, store};
-use crate::sign::{ed25519::LockedSigningKey, rfc9421};
+use crate::sign::{key::LockedSigningKey, rfc9421};
 
 /// 磁盘根从哪来。
 pub enum Roots {

@@ -501,9 +501,9 @@ mod tests {
             let wrapped = store::load_all(&layout).unwrap().remove(0);
             let device = crate::keystore::device::load(&layout).unwrap();
             let key = crate::keystore::unwrap::unlock(&wrapped, PASSPHRASE.as_bytes(), &device).unwrap();
-            let document = crate::did::document::rebuild(&f.did, &key.verifying_key()).unwrap();
+            let document = crate::did::document::rebuild(&f.did, &key.verifying_key().unwrap()).unwrap();
             let prepared = anp::proof::prepare_w3c_proof(
-                &document, &key.anp_public_key(), &wrapped.id.kid,
+                &document, &key.anp_public_key().unwrap(), &wrapped.id.kid,
                 anp::proof::ProofGenerationOptions {
                     proof_purpose: Some("assertionMethod".into()),
                     proof_type: Some(anp::proof::PROOF_TYPE_DATA_INTEGRITY.into()),

@@ -147,7 +147,7 @@ fn rfc8032_ed25519_signatures_come_out_byte_for_byte() {
         // 先钉住"公钥确实是这个 seed 推出来的" —— 否则下面那条比的可能是两把
         // 不同的钥匙,而它会以"签名不对"的样子失败,把人指错方向。
         assert_eq!(
-            key.verifying_key().to_bytes().to_vec(),
+            key.verifying_key().unwrap().to_bytes().to_vec(),
             public,
             "{name}: the public key has to come from this seed"
         );
@@ -465,7 +465,7 @@ fn the_rfc9421_signature_base_is_reproduced_character_for_character() {
 
     let signing = key_from(&seed);
     assert_eq!(
-        signing.verifying_key().to_bytes().to_vec(),
+        signing.verifying_key().unwrap().to_bytes().to_vec(),
         public,
         "the RFC's key pair must be self-consistent before we sign with it"
     );

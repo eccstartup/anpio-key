@@ -482,7 +482,7 @@ mod tests {
         );
         let (did, unsigned) = build_unsigned_with(
             &spec,
-            &key.verifying_key(),
+            &key.verifying_key().unwrap(),
             vec![extra("key-2", extra_byte, vec![R::Authentication])],
         )
         .unwrap();
@@ -531,7 +531,7 @@ mod tests {
             document = with_extra_key(
                 &document,
                 &did,
-                &key.verifying_key(),
+                &key.verifying_key().unwrap(),
                 extra(expected, 0x70, vec![R::Authentication]),
             )
             .unwrap();
@@ -543,7 +543,7 @@ mod tests {
 
         // 编号留了洞也不回头补:`key-3` 退休之后下一个还是 `key-5`。
         // 复用编号 = 两份内容不同的文档顶着同一个 id。
-        let without = without_method(&document, &did, &key.verifying_key(), &format!("{did}#key-3"))
+        let without = without_method(&document, &did, &key.verifying_key().unwrap(), &format!("{did}#key-3"))
             .unwrap();
         assert_eq!(next_hot_fragment(&without, &did, &nothing).unwrap(), "key-5");
     }
@@ -559,7 +559,7 @@ mod tests {
     #[test]
     fn a_removed_key_does_not_release_its_fragment() {
         let (key, did, document) = published(0x64);
-        let removed = without_method(&document, &did, &key.verifying_key(), &format!("{did}#key-2"))
+        let removed = without_method(&document, &did, &key.verifying_key().unwrap(), &format!("{did}#key-2"))
             .unwrap();
 
         // 只看文档:编号回到了池子里 —— 这正是要防的那个状态。
@@ -583,7 +583,7 @@ mod tests {
         let with = with_extra_key(
             &document,
             &did,
-            &key.verifying_key(),
+            &key.verifying_key().unwrap(),
             extra("recovery-1", 0x63, vec![R::AssertionMethod]),
         )
         .unwrap();
@@ -605,7 +605,7 @@ mod tests {
         let with = with_extra_key(
             &annotated,
             &did,
-            &key.verifying_key(),
+            &key.verifying_key().unwrap(),
             extra("recovery-1", 0x65, vec![R::AssertionMethod]),
         )
         .unwrap();
@@ -629,7 +629,7 @@ mod tests {
         let with = with_extra_key(
             &document,
             &did,
-            &key.verifying_key(),
+            &key.verifying_key().unwrap(),
             extra("recovery-1", 0x67, vec![R::AssertionMethod]),
         )
         .unwrap();
@@ -657,7 +657,7 @@ mod tests {
             "type": "ANPHandleService",
             "serviceEndpoint": "https://wns.example.com/alice",
         }));
-        let (did, unsigned) = build_unsigned_with(&spec, &key.verifying_key(), Vec::new()).unwrap();
+        let (did, unsigned) = build_unsigned_with(&spec, &key.verifying_key().unwrap(), Vec::new()).unwrap();
         let document = sign_document(&unsigned, &key, &format!("{did}#{ROOT_FRAGMENT}")).unwrap();
         let before = document["service"].clone();
         assert!(before.as_array().is_some_and(|entries| entries.len() == 1));
@@ -665,7 +665,7 @@ mod tests {
         let with = with_extra_key(
             &document,
             &did,
-            &key.verifying_key(),
+            &key.verifying_key().unwrap(),
             extra("key-2", 0x7b, vec![R::Authentication]),
         )
         .unwrap();
@@ -683,7 +683,7 @@ mod tests {
         let with = with_extra_key(
             &document,
             &did,
-            &key.verifying_key(),
+            &key.verifying_key().unwrap(),
             extra("recovery-1", 0x69, vec![R::AssertionMethod]),
         )
         .unwrap();
@@ -704,7 +704,7 @@ mod tests {
         // 空关系 = 一份没人能用的验证方法。
         let error = build_unsigned_with(
             &crate::did::document::DidDocumentSpec::new("example.com", vec!["a".into()]),
-            &root_key(0x6a).verifying_key(),
+            &root_key(0x6a).verifying_key().unwrap(),
             vec![extra("key-2", 0x6b, vec![])],
         )
         .unwrap_err();
@@ -718,13 +718,13 @@ mod tests {
         let with_recovery = with_extra_key(
             &document,
             &did,
-            &key.verifying_key(),
+            &key.verifying_key().unwrap(),
             extra("recovery-1", 0x6d, vec![R::AssertionMethod]),
         )
         .unwrap();
 
         let without =
-            without_method(&with_recovery, &did, &key.verifying_key(), &format!("{did}#key-2"))
+            without_method(&with_recovery, &did, &key.verifying_key().unwrap(), &format!("{did}#key-2"))
                 .unwrap();
         let names: Vec<_> = extra_keys(&without, &did)
             .unwrap()
@@ -740,7 +740,7 @@ mod tests {
     #[test]
     fn the_binding_key_cannot_be_retired() {
         let (key, did, document) = published(0x6e);
-        let error = without_method(&document, &did, &key.verifying_key(), &format!("{did}#key-1"))
+        let error = without_method(&document, &did, &key.verifying_key().unwrap(), &format!("{did}#key-1"))
             .unwrap_err();
         assert!(error.to_string().contains("binding key"), "{error}");
         assert!(remove_method(&document, &format!("{did}#key-1")).is_err());

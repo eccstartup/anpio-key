@@ -192,7 +192,7 @@ impl Machine {
         // 就没有签名这条路 —— 而这条测试要的正是"签过一次之后",所以少了
         // 这一步会以一个看起来毫不相干的 `KeyNotFound` 失败。
         let key = anpio_key::keystore::unwrap::unlock(&wrapped, PASSPHRASE, &device_secret).unwrap();
-        let unsigned = anpio_key::did::document::rebuild(&did, &key.verifying_key()).unwrap();
+        let unsigned = anpio_key::did::document::rebuild(&did, &key.verifying_key().unwrap()).unwrap();
         let document =
             anpio_key::did::document::sign_document(&unsigned, &key, &wrapped.id.kid).unwrap();
         anpio_key::did::document::verify_path_binding(&did, &document).unwrap();

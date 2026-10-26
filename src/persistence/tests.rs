@@ -850,7 +850,7 @@ fn hot_and_recovery_roles_require_verified_document_relationships() {
         unsigned = crate::did::lifecycle::with_extra_key(
             &unsigned,
             &did,
-            &key.verifying_key(),
+            &key.verifying_key().unwrap(),
             extra.clone(),
         )
         .unwrap();
@@ -988,7 +988,7 @@ fn grant_fixture() -> (Fixture, String, String) {
     let key = crate::keystore::unwrap::unlock(&root, b"test-pass", &secret).unwrap();
     let unsigned = crate::did::lifecycle::strip_proof(&doc).unwrap();
     let unsigned =
-        crate::did::lifecycle::with_extra_key(&unsigned, &did, &key.verifying_key(), extra)
+        crate::did::lifecycle::with_extra_key(&unsigned, &did, &key.verifying_key().unwrap(), extra)
             .unwrap();
     let signed = crate::did::document::sign_document(&unsigned, &key, &root.id.kid).unwrap();
     crate::keystore::store::write_did_document(&layout, &did, &signed).unwrap();
@@ -1876,7 +1876,7 @@ fn purpose_fixture() -> (Fixture, String, String) {
     let key = crate::keystore::unwrap::unlock(&root, b"test-pass", &secret).unwrap();
     let unsigned = crate::did::lifecycle::strip_proof(&doc).unwrap();
     let unsigned =
-        crate::did::lifecycle::with_extra_key(&unsigned, &did, &key.verifying_key(), extra)
+        crate::did::lifecycle::with_extra_key(&unsigned, &did, &key.verifying_key().unwrap(), extra)
             .unwrap();
     let signed = crate::did::document::sign_document(&unsigned, &key, &root.id.kid).unwrap();
     crate::keystore::store::write_did_document(&layout, &did, &signed).unwrap();
@@ -2788,7 +2788,7 @@ fn trusted_hot_rotation_retires_old_key_revokes_grants_and_recovers_approved_doc
         unsigned = crate::did::lifecycle::with_extra_key(
             &unsigned,
             &did,
-            &root_signer.verifying_key(),
+            &root_signer.verifying_key().unwrap(),
             extra,
         )
         .unwrap();

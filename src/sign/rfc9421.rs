@@ -591,7 +591,7 @@ mod tests {
     fn fixture(seed_byte: u8) -> (LockedSigningKey, Value) {
         let k = key(seed_byte);
         let spec = DidDocumentSpec::new("example.com", vec!["user".into(), "alice".into()]);
-        let (did, unsigned) = build_unsigned(&spec, &k.verifying_key()).unwrap();
+        let (did, unsigned) = build_unsigned(&spec, &k.verifying_key().unwrap()).unwrap();
         let signed = sign_document(&unsigned, &k, &format!("{did}#key-1")).unwrap();
 
         // 文档必须是自洽的,否则后面测的就不是签名逻辑了。

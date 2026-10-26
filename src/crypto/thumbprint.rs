@@ -5,6 +5,10 @@
 //!
 //! 上游有个容易踩的坑:`compute_multikey_fingerprint` 返回的是**裸的 43 字符
 //! base64url 指纹**,`e1_` 前缀是 `anp` 内部自己拼的,不会给你。
+//!
+//! X25519 是唯一的例外:上游的 `compute_multikey_fingerprint` 只认 Ed25519,
+//! 给它一把协商公钥会直接报错。所以 `x1_` 那一段按 RFC 7638 自己做,并用
+//! 一个独立的复算测试盯住它(见 `upstream_fingerprint_is_really_rfc7638`)。
 
 use anp::PublicKeyMaterial;
 use ed25519_dalek::VerifyingKey;
@@ -79,11 +83,70 @@ pub fn ed25519_from_multibase(multibase: &str) -> Result<VerifyingKey> {
     })
 }
 
+/// X25519 公钥的 JWK 指纹(RFC 7638),裸的 43 字符。
+///
+/// 上游只肯给 Ed25519 算这个,所以协商键这一路按 RFC 7638 自己做:
+/// `{"crv":"X25519","kty":"OKP","x":<base64url 无填充>}` → JCS → SHA-256 →
+/// base64url 无填充。与 Ed25519 那份**同一个定义**,只是 `crv` 不同。
+pub fn x25519_fingerprint(public: &x25519_dalek::PublicKey) -> String {
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+
+    let x = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(public.as_bytes());
+    // JCS 会按键名排序,这里的字面顺序不影响结果;写成 crv/kty/x 只为好读。
+    let jwk = serde_json::json!({ "crv": "X25519", "kty": "OKP", "x": x });
+    let canonical = serde_json_canonicalizer::to_vec(&jwk)
+        .expect("the thumbprint JWK is a plain object with string members");
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(&canonical))
+}
+
+/// 协商键的指纹段,形如 `x1_<43 字符>`。
+///
+/// 和 `e1_` 一样长、同一个字母表,但**前缀不同是有意的**:它永远不会出现在
+/// DID 的最后一段(DID 绑的是根 Ed25519 键),只用作信封文件名与索引键。
+/// 前缀不同也让"拿 e1_ 段的 DID 去认一把协商键"这种错永远写不出来。
+pub fn x1_segment(public: &x25519_dalek::PublicKey) -> String {
+    format!("x1_{}", x25519_fingerprint(public))
+}
+
+/// X25519 公钥的 multikey 编码:`z` + base58btc(`0xec 0x01` ‖ 32 字节公钥)。
+pub fn x25519_multibase(public: &x25519_dalek::PublicKey) -> String {
+    let mut buf = [0u8; 34];
+    buf[0] = 0xec;
+    buf[1] = 0x01;
+    buf[2..].copy_from_slice(public.as_bytes());
+    format!("z{}", bs58::encode(buf).into_string())
+}
+
+/// [`x25519_multibase`] 的逆向。和 Ed25519 那份一样,**解析不宽容**。
+///
+/// X25519 的 32 字节公开值不要求是合法曲线点(它只是一个 u 坐标),所以这里
+/// 能查的只有长度与 multicodec 头;全零那种低阶值留到真正做 DH 时由
+/// `was_contributory` 拒掉 —— 那才是唯一有意义的时刻。
+pub fn x25519_from_multibase(multibase: &str) -> Result<[u8; 32]> {
+    let body = multibase.strip_prefix('z').ok_or_else(|| {
+        KeydError::Protocol(format!(
+            "a multibase public key must start with `z` (base58btc), got {multibase:?}"
+        ))
+    })?;
+    let raw = bs58::decode(body)
+        .into_vec()
+        .map_err(|e| KeydError::Protocol(format!("bad base58 in a multibase public key: {e}")))?;
+    if raw.len() != 34 || raw[0] != 0xec || raw[1] != 0x01 {
+        return Err(KeydError::Protocol(
+            "this multibase is not an x25519-pub multicodec key".into(),
+        ));
+    }
+    let mut bytes = [0u8; 32];
+    bytes.copy_from_slice(&raw[2..]);
+    Ok(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// RFC 8032 §7.1 TEST 1 的公钥。
+    /// RFC 8032 §7.1 TEST 1 的私钥与公钥。
     const RFC8032_TEST1_SK: [u8; 32] = [
         0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60, 0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec, 0x2c,
         0xc4, 0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19, 0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae,
@@ -181,5 +244,70 @@ mod tests {
         assert!(e1_from_did("did:wba:example.com:user:alice").is_err());
         assert!(e1_from_did("did:wba:example.com:user:alice:e1_short").is_err());
         assert!(e1_from_did("did:wba:example.com:user:alice:k1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").is_err());
+    }
+
+    /// RFC 7748 §6.1 的 Alice 公钥 —— 协商键那一路所有测试的共用向量。
+    const RFC7748_ALICE_PK: [u8; 32] = [
+        0x85, 0x20, 0xf0, 0x09, 0x89, 0x30, 0xa7, 0x54, 0x74, 0x8b, 0x7d, 0xdc, 0xb4, 0x3e, 0xf7,
+        0x5a, 0x0d, 0xbf, 0x3a, 0x0d, 0x26, 0x38, 0x1a, 0xf4, 0xeb, 0xa4, 0xa9, 0x8e, 0xaa, 0x9b,
+        0x4e, 0x6a,
+    ];
+
+    fn alice() -> x25519_dalek::PublicKey {
+        x25519_dalek::PublicKey::from(RFC7748_ALICE_PK)
+    }
+
+    /// `x1_` 段和 `e1_` 一样是 43 字符,而且**独立复算**一遍确认它是 RFC 7638。
+    #[test]
+    fn x1_segment_is_an_rfc7638_thumbprint_of_the_x25519_jwk() {
+        use base64::Engine;
+        use sha2::{Digest, Sha256};
+
+        let key = alice();
+        let x = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key.as_bytes());
+        let jwk = serde_json::json!({ "crv": "X25519", "kty": "OKP", "x": x });
+        let canonical = serde_json_canonicalizer::to_vec(&jwk).unwrap();
+        let expected = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(Sha256::digest(&canonical));
+
+        let seg = x1_segment(&key);
+        assert_eq!(seg, format!("x1_{expected}"));
+        assert_eq!(seg.len(), 3 + E1_FINGERPRINT_LEN);
+        assert!(seg[3..]
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+    }
+
+    /// 曲线名参与了指纹:同一串 32 字节,按 X25519 与按 Ed25519 算出来必须不同。
+    #[test]
+    fn the_curve_name_is_part_of_the_fingerprint() {
+        use base64::Engine;
+        use sha2::{Digest, Sha256};
+
+        let x = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(RFC7748_ALICE_PK);
+        let as_ed25519 = serde_json::json!({ "crv": "Ed25519", "kty": "OKP", "x": x });
+        let canonical = serde_json_canonicalizer::to_vec(&as_ed25519).unwrap();
+        let other = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(Sha256::digest(&canonical));
+
+        assert_ne!(x25519_fingerprint(&alice()), other);
+    }
+
+    #[test]
+    fn x25519_multibase_roundtrips_and_uses_the_0xec01_codec() {
+        let mb = x25519_multibase(&alice());
+        assert!(mb.starts_with('z'));
+        assert_eq!(x25519_from_multibase(&mb).unwrap(), RFC7748_ALICE_PK);
+
+        // 前缀里那两字节就是 multicodec 头,别被 base58 藏起来。
+        let raw = bs58::decode(&mb[1..]).into_vec().unwrap();
+        assert_eq!(&raw[..2], &[0xec, 0x01]);
+    }
+
+    #[test]
+    fn an_ed25519_multibase_is_not_an_x25519_key_and_vice_versa() {
+        let ed = ed25519_multibase(&test_key());
+        assert!(x25519_from_multibase(&ed).is_err());
+        assert!(ed25519_from_multibase(&x25519_multibase(&alice())).is_err());
     }
 }

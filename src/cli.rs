@@ -1573,7 +1573,7 @@ fn publish(root: Option<&Path>, args: PublishArgs) -> Result<()> {
                 println!("keeping {} extra key(s) from the local document", extras.len());
             }
             let unsigned =
-                lifecycle::rekey(existing, &spec, &args.did, &key.verifying_key(), extras)?;
+                lifecycle::rekey(existing, &spec, &args.did, &key.verifying_key()?, extras)?;
             let signed = document::sign_document(&unsigned, &key, &wrapped.id.kid)?;
             document::verify_path_binding(&args.did, &signed)?;
             signed

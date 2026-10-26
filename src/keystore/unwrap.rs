@@ -43,7 +43,13 @@ pub fn unlock(
 }
 
 fn key_from_seed(wrapped: &WrappedKey, seed: LockedBytes) -> Result<LockedSigningKey> {
-    let key = LockedSigningKey::from_seed(wrapped.id.clone(), seed)?;
+    // 算法取自信封头,而它已经在 AAD 里 —— 所以"这把 seed 该当哪种曲线用"
+    // 不是调用方的选择,是被认证过的事实。
+    let key = LockedSigningKey::from_seed_with_algorithm(
+        wrapped.id.clone(),
+        wrapped.algorithm,
+        seed,
+    )?;
 
     // ⑤ 信封上写的公钥必须就是这把 seed 的公钥。
     //

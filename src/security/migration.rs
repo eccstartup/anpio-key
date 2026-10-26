@@ -76,7 +76,7 @@ pub fn inspect(path: &Path, verify: bool) -> Result<Value> {
             let key = unwrap::unlock(&wrapped, pass.as_bytes(), &device)?;
             let message = b"anpio-key offline recovery self-test v1";
             let signature = key.sign(message)?;
-            if !key.verify(message, &signature) || key.verifying_key() != pk {
+            if !key.verify(message, &signature) || key.verifying_key()? != pk {
                 return Err(KeydError::Misuse(
                     "migration recovery self-test failed".into(),
                 ));

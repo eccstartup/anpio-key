@@ -56,7 +56,7 @@ fn disposable_linux_fixture() {
     let unsigned = anpio_key::did::lifecycle::with_extra_key(
         &unsigned,
         &created.did,
-        &key.verifying_key(),
+        &key.verifying_key().unwrap(),
         extra,
     )
     .unwrap();
@@ -78,7 +78,7 @@ fn disposable_linux_fixture() {
     let unsigned = anpio_key::did::lifecycle::with_extra_key(
         &unsigned,
         &created.did,
-        &key.verifying_key(),
+        &key.verifying_key().unwrap(),
         next,
     )
     .unwrap();
@@ -106,7 +106,7 @@ fn disposable_linux_fixture() {
     let unsigned = anpio_key::did::lifecycle::with_extra_key(
         &unsigned,
         &created.did,
-        &key.verifying_key(),
+        &key.verifying_key().unwrap(),
         device_sign,
     )
     .unwrap();

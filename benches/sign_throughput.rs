@@ -34,7 +34,7 @@ fn key(seed_byte: u8) -> LockedSigningKey {
 fn fixture(seed_byte: u8) -> (LockedSigningKey, serde_json::Value, serde_json::Value) {
     let bare = key(seed_byte);
     let spec = DidDocumentSpec::new("example.com", vec!["user".into(), "alice".into()]);
-    let (did, unsigned) = build_unsigned(&spec, &bare.verifying_key()).unwrap();
+    let (did, unsigned) = build_unsigned(&spec, &bare.verifying_key().unwrap()).unwrap();
     let signed = sign_document(&unsigned, &bare, &format!("{did}#key-1")).unwrap();
     let seed = LockedBytes::fill(|d| *d = [seed_byte; 32]).unwrap();
     let key = LockedSigningKey::from_seed(

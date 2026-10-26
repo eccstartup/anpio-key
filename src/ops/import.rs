@@ -554,7 +554,7 @@ fn rebuild_and_sign(
     fragment: &str,
     key: LockedSigningKey,
 ) -> Result<(Value, String)> {
-    let unsigned = document::rebuild(did, &key.verifying_key())?;
+    let unsigned = document::rebuild(did, &key.verifying_key()?)?;
     let signed = document::sign_document(&unsigned, &key, &format!("{did}#{fragment}"))?;
     document::verify_path_binding(did, &signed)?;
     let digest = lifecycle::document_digest(&signed)?;
@@ -587,7 +587,7 @@ mod tests {
     fn signed_document(seed_byte: u8) -> (String, Value) {
         let key = key(seed_byte);
         let spec = document::DidDocumentSpec::new("example.com", vec!["user".into(), "alice".into()]);
-        let (did, unsigned) = document::build_unsigned(&spec, &key.verifying_key()).unwrap();
+        let (did, unsigned) = document::build_unsigned(&spec, &key.verifying_key().unwrap()).unwrap();
         let signed =
             document::sign_document(&unsigned, &key, &format!("{did}#{}", document::ROOT_FRAGMENT))
                 .unwrap();
@@ -633,7 +633,7 @@ mod tests {
         let (did, _) = signed_document(1);
         let thumbprint = crate::crypto::thumbprint::e1_from_did(&did).unwrap().to_string();
 
-        let derived = check_fingerprint(&key(1).verifying_key(), &thumbprint).unwrap();
+        let derived = check_fingerprint(&key(1).verifying_key().unwrap(), &thumbprint).unwrap();
 
         assert_eq!(derived, thumbprint, "the derived segment is what gets displayed");
         assert!(did.ends_with(&derived));
@@ -649,7 +649,7 @@ mod tests {
         let (did, _) = signed_document(2);
         let claimed = crate::crypto::thumbprint::e1_from_did(&did).unwrap().to_string();
 
-        let error = check_fingerprint(&key(3).verifying_key(), &claimed).unwrap_err();
+        let error = check_fingerprint(&key(3).verifying_key().unwrap(), &claimed).unwrap_err();
 
         let message = error.to_string();
         assert!(message.contains("not the one being restored"), "{message}");
@@ -664,7 +664,7 @@ mod tests {
     fn a_document_that_verifies_and_matches_the_seed_is_accepted() {
         let (did, doc) = signed_document(4);
 
-        check_document_key(&doc, &did, document::ROOT_FRAGMENT, &key(4).verifying_key()).unwrap();
+        check_document_key(&doc, &did, document::ROOT_FRAGMENT, &key(4).verifying_key().unwrap()).unwrap();
     }
 
     /// 计划 §十:**归档缺 proof → 必须拒**。
@@ -681,7 +681,7 @@ mod tests {
             &unsigned,
             &did,
             document::ROOT_FRAGMENT,
-            &key(5).verifying_key(),
+            &key(5).verifying_key().unwrap(),
         )
         .unwrap_err();
 
@@ -698,7 +698,7 @@ mod tests {
         let (did, doc) = signed_document(6);
 
         let error =
-            check_document_key(&doc, &did, document::ROOT_FRAGMENT, &key(7).verifying_key())
+            check_document_key(&doc, &did, document::ROOT_FRAGMENT, &key(7).verifying_key().unwrap())
                 .unwrap_err();
 
         let message = error.to_string();
@@ -720,7 +720,7 @@ mod tests {
             &imposter,
             &did,
             document::ROOT_FRAGMENT,
-            &key(8).verifying_key(),
+            &key(8).verifying_key().unwrap(),
         )
         .unwrap_err();
 
@@ -760,7 +760,7 @@ mod tests {
         let (did, doc) = signed_document(12);
         let layout = layout("doc-taken");
         store::write_did_document(&layout, &did, &doc).unwrap();
-        let other_thumbprint = crate::crypto::thumbprint::e1_segment(&key(13).verifying_key())
+        let other_thumbprint = crate::crypto::thumbprint::e1_segment(&key(13).verifying_key().unwrap())
             .unwrap();
 
         let why =
@@ -777,7 +777,7 @@ mod tests {
         let (did, doc) = signed_document(14);
         let layout = layout("doc-other-kid");
         store::write_did_document(&layout, &did, &doc).unwrap();
-        let thumbprint = crate::crypto::thumbprint::e1_segment(&key(15).verifying_key()).unwrap();
+        let thumbprint = crate::crypto::thumbprint::e1_segment(&key(15).verifying_key().unwrap()).unwrap();
 
         assert!(conflict(&layout, &did, "key-2", &thumbprint).is_none());
     }

@@ -270,7 +270,7 @@ mod tests {
     fn signed(byte: u8, host: &str) -> (String, Value) {
         let key = key(byte);
         let spec = DidDocumentSpec::new(host, PATH.split('/').map(str::to_string).collect());
-        let (did, unsigned) = build_unsigned(&spec, &key.verifying_key()).unwrap();
+        let (did, unsigned) = build_unsigned(&spec, &key.verifying_key().unwrap()).unwrap();
         let signed = sign_document(&unsigned, &key, &format!("{did}#{ROOT_FRAGMENT}")).unwrap();
         (did, signed)
     }
@@ -484,7 +484,7 @@ mod tests {
     fn a_deactivated_document_still_passes_the_binding_check() {
         let k = key(0x97);
         let spec = DidDocumentSpec::new("example.com", PATH.split('/').map(str::to_string).collect());
-        let (did, unsigned) = build_unsigned(&spec, &k.verifying_key()).unwrap();
+        let (did, unsigned) = build_unsigned(&spec, &k.verifying_key().unwrap()).unwrap();
         let method = format!("{did}#{ROOT_FRAGMENT}");
 
         let live = sign_document(&unsigned, &k, &method).unwrap();

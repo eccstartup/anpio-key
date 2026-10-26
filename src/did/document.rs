@@ -169,7 +169,7 @@ pub fn sign_document(
 ) -> Result<Value> {
     let prepared = anp::proof::prepare_w3c_proof(
         document,
-        &key.anp_public_key(),
+        &key.anp_public_key()?,
         verification_method,
         anp::proof::ProofGenerationOptions {
             proof_purpose: Some("assertionMethod".into()),
@@ -238,7 +238,7 @@ pub fn publishable(
     did: &str,
     key: &LockedSigningKey,
 ) -> Result<Value> {
-    let unsigned = rebuild_with(spec, did, &key.verifying_key(), Vec::new())?;
+    let unsigned = rebuild_with(spec, did, &key.verifying_key()?, Vec::new())?;
     let signed = sign_document(&unsigned, key, &key.id().kid)?;
     verify_path_binding(did, &signed)?;
     Ok(signed)
@@ -332,7 +332,7 @@ mod tests {
 
     fn signed_document(seed_byte: u8) -> (String, Value) {
         let k = key(seed_byte);
-        let (did, unsigned) = build_unsigned(&spec(), &k.verifying_key()).unwrap();
+        let (did, unsigned) = build_unsigned(&spec(), &k.verifying_key().unwrap()).unwrap();
         let method = format!("{did}#{ROOT_FRAGMENT}");
         let signed = sign_document(&unsigned, &k, &method).unwrap();
         (did, signed)
@@ -341,9 +341,9 @@ mod tests {
     #[test]
     fn the_did_ends_with_the_keys_own_fingerprint() {
         let k = key(3);
-        let (did, doc) = build_unsigned(&spec(), &k.verifying_key()).unwrap();
+        let (did, doc) = build_unsigned(&spec(), &k.verifying_key().unwrap()).unwrap();
 
-        let expected = e1_segment(&k.verifying_key()).unwrap();
+        let expected = e1_segment(&k.verifying_key().unwrap()).unwrap();
         assert!(did.starts_with("did:wba:example.com:user:alice:"), "{did}");
         assert!(did.ends_with(&expected), "{did} should end with {expected}");
         assert_eq!(doc["id"], did.as_str());
@@ -352,7 +352,7 @@ mod tests {
     #[test]
     fn the_root_key_lands_in_authentication_and_assertion() {
         let k = key(4);
-        let (did, doc) = build_unsigned(&spec(), &k.verifying_key()).unwrap();
+        let (did, doc) = build_unsigned(&spec(), &k.verifying_key().unwrap()).unwrap();
         let method = format!("{did}#{ROOT_FRAGMENT}");
 
         for relationship in ["authentication", "assertionMethod"] {
@@ -432,7 +432,7 @@ mod tests {
     #[test]
     fn an_unsigned_document_does_not_pass_the_binding_check() {
         let k = key(10);
-        let (did, unsigned) = build_unsigned(&spec(), &k.verifying_key()).unwrap();
+        let (did, unsigned) = build_unsigned(&spec(), &k.verifying_key().unwrap()).unwrap();
 
         // 指纹那一条过得去(公钥确实是对的),但没有 proof,规范性检查必须拒。
         assert!(verify_path_binding(&did, &unsigned).is_err());
@@ -449,7 +449,7 @@ mod tests {
         let k = key(12);
         let spec = DidDocumentSpec::new("example.com", vec!["user".into(), "bob".into()])
             .with_port(8443);
-        let (did, unsigned) = build_unsigned(&spec, &k.verifying_key()).unwrap();
+        let (did, unsigned) = build_unsigned(&spec, &k.verifying_key().unwrap()).unwrap();
 
         assert!(did.starts_with("did:wba:example.com%3A8443:user:bob:"), "{did}");
         // 端口必须能从 DID 解回 URL —— 否则发布出去没人找得到。
@@ -457,7 +457,7 @@ mod tests {
             crate::did::parse::did_url_path(&did).unwrap(),
             format!(
                 "https://example.com:8443/user/bob/{}/did.json",
-                e1_segment(&k.verifying_key()).unwrap()
+                e1_segment(&k.verifying_key().unwrap()).unwrap()
             )
         );
 

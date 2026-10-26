@@ -103,7 +103,7 @@ impl Running {
         let wrapped = store::load(&layout, &created.wrapped.id.thumbprint).unwrap();
         let device_secret = device::load(&layout).unwrap();
         let key = anpio_key::keystore::unwrap::unlock(&wrapped, PASSPHRASE, &device_secret).unwrap();
-        let unsigned = document::rebuild(&created.did, &key.verifying_key()).unwrap();
+        let unsigned = document::rebuild(&created.did, &key.verifying_key().unwrap()).unwrap();
         let signed = document::sign_document(&unsigned, &key, &wrapped.id.kid).unwrap();
         document::verify_path_binding(&created.did, &signed).unwrap();
         store::write_did_document(&layout, &created.did, &signed).unwrap();
