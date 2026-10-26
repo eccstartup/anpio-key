@@ -1681,6 +1681,7 @@ fn algorithm_label(algorithm: crate::keystore::KeyAlgorithm) -> &'static str {
     match algorithm {
         crate::keystore::KeyAlgorithm::Ed25519 => "ed25519",
         crate::keystore::KeyAlgorithm::P256 => "p256",
+        crate::keystore::KeyAlgorithm::X25519 => "x25519",
     }
 }
 

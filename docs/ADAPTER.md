@@ -16,7 +16,7 @@
 | 外部 SDK 高层热密钥解析 | `@connectx-sdk/core` 0.4.2 起兼容 | 更早版本仍不兼容；最低兼容版本 0.4.2 |
 | awiki JSON-RPC | Node v2 client 可按实际 RPC body 签名 | SDK 原生 ANP-02 body 不能直接当作 RPC envelope |
 
-awiki-cli-rs2 的 Rust 侧（`IdentitySigner`）**没有适配器**，今天能对上的只有结构化那两条：`http_signature_headers` ↔ `SIGN` 的 `Structured` 变体，`did_document`/`optional_did_document` ↔ `GET_DOCUMENT`。其余接缝没有对应能力：`sign`/`sign_root`/`sign_device_assertion` 只能落到默认关闭的 `Raw` 或 `Challenge`；`sign_object_proof`/`sign_document_proof` 在 socket 上没有请求类型（`REQUEST_TYPES` 不含）；`ecdh` 要 `keyAgreement` 的 X25519 私钥，本工具只造 Ed25519，进程里也没有这条协议路径。登录/RPC 签名可以走 CLI 接缝，端到端加密那半接不了。
+awiki-cli-rs2 的 Rust 侧（`IdentitySigner`）**没有适配器**，今天能对上的只有结构化那两条：`http_signature_headers` ↔ `SIGN` 的 `Structured` 变体，`did_document`/`optional_did_document` ↔ `GET_DOCUMENT`。其余接缝没有对应能力：`sign`/`sign_root`/`sign_device_assertion` 只能落到默认关闭的 `Raw` 或 `Challenge`；`sign_object_proof`/`sign_document_proof` 在 socket 上没有请求类型（`REQUEST_TYPES` 不含）；`ecdh` 要 `keyAgreement` 的 X25519 私钥，本工具只造 Ed25519，进程里也没有这条协议路径。登录/RPC 签名可以走 CLI 接缝，端到端加密那半接不了。补齐这些缺口的接口形状已冻结在 §11，**尚未实现**。
 
 正式 Linux release 且配置显式为 `linux-protected-v1` 时支持保护声明。调试、preview、macOS、软件硬件替身及 seed-export 不在声明内。同 UID 不受限 Agent 之间没有隔离。
 
@@ -346,3 +346,96 @@ anpio-key mcp --config /etc/anpio-key/service.json
 现有脚本包括 `deploy/linux/test-boundary.py`、`anp-service-acceptance.py`、`systemd-checks.py`、`systemd-boot-check.py` 及 `adapters/test-sdk.mjs`。后者是实际环境验收驱动，需要 SDK dist、有效 grant/key 和稳定请求 ID，不是无需部署的单元测试。
 
 新增对端、SDK 版本、平台或策略形态时重新验证相应路径，不能沿用历史记录扩大支持范围。
+
+## 11. 强对接契约（规划中，尚未实现）
+
+本节冻结与 awiki-cli-rs2、anpio-cli 强对接的接口形状。**今天一条都没有实现**：现役能力仍是 §3 那六条。实现按 P1–P5 分阶段，每阶段结束更新本节的状态列和 §1 的兼容表。已冻结的名字、字节和版本号不再改；新增能力只能追加新名字。
+
+### 11.1 三层接口
+
+| 层 | 形态 | 用途 |
+|---|---|---|
+| Rust 库 `anpio_key::client` | 同步方法 + 错误按形态分类 | 进程内调用，不经过子进程 |
+| JSON socket v2 | §3.2 的帧格式，新增操作进 `DataRequest` | 跨语言真源；`VERSION` 保持 2 |
+| CLI `--json` | 同名子命令 | 子进程形态的调用方（`anpio-cli` 今天走这条） |
+
+三层共享同一份字段名和错误码。现有 `document`/`sign` 的参数与输出逐字节不变。连接模型仍是**每连接一个请求**，客户端不得缓存复用；若将来加会话复用，以 `GET_CAPABILITIES` 的新字段宣告，不靠协议版本推断。
+
+### 11.2 能力协商
+
+`GET_CAPABILITIES` 的 `data` 追加四个字段，现有五个字段不动：
+
+```json
+{"capability_schema":1,
+ "operations":["GET_CAPABILITIES","LIST_AUTHORIZED_KEYS","GET_GRANT_STATUS","GET_DOCUMENT","SIGN_HTTP","GET_REQUEST_STATUS"],
+ "purposes":["http-authentication"],
+ "grant_kinds":["request"]}
+```
+
+`capability_schema` 是这组字段自己的版本。开头列出的是今天的六个操作，新操作按阶段追加。客户端按 `operations` 里有没有某个名字决定能不能用，不按 `protocol_version` 或构建版本猜；名字不在列表里就是该项不支持，不能降级到别的操作。列表只增不减。
+
+### 11.3 新增数据面操作
+
+二进制字段（payload、peer 公钥、signature、共享密钥）在新操作里一律**小写 hex**；`http.body` 保持现有字节数组形状不变。新操作都带 `grant_id` 与 `request_id`，去重与状态查询沿用 §8。
+
+| 操作 | 输入 | 输出 `reply.data` | 阶段 |
+|---|---|---|---|
+| `SIGN_ORIGIN_PROOF` | `origin` = `{method,url,headers,body,nonce}`（与 `http` 同形） | `{signature_input, signature, content_digest}` | P1 |
+| `RENEW_GRANT` | `grant_id`、`expiry` | 新期限与新次数上限 | P1 |
+| `SIGN_PURPOSE` | `purpose`、`payload`（hex，≤4096 字节） | `{signature, public_multibase, purpose}` | P2 |
+| `SIGN_OBJECT_PROOF` | `value`（对象）、`proof_purpose` | `{proof}`（整份带 proof 的对象） | P5 |
+| `SIGN_DOCUMENT_PROOF` | 完整文档、`proof_purpose` | `{document}` | P5 |
+| `ECDH` | `peer`（32 字节 hex X25519 公钥） | `{shared_secret, peer_fingerprint}` | P3 |
+
+`SIGN_ORIGIN_PROOF` 的签名基由 daemon 拼，调用方只给待签的事实；`signature_input`/`signature` 是可直接放进请求头的值。`SIGN_OBJECT_PROOF`/`SIGN_DOCUMENT_PROOF` 只接受 `id == did`、`verificationMethod == kid` 的输入，cryptosuite 固定，不接受调用方指定。
+
+`ECDH` 是**唯一一个把秘密输出给调用方的操作**：单次、短到期、grant 内绑定 peer 白名单；审计记 `peer_fingerprint` 和 grant，**不记共享密钥**。没有 grant 的 `ECDH` 直接拒绝，不存在"只查公钥不协商"的路径。
+
+### 11.4 授权模型
+
+- **request grant**：今天这一种，一个 grant 一条请求，`max_uses` 通常很小。
+- **session grant**（P1）：绑定 principal + 一组 `(key_id, operation)` + 次数上限 + 绝对寿命上限。IM 每条消息一次 origin proof，靠它而不是靠管理员反复建权。`RENEW_GRANT` 只能延长到策略给的绝对上限、不能抬高 `max_uses`、不能换 key、不能跨 `boot_epoch`；每次续期落审计。已耗尽的 grant 不能续。
+
+grant 的构造、撤销和查看仍在管理平面（§2.1 的 prepare/commit），数据面只新增续期。
+
+### 11.5 密钥、角色与算法字节
+
+`KeyAlgorithm` 的线字节一次定死：`0x01` Ed25519、`0x02` P256、`0x03` **X25519**（冻结，P3 之前没有生产者）。X25519 公钥的 multikey 头是 `0xec01`，thumbprint 仍走 RFC 7638。
+
+catalog 角色追加 `device_signing`、`key_agreement`（现有五个不变）。操作到角色的放行表：
+
+| 操作 | 允许的角色 |
+|---|---|
+| `SIGN_HTTP`、`SIGN_ORIGIN_PROOF` | `hot` |
+| `SIGN_PURPOSE`、`SIGN_OBJECT_PROOF` | `device_signing` |
+| `SIGN_DOCUMENT_PROOF` | `root`，grant 只能由管理平面创建 |
+| `ECDH` | `key_agreement` |
+
+`SIGN_PURPOSE` 本质是签名 oracle，所以**一个 purpose 一把专用键**，注册时绑定，事后改不了；开关不塞进 `SigningGates`，也不占 legacy `REQUEST_TYPES`。
+
+策略 v2（P1 起）：
+
+```json
+{"schema_version":2,"name":"im-origin-proof-review","purpose":"origin-proof",
+ "limits":{"max_duration_seconds":900,"max_uses":1000,
+           "max_lifetime_seconds":86400,"max_renewals":16},
+ "content":{...}}
+```
+
+`content` 按 `purpose` 各自一套字段，`deny_unknown_fields`：`http-authentication` 是 v1 那六个（`origin/methods/paths/query/body/signature_profile`）；`origin-proof` 为 `origin/methods/paths/body`；`purpose-signing` 为 `purposes`；`ecdh` 为 `peers`（32 字节 hex 公钥列表）；`object-proof`/`document-proof` 为 `proof_purposes`。已发布的 purpose 字段集不可改；加新 purpose 要连 `schema_version` 一起抬。`schema_version: 1` 的文档继续可读、判定不变。
+
+### 11.6 助记词：只进不出
+
+- **导入**：`import-mnemonic --did` 收 BIP-39 24 词（32 字节熵）。P4 起一个助记词恢复**四类密钥**：`key-1`、hot、`{device}-sign`、`{device}-agreement`。
+- **导出：永远没有。** 不加 CLI、不加 socket 操作、不加 MCP 工具；`seed-export` 特性保持默认关，发布构建断言二进制里没有导出路径。
+- **自建**：`keygen` 建完身份后把 24 词**当场显示一次**——只写 tty，stdout 不是终端就拒绝，不落文件，审计只记"展示过"。之后没有任何命令能把词再取出来，所以这是唯一一次备份机会。
+
+多密钥派生方案版本串冻结为 `bip39-entropy-v2`（`bip39-entropy-v1` 的归档继续可开）。v2 推导出的 `key-1` 必须与 v1 **逐字节相同**，否则老身份换台机器就换了 DID。新增的子路径各占一条 HKDF 域串：`anp-keyd/v2/hot`、`anp-keyd/v2/device-sign`、`anp-keyd/v2/device-agreement`；`anp-keyd/v1/kek`、`anp-keyd/v2/kek`、`anp-keyd/v2/se-hs` 一个字不动。
+
+### 11.7 默认关清单
+
+每个新签名路单独一个开关，默认关，开的时候单独一条审计：`SIGN_ORIGIN_PROOF`、`SIGN_PURPOSE`（每 purpose 一个）、`SIGN_OBJECT_PROOF`、`SIGN_DOCUMENT_PROOF`、`ECDH`。`signing_available=true` 不表示这些路开着，客户端仍以 `operations` 为准。**根的管理操作**（换设备、轮换根、注册）只在管理平面，要求在场（SE 租约或等价物）。数据面唯一能用 root 键的是 `SIGN_DOCUMENT_PROOF`，且它的 grant 只能由管理平面签发——数据面自己没有任何途径造出 root 授权。
+
+### 11.8 客户端对接要求
+
+awiki-cli-rs2 的适配器不在本仓库，但要满足：用 async `IdentityCustody` 那条接缝，不走 `ProviderIdentitySigner`（它对 `sign`/`sign_root`/`ecdh` 一律 `PermissionDenied`）；每条消息的 origin proof、每个 KeyPackage 的设备断言、每个 secure-direct 会话的 ECDH 各对应 §11.3 一个操作。`anpio-cli` 的 `custody.rs` 从子进程 `document`/`sign` 扩到同一批操作，参数保持管理员固定、不接受调用方覆盖 config/socket/did/kid。

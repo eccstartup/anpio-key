@@ -23,6 +23,9 @@ pub struct KeyId {
 pub enum KeyAlgorithm {
     Ed25519,
     P256,
+    /// 只为把线上编号定死而存在:`0x03` 一旦被别的算法占了,协商键
+    /// 就再也进不来。这个构建**不造**这种钥匙(见 `docs/ADAPTER.md` §11.5)。
+    X25519,
 }
 
 impl KeyAlgorithm {
@@ -32,6 +35,7 @@ impl KeyAlgorithm {
         match self {
             Self::Ed25519 => 0x01,
             Self::P256 => 0x02,
+            Self::X25519 => 0x03,
         }
     }
 
@@ -41,6 +45,7 @@ impl KeyAlgorithm {
         match raw {
             0x01 => Some(Self::Ed25519),
             0x02 => Some(Self::P256),
+            0x03 => Some(Self::X25519),
             _ => None,
         }
     }
@@ -458,6 +463,49 @@ mod tests {
 
         // 不是 Ed25519 的算法不在这里"试着解一下"。
         k.algorithm = KeyAlgorithm::P256;
+        assert!(k.verifying_key().is_err());
+    }
+
+    /// 算法编号是**对外承诺**,不是实现细节:客户端按它解释公钥。
+    /// 前两个已经发出去,第三个现在留死给协商键 —— 加算法只能往后接。
+    #[test]
+    fn algorithm_bytes_are_frozen() {
+        assert_eq!(KeyAlgorithm::Ed25519.to_wire(), 0x01);
+        assert_eq!(KeyAlgorithm::P256.to_wire(), 0x02);
+        assert_eq!(KeyAlgorithm::X25519.to_wire(), 0x03);
+
+        for raw in 0x01..=0x03u8 {
+            let alg = KeyAlgorithm::from_wire(raw).unwrap();
+            assert_eq!(alg.to_wire(), raw);
+        }
+        assert_eq!(KeyAlgorithm::from_wire(0x00), None);
+        assert_eq!(KeyAlgorithm::from_wire(0x04), None);
+        assert_eq!(KeyAlgorithm::from_wire(0xff), None);
+
+        // 一个编号只能对一把算法,反之亦然。
+        let all = [KeyAlgorithm::Ed25519, KeyAlgorithm::P256, KeyAlgorithm::X25519];
+        for (i, a) in all.iter().enumerate() {
+            for b in &all[i + 1..] {
+                assert_ne!(a.to_wire(), b.to_wire());
+            }
+        }
+
+        // 磁盘上的名字同样冻结。
+        for (alg, name) in [
+            (KeyAlgorithm::Ed25519, "\"ed25519\""),
+            (KeyAlgorithm::P256, "\"p256\""),
+            (KeyAlgorithm::X25519, "\"x25519\""),
+        ] {
+            assert_eq!(serde_json::to_string(&alg).unwrap(), name);
+        }
+    }
+
+    /// X25519 进了枚举,但**这个构建不拿它签名** —— 编号是给协议留的,
+    /// 不是给 `verifying_key` 留的。
+    #[test]
+    fn an_x25519_envelope_does_not_read_back_as_a_signing_key() {
+        let mut k = sample();
+        k.algorithm = KeyAlgorithm::X25519;
         assert!(k.verifying_key().is_err());
     }
 

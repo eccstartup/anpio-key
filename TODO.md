@@ -17,6 +17,15 @@
 - [ ] 按实际需求扩展注册 challenge 格式；当前仅支持管理端精确批准的 awiki 32 位小写 hex 格式。
 - [x] 外部 awiki-cli-rs2：依赖改造已完成并推送——只删掉 `../anp/...` path 依赖，保留 `anp =1.0.3`、`anp-identity =0.2.3` 原版本钉（二者 crates.io 上均有），`Cargo.lock` 只补 `source`/`checksum`；`cargo check --locked --workspace` 通过、`cargo test -p awiki-im-core --lib` 1522 项全过。提交 `a8c5663c` 已推到 fork `eccstartup/awiki-cli-rs2` 的 `eccstartup` 分支，未推上游、未开 PR。升级 `anp-identity` 0.2.5 需先做 awiki 自己的 DID 文档迁移（0.2.5 拒绝 P6 legacy bundle，185/1522 测试失败），单列。本仓库侧交付已完成：Node v2 客户端及 anp-sdk connector，SDK 侧最低兼容版本 `@connectx-sdk/core@0.4.2`。
 
+强对接（awiki-cli-rs2 + anpio-cli，四类密钥全部托管）的接口形状已冻结在 `docs/ADAPTER.md` §11，`0x03 = X25519` 已钉住；下面按交付物各一条，未实现前能力协商里不出现对应操作名。
+
+- [ ] 强对接 P0 余项：把 `anpio_key::client` 扩成覆盖全部数据操作的同步客户端，错误按“不支持/未授权/过期”分类；加签名吞吐 bench 基线，先量出“一次连接一请求 + 全局互斥 + 签名持 DB 锁”的实际代价，再决定长连接会话或缩短锁范围。契约冻结已完成（§11、算法字节、能力字段名）。
+- [ ] 强对接 P1：`SIGN_ORIGIN_PROOF`、`RENEW_GRANT`（session grant）、`GET_CAPABILITIES` 的 `capability_schema`/`operations`/`purposes`/`grant_kinds`、策略 `schema_version: 2` 与对应审计。验收：awiki did-auth 全链路走 socket，anpio-cli 现有 `sign` 路径逐字节不变。
+- [ ] 强对接 P2：`device_signing` 角色与专用键、`SIGN_PURPOSE`（每 purpose 一把键、一个开关，默认关）。验收：MLS KeyPackage 的设备断言由 daemon 出，客户端不再持 `{device}-sign`。
+- [ ] 强对接 P3：X25519 密钥（`keyAgreement` 文档支持）、`ECDH` 与 peer 白名单（默认关）。验收：secure-direct 建会话由 daemon 出共享密钥，客户端不再持 `{device}-agreement`；审计记 peer 指纹不记共享密钥。
+- [ ] 强对接 P4：管理平面导入既有四类密钥、签发新设备密钥、重发 DID 文档；`import-mnemonic` 用一个 24 词助记词恢复四类键（`bip39-entropy-v2`，`key-1` 字节与 v1 相同）；`keygen` 当场显示一次 24 词（只写 tty）；发布构建断言无导出路径。验收：客户端目录里不再有任何私钥，登录/发消息/建会话三条路都正常；换台机器只用助记词完整恢复。
+- [ ] 强对接 P5：`SIGN_OBJECT_PROOF`、`SIGN_DOCUMENT_PROOF` 与管理平面的根操作（在场/租约）。验收：换设备、轮换根密钥不需要把 root 私钥交给客户端。
+
 已实现：独立管理通道与服务 UID 认证、主体/角色/策略、exact-key grant、期限与撤销、事务签名、去重、结果恢复、资源限制、旧审计关联、离线迁移与恢复校验、管理注册 proof、预配置热密钥轮换、发行特性检查。
 
 签名核心不联网；发布 DID 文档由独立适配器执行并核验。历史明文导出无法撤回，不提供远程多租户 KMS 或普通 Agent raw 签名。
