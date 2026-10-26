@@ -248,4 +248,40 @@ mode skips them), the Linux release build and its protected-mode declaration,
 physical TPM, all of macOS (frozen this cycle), and the awiki-cli-rs2 / anpio-cli
 adapters — those remain the P1-P5 收尾 items in `TODO.md`.
 
+## Document proof moved to the W3C signing base, re-accepted 2026-10-26
+
+`SIGN_DOCUMENT_PROOF` used to return the upstream bytes in a different alphabet:
+`complete_w3c_proof` emits raw base64url, and the daemon swapped it to
+`z`/base58btc without re-signing. That holds only while the two alphabets share a
+signing base, and anp 1.0.6's z branch does not — it folds the document's
+`@context` into the proof configuration before hashing, per `vc-di-eddsa`
+§3.3.1 Create Proof. So every real DID document, which carries `@context`, was
+signed over a base no spec-conformant verifier computes.
+
+The proof now goes through `src/did/proof.rs`: the configuration is assembled
+locally (`type`, `created`, `verificationMethod`, `proofPurpose`, `cryptosuite`,
+optional `domain`/`challenge`, plus the document's `@context`), the signature
+base is `SHA256(JCS(proofConfig)) || SHA256(JCS(document - proof))`, and the
+result is `z` + base58btc with no proof-level `@context` — the verifier restores
+that from the document. Same environment as the run above; re-run with:
+
+```sh
+docker run --rm -v "$PWD:/src:ro" -w /src rust:1.90-bookworm \
+  bash deploy/linux/acceptance/test-container.sh
+```
+
+One run, exit code 0: `{"passed": 191, "protected_supported": false,
+"systemd": false}`, and `cargo test --locked` green. The count went from 190 to
+191 because the harness stopped grading its own homework on this path: it used
+to assert only the proof's shape, which a wrong signing base also satisfies. It
+now writes the document the socket signed to `/tmp/signed-did-document.json` and
+runs `examples/local-preview-fixture verify-document`, whose new mode calls
+`anp::authentication::validate_did_document_binding(document, true)` — the entry
+point a peer uses. That check passes, which is the first time this record says
+the daemon's document proof was *verified* rather than *well formed*.
+
+Not accepted by this run: anything about a verifier still pinned to anp 1.0.3,
+which cannot read `z` at all — that is a version constraint on the peer, not
+something the encoding can fix.
+
 
