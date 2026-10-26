@@ -469,9 +469,9 @@ catalog 角色追加 `device_signing`、`key_agreement`（现有五个不变）�
 
 ### 11.6 助记词：只进不出
 
-- **导入**：`import-mnemonic --did` 收 BIP-39 24 词（32 字节熵）。P4 起一个助记词恢复**四类密钥**：`key-1`、hot、`{device}-sign`、`{device}-agreement`。
-- **导出：永远没有。** 不加 CLI、不加 socket 操作、不加 MCP 工具；`seed-export` 特性保持默认关，发布构建断言二进制里没有导出路径。
-- **自建**：`keygen` 建完身份后把 24 词**当场显示一次**——只写 tty，stdout 不是终端就拒绝，不落文件，审计只记"展示过"。之后没有任何命令能把词再取出来，所以这是唯一一次备份机会。
+- **导入**：`import-mnemonic --did` 收 BIP-39 24 词（32 字节熵），恢复**四类密钥**：`key-1`（词熵本身）、hot、`{device}-sign`、`{device}-agreement`（后三条各走一条 HKDF 域串）。本机没有这个 DID 的文档时，四把落盘后立刻按四把重建并自签 `did.json`，文档里的公钥与当初 `keygen` 铸出来的逐个相同。本机**已有**文档时以文档为准：热密钥的名字按公钥从文档里找回（纸上那把当初叫 `key-2`，现在还叫 `key-2`，不按"下一个空位"重新编号），文档里那把不是纸上推出来的（热密钥轮换过，轮换铸的是新的随机种子）就不恢复，并明确说一句。`import-archive` 装的是**一把**钥匙的 seed，所以只恢复那一把。
+- **导出：永远没有。** 不加 CLI、不加 socket 操作、不加 MCP 工具；`seed-export` 特性保持默认关，`tests/cli.rs` 里那条跑真二进制的用例断言 `export-seed` 是"不认识的子命令"、`--help` 上也没有它（`cargo test --release` 时检查的就是发布那一份）。
+- **自建**：`keygen` 建完身份后把 24 词**当场显示一次**——只写 tty，stdout 不是终端就拒绝，不落文件，审计只记"展示过"。词和"抄好了吗"的确认都在**铸任何东西之前**，答"没抄"则一个字节都不写。之后没有任何命令能把词再取出来，所以这是唯一一次备份机会。
 
 多密钥派生方案版本串冻结为 `bip39-entropy-v2`（`bip39-entropy-v1` 的归档继续可开）。v2 推导出的 `key-1` 必须与 v1 **逐字节相同**，否则老身份换台机器就换了 DID。新增的子路径各占一条 HKDF 域串：`anp-keyd/v2/hot`、`anp-keyd/v2/device-sign`、`anp-keyd/v2/device-agreement`；`anp-keyd/v1/kek`、`anp-keyd/v2/kek`、`anp-keyd/v2/se-hs` 一个字不动。
 

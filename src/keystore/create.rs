@@ -341,6 +341,79 @@ pub fn create_agreement(
     Ok((wrapped, key))
 }
 
+/// 从一个根 seed 推出另外三把(热、设备签名、协商)—— **不落盘**。
+///
+/// `keygen` 和助记词恢复都走这一段:同一组关系、同一个 `generate_*_from_seed`。
+/// 两条路只要分岔一次,同一张纸就会得到两份不同的文档,而纸还在人手上。
+///
+/// 名字由调用方给,因为**编号从哪来**是两条路唯一该不一样的地方:`keygen`
+/// 在"只有根"的文档上算下一个空位,恢复则要按公钥找回文档里那把钥匙原来的
+/// 名字(见 [`crate::did::lifecycle::hot_fragment_of`])。
+///
+/// `hot_fragment` 为 `None` 表示**不要热密钥**:本机文档里的热密钥不是这张
+/// 纸推出来的那把(轮换过),硬恢复只会添一把没人引用的钥匙。
+///
+/// 三把的 `label` 是固定的("hot" / "device-sign" / "device-agreement"),
+/// 不取调用方给的那个:同一个助记词在两台机器上恢复,落下的信封除了口令和
+/// KDF 参数之外应当**逐字相同**,否则"这是同一把钥匙吗"就得靠比对指纹才能答。
+#[allow(clippy::too_many_arguments)] // 与 `generate_*_from_seed` 同一批决定
+pub fn derived_extras(
+    did: &str,
+    hot_fragment: Option<&str>,
+    passphrase: &[u8],
+    device_secret: &LockedBytes,
+    argon: Argon2Config,
+    hardware: HardwareChoice,
+    root_seed: &LockedBytes,
+) -> Result<Vec<(WrappedKey, ExtraKey)>> {
+    let mut derived = Vec::with_capacity(3);
+
+    if let Some(hot_fragment) = hot_fragment {
+        derived.push(generate_extra_from_seed(
+            did,
+            hot_fragment,
+            vec![anp::authentication::DidVerificationRelationship::Authentication],
+            "hot",
+            passphrase,
+            device_secret,
+            argon,
+            hardware,
+            &crate::crypto::derive::hot(root_seed)?,
+        )?);
+    }
+
+    // 设备签名键要**两处都挂**:上游把同时出现在 `authentication` 与
+    // `assertionMethod` 读成 `DeviceSigning` 角色。只挂一处会落到热密钥或
+    // 恢复密钥的角色上,而那把钥匙就干不了设备断言。
+    derived.push(generate_extra_from_seed(
+        did,
+        crate::did::document::DEVICE_SIGN_FRAGMENT,
+        vec![
+            anp::authentication::DidVerificationRelationship::Authentication,
+            anp::authentication::DidVerificationRelationship::AssertionMethod,
+        ],
+        "device-sign",
+        passphrase,
+        device_secret,
+        argon,
+        hardware,
+        &crate::crypto::derive::device_sign(root_seed)?,
+    )?);
+
+    derived.push(generate_agreement_from_seed(
+        did,
+        crate::did::document::DEVICE_AGREEMENT_FRAGMENT,
+        "device-agreement",
+        passphrase,
+        device_secret,
+        argon,
+        hardware,
+        &crate::crypto::derive::device_agreement(root_seed)?,
+    )?);
+
+    Ok(derived)
+}
+
 /// 从一个助记词熵铸出**四把钥匙**的整套身份。
 ///
 /// 四把的 seed 都从 `root_seed` 推:根就是它本身,热/设备签名/协商各走一条
@@ -390,59 +463,26 @@ pub fn create_identity(
         &did,
         &store::envelope_fragments(layout, &did)?,
     )?;
-
-    let (hot, hot_key) = generate_extra_from_seed(
+    let derived = derived_extras(
         &did,
-        &hot_fragment,
-        vec![anp::authentication::DidVerificationRelationship::Authentication],
-        "hot",
+        Some(&hot_fragment),
         passphrase,
         &device_secret,
         argon,
         hardware,
-        &crate::crypto::derive::hot(root_seed)?,
-    )?;
-
-    // 设备签名键要**两处都挂**:上游把同时出现在 `authentication` 与
-    // `assertionMethod` 读成 `DeviceSigning` 角色。只挂一处会落到热密钥或
-    // 恢复密钥的角色上,而那把钥匙就干不了设备断言。
-    let (device_sign, device_sign_key) = generate_extra_from_seed(
-        &did,
-        crate::did::document::DEVICE_SIGN_FRAGMENT,
-        vec![
-            anp::authentication::DidVerificationRelationship::Authentication,
-            anp::authentication::DidVerificationRelationship::AssertionMethod,
-        ],
-        "device-sign",
-        passphrase,
-        &device_secret,
-        argon,
-        hardware,
-        &crate::crypto::derive::device_sign(root_seed)?,
-    )?;
-
-    let (agreement, agreement_key) = generate_agreement_from_seed(
-        &did,
-        crate::did::document::DEVICE_AGREEMENT_FRAGMENT,
-        "device-agreement",
-        passphrase,
-        &device_secret,
-        argon,
-        hardware,
-        &crate::crypto::derive::device_agreement(root_seed)?,
+        root_seed,
     )?;
 
     store::save_new(layout, &root.wrapped)?;
-    store::save_new(layout, &hot)?;
-    store::save_new(layout, &device_sign)?;
-    store::save_new(layout, &agreement)?;
+    let mut extras = Vec::with_capacity(derived.len());
+    let mut document_keys = Vec::with_capacity(derived.len());
+    for (wrapped, key) in derived {
+        store::save_new(layout, &wrapped)?;
+        extras.push(wrapped);
+        document_keys.push(key);
+    }
 
-    Ok(Identity {
-        did,
-        root: root.wrapped,
-        extras: vec![hot, device_sign, agreement],
-        document_keys: vec![hot_key, device_sign_key, agreement_key],
-    })
+    Ok(Identity { did, root: root.wrapped, extras, document_keys })
 }
 
 #[cfg(test)]

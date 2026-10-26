@@ -147,6 +147,38 @@ pub fn hot_key(document: &Value, did: &str) -> Result<Option<ExtraKey>> {
         }))
 }
 
+/// 文档里挂着**这把公钥**的热密钥叫什么名字。
+///
+/// 助记词恢复用得上:纸推出来的热密钥是确定的,只有**编号**不由纸决定 ——
+/// 它由当初那次 `keygen`(以及之后轮换过几次)决定。这里按公钥找回那个
+/// 名字,而不是让恢复去算"下一个空位":算了会得到 `key-3`,而纸上那把在
+/// 文档里叫 `key-2`,于是恢复会凭空添一把谁也没引用的钥匙,又漏掉真正
+/// 该接回来的那一把。
+///
+/// `None` 有两个含义,而且都对恢复是同一个结论:文档里的热密钥不是这张纸
+/// 的(比如轮换过 —— 轮换铸的是新的随机种子,不在纸上),或者文档里根本
+/// 没有热密钥。
+pub fn hot_fragment_of(
+    document: &Value,
+    did: &str,
+    public_key: &ed25519_dalek::VerifyingKey,
+) -> Result<Option<String>> {
+    for key in extra_keys(document, did)? {
+        if !key
+            .relationships
+            .contains(&anp::authentication::DidVerificationRelationship::Authentication)
+        {
+            continue;
+        }
+        if let ExtraKeyMaterial::Ed25519(listed) = key.material {
+            if listed.to_bytes() == public_key.to_bytes() {
+                return Ok(Some(key.fragment));
+            }
+        }
+    }
+    Ok(None)
+}
+
 /// 下一个可用的热密钥 fragment:`key-2`、`key-3`……
 ///
 /// 用"**曾经**用掉的最大编号 + 1",不是"数量 + 1",也不是"文档里还剩的

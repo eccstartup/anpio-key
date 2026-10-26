@@ -407,6 +407,31 @@ fn help_lists_every_command() {
     }
 }
 
+/// **默认构建里没有导出这条路 —— 而且在二进制一级确认。**
+///
+/// `src/cli.rs` 里那条单元测试证明的是 `parse()` 不认识这个子命令;这一条
+/// 跑的是**真的那个二进制**,所以 `cargo test --release` 时它检查的正是将来
+/// 发行出去的那一份。发布构建没有 `--features seed-export`,这条因此总在。
+///
+/// 失败的样子也要对:必须是"没有这个命令",不是"这个命令被拒绝了"。前者
+/// 意味着那段代码不在二进制里,后者意味着它在、只是没让过。
+#[cfg(not(feature = "seed-export"))]
+#[test]
+fn the_release_binary_carries_no_export_command() {
+    let outcome = run_bare(&["export-seed", "--did", "did:wba:example.com:u:a:e1_x"]);
+    let text = outcome.expect_failure();
+    let lower = text.to_lowercase();
+    assert!(
+        lower.contains("unrecognized subcommand") || lower.contains("invalid subcommand"),
+        "it has to fail as an unknown command, not as a refusal:\n{text}"
+    );
+
+    // 也不许在 `--help` 上挂着 —— 一个"看得见但用不了"的命令会让人去试。
+    let outcome = run_bare(&["--help"]);
+    let help = outcome.expect_ok();
+    assert!(!help.contains("export-seed"), "the absent command must not be advertised:\n{help}");
+}
+
 /// `--raw` 和结构化那套参数**互相排除**,而且 clap 就得拦住。
 ///
 /// 不是洁癖:两者都能给的话,调用方会以为 `--body` 也进了覆盖面,而原始
@@ -571,13 +596,7 @@ fn keygen_shows_the_words_on_the_terminal_and_never_on_stdout() {
     // 词不能出现在 stdout 上:它是要被重定向、被 `tee`、被日志收走的那一份。
     // 这里取屏幕上那串词里连续三个当探针 —— 单个词可能本来就是 nginx 之类的
     // 普通词,连着的三个不是。
-    let words: Vec<&str> = screen
-        .lines()
-        .filter_map(|line| {
-            let rest = line.trim_start().split_once(". ")?.1;
-            (!rest.is_empty() && !rest.contains(' ')).then_some(rest)
-        })
-        .collect();
+    let words = words_on_screen(screen);
     assert_eq!(words.len(), 24, "could not read the words back:\n{screen}");
     let probe = words[..3].join(" ");
     assert!(
@@ -587,10 +606,87 @@ fn keygen_shows_the_words_on_the_terminal_and_never_on_stdout() {
     );
     assert!(!outcome.stdout.contains("These 24 words"));
     assert!(
-        outcome.stdout.contains(&format!("did:wba:")),
+        outcome.stdout.contains("did:wba:"),
         "the DID itself is still on stdout — that part is not a secret:\n{}",
         outcome.stdout
     );
+}
+
+/// 从 `keygen` 那一屏上把 24 个词按顺序读回来。
+///
+/// 格式是 ` 1. word` 那种编号行;除此之外没有别的行是"数字 + 点 + 一个没有
+/// 空格的词",所以这条解析在屏幕内容变化时只会**读不到**(断言 24 条),
+/// 不会悄悄读到别的东西。
+fn words_on_screen(screen: &str) -> Vec<String> {
+    screen
+        .lines()
+        .filter_map(|line| {
+            let rest = line.trim_start().split_once(". ")?.1.trim();
+            (!rest.is_empty() && !rest.contains(' ')).then(|| rest.to_string())
+        })
+        .collect()
+}
+
+/// **换台机器,只用那张纸把整套身份恢复出来。**
+///
+/// 这是计划里 P4 的验收:24 个词不只是绑定密钥 —— 热、设备签名、协商三把
+/// 都由同一个根 seed 推出,所以新机器上的四把公钥必须和原来那台**逐字节
+/// 相同**,文档也得是四把的。少一把就说明某条推导在两条路上分了岔。
+#[test]
+fn the_words_alone_restore_the_whole_identity_on_a_new_machine() {
+    let original = TempDir::new("restore-from");
+    let spec = spec_file(&original, "bot", &a_spec_for("example.com", "agents/bot"));
+    let outcome = run_in_terminal(original.path(), &["keygen", "--spec", &spec], &default_rules());
+    let screen = outcome.expect_ok();
+    let did = screen
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("did:wba:"))
+        .expect("keygen prints the DID")
+        .to_string();
+    let words = words_on_screen(screen);
+    assert_eq!(words.len(), 24, "could not read the words back:\n{screen}");
+    let phrase = words.join(" ");
+
+    let restored = TempDir::new("restore-to");
+    let rules: Vec<(&str, String)> = vec![
+        ("Words: ", phrase),
+        ("[y/N] ", "y".to_string()),
+        ("New LOCAL passphrase for this key: ", PASSPHRASE.to_string()),
+        ("Repeat it: ", PASSPHRASE.to_string()),
+    ];
+    run_in_terminal(restored.path(), &["import-mnemonic", "--did", &did], &rules).expect_ok();
+
+    let envelopes = std::fs::read_dir(restored.path().join("keys")).expect("keys/ exists").count();
+    assert_eq!(envelopes, 4, "root, hot, device-sign, device-agreement");
+
+    let document = |dir: &TempDir| -> serde_json::Value {
+        let files: Vec<_> =
+            std::fs::read_dir(dir.path().join("dids")).expect("dids/ exists").collect();
+        assert_eq!(files.len(), 1, "exactly one document per DID");
+        serde_json::from_slice(&std::fs::read(files[0].as_ref().unwrap().path()).unwrap()).unwrap()
+    };
+    let minted = document(&original);
+    let rebuilt = document(&restored);
+
+    assert_eq!(rebuilt["id"], minted["id"]);
+    let keys_of = |doc: &serde_json::Value| -> Vec<(String, String)> {
+        let mut pairs: Vec<(String, String)> = doc["verificationMethod"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|method| {
+                (
+                    method["id"].as_str().unwrap().to_string(),
+                    method["publicKeyMultibase"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        pairs.sort();
+        pairs
+    };
+    assert_eq!(keys_of(&rebuilt), keys_of(&minted), "the words must mint the same four keys");
+    assert_eq!(keys_of(&rebuilt).len(), 4);
 }
 
 /// 说"没抄"就**什么都不铸** —— 一套没有备份的身份比没有身份更糟。
@@ -1336,9 +1432,9 @@ fn the_same_digest_links_the_publish_to_the_read() {
     // `publish` 会写第二条 `PUBLISHED`(`keygen` 自己已经写过一条),要的是
     // **刚刚这次** —— 所以取最后一条,不是第一条。
     let line_with = |event: &str| {
+        let needle = format!("\"event\":\"{event}\"");
         text.lines()
-            .filter(|line| line.contains(&format!("\"event\":\"{event}\"")))
-            .next_back()
+            .rfind(|line| line.contains(&needle))
             .unwrap_or_else(|| panic!("no {event} record:\n{text}"))
             .to_string()
     };

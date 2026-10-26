@@ -26,7 +26,8 @@
 - [ ] 强对接 P2 收尾：awiki-cli-rs2 的 `sign_device_assertion` 改走 `SIGN_PURPOSE`，MLS KeyPackage 的设备断言由 daemon 出，客户端不再持 `{device}-sign`。
 - [x] 强对接 P3（daemon 侧）：X25519 密钥（`0x03`，multikey 头 `0xec01`，thumbprint `x1_`）、`keyAgreement` 文档支持与 `key_agreement` 角色（曲线在注册和授权两处各判一次，错曲线/错关系在角色判断前就被拒）、`ECDH` 操作（`features.ecdh` 默认关，启动落一条 `ECDH_ENABLED`）、策略 `ecdh` purpose 的 peer 白名单（逐字节、无通配）、`add-agreement-key` 管理命令。共享密钥**不落库**：`requests.result` 恒为 NULL，重放得到 `completed`+空结果（客户端翻成 `OUTCOME_UNKNOWN`）；审计只记 `peer_fingerprint`/`peer_multibase`/grant。低阶 peer → `ECDH_PEER_INVALID`。RFC 7748 §6.1 向量逐字节过。
 - [ ] 强对接 P3 收尾：在 Docker/Linux 上用真守护进程跑 secure-direct 建会话全链路（socket 往返、共享密钥与 RFC 7748 向量一致、重放拿不到第二次、peer 不在白名单被拒），并让 awiki-cli-rs2 的 secure-direct 改走 `ECDH`，客户端不再持 `{device}-agreement`。
-- [ ] 强对接 P4：管理平面导入既有四类密钥、签发新设备密钥、重发 DID 文档；`import-mnemonic` 用一个 24 词助记词恢复四类键（`bip39-entropy-v2`，`key-1` 字节与 v1 相同）；`keygen` 当场显示一次 24 词（只写 tty）；发布构建断言无导出路径。验收：客户端目录里不再有任何私钥，登录/发消息/建会话三条路都正常；换台机器只用助记词完整恢复。
+- [x] 强对接 P4（助记词与自建）：`import-mnemonic` 用一个 24 词助记词恢复四类键（`bip39-entropy-v2`，`key-1` 字节与 v1 相同）；本机没有该 DID 的文档时按四把重建并自签；本机已有文档时以文档为准，热密钥的名字按公钥找回、轮换过的不恢复并明说。`keygen` 铸任何东西**之前**把 24 词当场显示一次（只写 tty），答"没抄"则一个字节不写。发布构建断言无导出路径：`tests/cli.rs` 跑真二进制，`export-seed` 是不认识的子命令、`--help` 上也没有。验收里可自测的那半已过：集成测试在两套独立布局上跑通"换台机器只用助记词完整恢复"，四把公钥逐个相同、文档四把。
+- [ ] 强对接 P4 收尾（管理平面）：`AdminRequest` 上导入既有四类密钥材料、签发新设备密钥、重发 DID 文档、撤销旧设备。验收的另一半留在这一条：客户端目录里不再有任何私钥，登录、发消息、建会话三条路都正常。
 - [ ] 强对接 P5：`SIGN_OBJECT_PROOF`、`SIGN_DOCUMENT_PROOF` 与管理平面的根操作（在场/租约）。验收：换设备、轮换根密钥不需要把 root 私钥交给客户端。
 
 已实现：独立管理通道与服务 UID 认证、主体/角色/策略、exact-key grant、期限与撤销、事务签名、去重、结果恢复、资源限制、旧审计关联、离线迁移与恢复校验、管理注册 proof、预配置热密钥轮换、发行特性检查。

@@ -242,7 +242,7 @@ pub enum Command {
     /// Permanently deactivate a DID, optionally naming a successor.
     Deactivate(DeactivateArgs),
 
-    /// Restore a binding key from 24 words, re-wrap it for this machine.
+    /// Restore an identity from 24 words: four keys, re-wrapped for this machine.
     ImportMnemonic(ImportMnemonicArgs),
     /// Restore from an encrypted archive.
     ImportArchive(ImportArchiveArgs),

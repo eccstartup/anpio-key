@@ -18,6 +18,10 @@
 //! 容器。所以下面的七步走的是同一段代码,两条路只在"seed 从哪来"和"手里
 //! 有没有一份文档"上分岔。
 //!
+//! 有一处**不等价**,而且是故意的:24 个词是整张纸,**同一个根 seed 推出的
+//! 另外三把(热、设备签名、协商)也能一起恢复**;归档装的是**一把**钥匙的
+//! seed,所以它只恢复那一把。见 [`restore_derived`]。
+//!
 //! # 导入不是"原样落盘",是"重新封装"
 //!
 //! 这是最容易做错的一步。归档/词里带回来的是**种子**,不是信封 —— 到了新
@@ -49,6 +53,7 @@ use crate::crypto::hygiene::LockedBytes;
 use crate::crypto::kdf::Argon2Config;
 use crate::crypto::mnemonic;
 use crate::did::document;
+use crate::did::document::ExtraKey;
 use crate::did::lifecycle;
 use crate::did::parse::parse_did_wba;
 use crate::error::{KeydError, Result};
@@ -60,7 +65,7 @@ use crate::keystore::{device, store, wrap};
 use crate::ops::{hosting_notice, Session};
 use crate::sign::LockedSigningKey;
 
-/// 从 24 个词恢复绑定密钥。
+/// 从 24 个词恢复**整套身份**:绑定密钥,加上同一个根 seed 推出的另外三把。
 pub struct ImportMnemonic {
     /// 这个 DID。词里推不出它 —— 路径段是人选的,公钥只决定最后那一段。
     pub did: String,
@@ -95,9 +100,10 @@ pub fn import_mnemonic(root: Option<&Path>, args: ImportMnemonic) -> Result<()> 
     let segment = parts.e1_segment().ok_or_else(|| {
         KeydError::Did(format!(
             "{} has no `e1_` segment, so there is nothing to bind a key to. \
-             `import-mnemonic` restores the BINDING key — the one whose fingerprint IS \
-             the DID — because words alone cannot tell you which DID a non-binding key \
-             belongs to (that lives in the document, and there is no document here)",
+             `import-mnemonic` identifies the identity by its BINDING key — the one whose \
+             fingerprint IS the DID — because words alone cannot tell you which DID a \
+             non-binding key belongs to (that lives in the document, and there is no \
+             document here). The other three keys are then derived from the same root seed",
             args.did
         ))
     })?;
@@ -128,6 +134,7 @@ pub fn import_mnemonic(root: Option<&Path>, args: ImportMnemonic) -> Result<()> 
             seed,
             label: args.label,
             source: "mnemonic",
+            derive_extras: true,
         },
         args.force,
         args.hardware,
@@ -173,6 +180,8 @@ pub fn import_archive(root: Option<&Path>, args: ImportArchive) -> Result<()> {
             seed,
             label: args.label,
             source: "archive",
+            // 归档装的是**一把**钥匙的 seed,不是根 seed。从它推不出另外三把。
+            derive_extras: false,
         },
         args.force,
         args.hardware,
@@ -195,6 +204,11 @@ struct Recovered {
     label: String,
     /// `mnemonic` 或 `archive`,进审计。
     source: &'static str,
+    /// 还要不要从**根 seed** 推出另外三把。
+    ///
+    /// 只有词那条路是 `true`:纸带的正是根 seed,三把都能算出来。归档里装的
+    /// 是一把钥匙自己的 seed,拿它当根去推只会推出三把**谁也不认识的**钥匙。
+    derive_extras: bool,
 }
 
 /// 七步。两条路都走这里。
@@ -214,6 +228,7 @@ fn place(
         seed,
         label,
         source,
+        derive_extras,
     } = recovered;
 
     // ② 从 seed 推出公钥,再算指纹 —— 和 DID 里那一段(或归档自己写的那
@@ -286,7 +301,10 @@ fn place(
     // 导入不只是"把 seed 接回来",还是一次**新的封装**(见模块头),所以硬件
     // 绑定也在这里重新做一遍:和 `keygen` 一样,要硬件而这里没有就拒绝,
     // 不悄悄退回纯软件的信封。
-    let hardware = hardware::seal_new(hardware, &thumbprint)?;
+    //
+    // 绑定的是**这一把**的指纹,所以另外三把各绑各的 —— 下面 `restore_derived`
+    // 拿到的还是那个 `HardwareChoice`,不是这里已经绑好的这一份。
+    let sealed_hardware = hardware::seal_new(hardware, &thumbprint)?;
 
     let wrapped = wrap::seal(wrap::SealRequest {
         id: KeyId {
@@ -301,13 +319,42 @@ fn place(
         device_secret: &device_secret,
         seed: &seed,
         argon: Argon2Config::default(),
-        hardware,
+        hardware: sealed_hardware,
     })?;
+
+    // ⑥b 一个根 seed 带回来的不只是绑定密钥。
+    //
+    // **先全部算出来,再一起落盘**:这一步里的任何失败(最可能的是硬件根
+    // 绑不上第二把)都不该留下"根进去了、另外三把没有"的半套身份。而且
+    // 后面要写的文档必须已经知道这三把 —— 一份只说得出"这个 DID 有一把根
+    // 密钥"的文档,和手里的纸对不上。
+    let local_document = store::read_did_document(session.layout(), &did).ok();
+    let (restored, notes) = if derive_extras {
+        restore_derived(
+            session.layout(),
+            &did,
+            local_document.as_ref(),
+            &verifying,
+            passphrase.as_bytes(),
+            &device_secret,
+            hardware,
+            &seed,
+        )?
+    } else {
+        (Restored::default(), Vec::new())
+    };
+    for note in &notes {
+        session.say(note)?;
+    }
 
     if force {
         store::write(session.layout(), &wrapped)?;
     } else {
         store::save_new(session.layout(), &wrapped)?;
+    }
+    for envelope in &restored.envelopes {
+        store::save_new(session.layout(), envelope)?;
+        println!("restored {} ({})", envelope.id.kid, envelope.id.thumbprint);
     }
 
     let document_digest = ensure_document(
@@ -316,6 +363,7 @@ fn place(
         &fragment,
         archived_document.as_ref(),
         &verifying,
+        &restored.keys,
         seed,
     )?;
 
@@ -343,6 +391,128 @@ fn place(
 
     clone_warning(&did);
     hosting_notice(&did)
+}
+
+/// 一个助记词能带回来的另外三把,已经算好、还没落盘。
+#[derive(Default)]
+struct Restored {
+    /// 要挂进重建的那份文档里的钥匙。
+    keys: Vec<ExtraKey>,
+    /// 盘上还没有、需要写的信封。
+    envelopes: Vec<crate::keystore::record::WrappedKey>,
+}
+
+/// 用根 seed 推出热、设备签名、协商三把,**不写盘**。
+///
+/// 三把的 seed 全部由根 seed 决定,所以"能不能恢复"不由这台机器的状态决定,
+/// 只由**本机那份文档**决定:
+///
+/// 1. **本机没有这个 DID 的文档**(换机恢复的正常情形)→ 三把全接回来,
+///    调用方随后按四把重建文档。
+/// 2. **本机有文档** → 文档说了算。`did#fragment` 挂着的公钥**正好是这张纸
+///    推出来的那把**才接;挂着别的钥匙的不接(纸证明不了它的私钥),文档里
+///    根本没有的 fragment 也不接 —— 凭空多出一把没人引用的信封,只会让
+///    "这台机器到底持有什么"更难说清。
+/// 3. **信封已经在盘上** → 不重写。同一个 seed 推出的指纹必然相同,`save_new`
+///    在那里只会报"已经存在",而内容本来就是一回事。
+///
+/// 推导本身走的是 [`crate::keystore::create::derived_extras`] —— 和 `keygen`
+/// 同一段代码。两条路分岔一次,同一张纸就会长出两份不同的文档。
+///
+/// 返回 `(要落盘的,要说给人听的)`。跳过的那几把**必须**说出来:本机文档
+/// 和手里的纸对不上,是那种"什么都不做也不报错"的失败,而人正以为自己做完了
+/// 一次恢复。
+#[allow(clippy::too_many_arguments)] // 与 `place` 手里那批东西一致
+fn restore_derived(
+    layout: &KeydLayout,
+    did: &str,
+    local_document: Option<&Value>,
+    root_verifying: &ed25519_dalek::VerifyingKey,
+    passphrase: &[u8],
+    device_secret: &LockedBytes,
+    hardware: HardwareChoice,
+    root_seed: &LockedBytes,
+) -> Result<(Restored, Vec<String>)> {
+    // 热密钥的**名字**从本机文档里找回来 —— 纸决定的是钥匙,不是编号。
+    // 文档里有热密钥、但那把不是这张纸推出来的(轮换铸的是新的随机种子,
+    // 不在纸上),就干脆不恢复热密钥:给它新编号等于往文档里塞一把没人
+    // 引用的钥匙,而"这台机器能当热密钥用"这句话仍然不成立。
+    let mut notes = Vec::new();
+    let hot_public = wrap::seed_to_public(&crate::crypto::derive::hot(root_seed)?).0;
+    let hot_fragment = match local_document {
+        Some(document) => {
+            let found = lifecycle::hot_fragment_of(document, did, &hot_public)?;
+            if found.is_none() {
+                notes.push(
+                    "note: no hot key was restored. The document on this machine has no\n\
+                     authentication key derived from these words — it was rotated at some\n\
+                     point, and a rotated key is not on the paper.\n"
+                        .to_string(),
+                );
+            }
+            found
+        }
+        // 本机没有文档 = 新身份的那份布局:编号从"只有根"的文档上算。
+        None => Some(lifecycle::next_hot_fragment(
+            &document::build_unsigned(
+                &document::DidDocumentSpec::coordinates_from_did(did)?,
+                root_verifying,
+            )?
+            .1,
+            did,
+            &store::envelope_fragments(layout, did)?,
+        )?),
+    };
+
+    let derived = crate::keystore::create::derived_extras(
+        did,
+        hot_fragment.as_deref(),
+        passphrase,
+        device_secret,
+        Argon2Config::default(),
+        hardware,
+        root_seed,
+    )?;
+
+    let mut restored = Restored::default();
+    for (envelope, key) in derived {
+        let kid = envelope.id.kid.clone();
+        if let Some(document) = local_document {
+            let listed = listed_multibase(document, &kid);
+            if listed.as_deref() != Some(envelope.public_multibase.as_str()) {
+                notes.push(format!(
+                    "note: {kid} was not restored. {}\n",
+                    match listed {
+                        Some(other) => format!(
+                            "The document on this machine names a different key there ({other}), \
+                             so the words you entered are not what it signs with."
+                        ),
+                        None => "The document on this machine does not list that key at all."
+                            .to_string(),
+                    }
+                ));
+                continue;
+            }
+        }
+
+        if !store::exists(layout, &envelope.id.thumbprint) {
+            restored.envelopes.push(envelope);
+        }
+        restored.keys.push(key);
+    }
+    Ok((restored, notes))
+}
+
+/// 文档里某个验证方法挂的公钥(`publicKeyMultibase`),没有就是 `None`。
+fn listed_multibase(document: &Value, kid: &str) -> Option<String> {
+    document
+        .get("verificationMethod")?
+        .as_array()?
+        .iter()
+        .find(|method| method.get("id").and_then(Value::as_str) == Some(kid))?
+        .get("publicKeyMultibase")?
+        .as_str()
+        .map(str::to_string)
 }
 
 /// ② 这把种子**是**它自称的那把钥匙吗。
@@ -475,6 +645,7 @@ fn ensure_document(
     fragment: &str,
     archived: Option<&Value>,
     verifying: &ed25519_dalek::VerifyingKey,
+    extras: &[ExtraKey],
     seed: LockedBytes,
 ) -> Result<String> {
     // ① 本机已经有一份 —— 不动它,理由在上面的文档注释里。
@@ -510,7 +681,7 @@ fn ensure_document(
         },
         seed,
     )?;
-    let (signed, digest) = rebuild_and_sign(did, fragment, key)?;
+    let (signed, digest) = rebuild_and_sign(did, fragment, key, extras.to_vec())?;
     store::write_did_document(session.layout(), did, &signed)?;
     println!(
         "wrote {} (rebuilt from the key: a canonical document, signed just now)",
@@ -549,12 +720,19 @@ fn document_digest_of(session: &Session, did: &str) -> Result<String> {
 }
 
 /// 给 `ensure_document` 用:按规范形式重建 + 签名。
+///
+/// 走 [`document::rebuild_with`] 而不是 [`document::rebuild`]:后者只认识根
+/// 密钥,拿它重建一份本来就挂着热/设备签名/协商键的文档,会把那三把**静静
+/// 地**从文档里抹掉 —— 而钥匙还躺在 `keys/` 里,于是这台机器持有的钥匙和
+/// 它自己的文档从此对不上。
 fn rebuild_and_sign(
     did: &str,
     fragment: &str,
     key: LockedSigningKey,
+    extras: Vec<ExtraKey>,
 ) -> Result<(Value, String)> {
-    let unsigned = document::rebuild(did, &key.verifying_key()?)?;
+    let spec = document::DidDocumentSpec::coordinates_from_did(did)?;
+    let unsigned = document::rebuild_with(&spec, did, &key.verifying_key()?, extras)?;
     let signed = document::sign_document(&unsigned, &key, &format!("{did}#{fragment}"))?;
     document::verify_path_binding(did, &signed)?;
     let digest = lifecycle::document_digest(&signed)?;
@@ -780,6 +958,154 @@ mod tests {
         let thumbprint = crate::crypto::thumbprint::e1_segment(&key(15).verifying_key().unwrap()).unwrap();
 
         assert!(conflict(&layout, &did, "key-2", &thumbprint).is_none());
+    }
+
+    // —— ⑥b 一个根 seed 推出另外三把 ————————————————————————
+
+    fn root_seed(byte: u8) -> LockedBytes {
+        LockedBytes::fill(|bytes| *bytes = [byte; 32]).unwrap()
+    }
+
+    fn device_secret() -> LockedBytes {
+        LockedBytes::fill(|bytes| *bytes = [0x22; 32]).unwrap()
+    }
+
+    fn spec() -> document::DidDocumentSpec {
+        document::DidDocumentSpec::new("example.com", vec!["user".into(), "alice".into()])
+    }
+
+    fn did_for(seed: &LockedBytes) -> (String, ed25519_dalek::VerifyingKey) {
+        let (verifying, _) = seed_to_public(seed);
+        let (did, _) = document::build_unsigned(&spec(), &verifying).unwrap();
+        (did, verifying)
+    }
+
+    fn fragments(restored: &Restored) -> Vec<&str> {
+        restored
+            .envelopes
+            .iter()
+            .map(|envelope| envelope.id.kid.rsplit('#').next().unwrap())
+            .collect()
+    }
+
+    fn restore(
+        layout: &KeydLayout,
+        did: &str,
+        local: Option<&Value>,
+        verifying: &ed25519_dalek::VerifyingKey,
+        seed: &LockedBytes,
+    ) -> (Restored, Vec<String>) {
+        restore_derived(
+            layout,
+            did,
+            local,
+            verifying,
+            b"pw",
+            &device_secret(),
+            HardwareChoice::None,
+            seed,
+        )
+        .unwrap()
+    }
+
+    /// 纸上那一串词足够铸出另外三把,而且三把在**全部算完之前**一个字节都
+    /// 不落盘:半套身份比没有身份更难收拾。
+    #[test]
+    fn one_root_seed_derives_the_other_three_and_writes_nothing() {
+        let layout = layout("derive-fresh");
+        let seed = root_seed(0x42);
+        let (did, verifying) = did_for(&seed);
+
+        let (restored, notes) = restore(&layout, &did, None, &verifying, &seed);
+
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(fragments(&restored), ["key-2", "device-sign", "device-agreement"]);
+        assert_eq!(restored.keys.len(), 3, "三把都要进重建的那份文档");
+        for envelope in &restored.envelopes {
+            assert!(
+                !store::exists(&layout, &envelope.id.thumbprint),
+                "{} was written before the whole identity was computed",
+                envelope.id.thumbprint
+            );
+        }
+    }
+
+    /// **同一个 seed,`keygen` 和助记词恢复必须铸出同一组公钥。**
+    ///
+    /// 这条是"纸能当备份"的全部内容:两条路分岔一次,纸上那 24 个词就只对
+    /// 当初那台机器成立,而人在另一台机器上恢复出来的是一把谁也认不出的钥匙。
+    #[test]
+    fn the_words_restore_exactly_the_keys_keygen_minted() {
+        let seed = root_seed(0x43);
+        let (did, verifying) = did_for(&seed);
+
+        let minted = crate::keystore::create::create_identity(
+            &layout("derive-keygen"),
+            &spec(),
+            "alice",
+            b"pw",
+            Argon2Config { m_cost: 1024, t_cost: 1, p_cost: 1 },
+            HardwareChoice::None,
+            &seed,
+        )
+        .unwrap();
+        let (restored, _) = restore(&layout("derive-words"), &did, None, &verifying, &seed);
+
+        let minted: Vec<&str> =
+            minted.extras.iter().map(|envelope| envelope.public_multibase.as_str()).collect();
+        let words: Vec<&str> =
+            restored.envelopes.iter().map(|envelope| envelope.public_multibase.as_str()).collect();
+        assert_eq!(minted, words, "keygen and the words must mint the same four keys");
+        assert_eq!(minted.len(), 3);
+    }
+
+    /// 本机已经有这份身份的文档时,**名字照着文档来**:纸上的热密钥在文档里
+    /// 叫 `key-2`,恢复就得还叫 `key-2` —— 按"下一个空位"算会得出 `key-3`,
+    /// 然后落下一把文档里没有的钥匙,同时漏掉真正该接回来的那一把。
+    #[test]
+    fn a_machine_that_already_has_the_document_keeps_the_names_in_it() {
+        let layout = layout("derive-doc");
+        let seed = root_seed(0x45);
+        let (did, verifying) = did_for(&seed);
+        let (first, _) = restore(&layout, &did, None, &verifying, &seed);
+        let document =
+            document::rebuild_with(&spec(), &did, &verifying, first.keys.clone()).unwrap();
+        store::write_did_document(&layout, &did, &document).unwrap();
+
+        let (second, notes) = restore(&layout, &did, Some(&document), &verifying, &seed);
+
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(fragments(&second), ["key-2", "device-sign", "device-agreement"]);
+    }
+
+    /// 文档里的热密钥**不是**这张纸推出来的(轮换过)→ 不恢复热密钥,而且
+    /// 要说出来。轮换铸的是新的随机种子,它从来不在纸上;硬把纸上的那把塞进
+    /// 文档会多出一把没人引用的钥匙,而人以为自己已经恢复了热密钥。
+    #[test]
+    fn a_rotated_hot_key_is_not_replaced_by_the_one_on_the_paper() {
+        let layout = layout("derive-rotated");
+        let seed = root_seed(0x46);
+        let (did, verifying) = did_for(&seed);
+        let (first, _) = restore(&layout, &did, None, &verifying, &seed);
+
+        let (foreign, _) = seed_to_public(&root_seed(0x47));
+        let mut keys: Vec<ExtraKey> =
+            first.keys.iter().filter(|key| key.fragment != "key-2").cloned().collect();
+        keys.push(ExtraKey::new(
+            "key-2",
+            foreign,
+            vec![anp::authentication::DidVerificationRelationship::Authentication],
+        ));
+        let document = document::rebuild_with(&spec(), &did, &verifying, keys).unwrap();
+
+        let (second, notes) = restore(&layout, &did, Some(&document), &verifying, &seed);
+
+        assert!(
+            notes.iter().any(|note| note.contains("no hot key was restored")),
+            "{notes:?}"
+        );
+        assert!(second.keys.iter().all(|key| key.fragment != "key-2"), "the paper's hot key is stale");
+        assert_eq!(second.keys.len(), 2, "the two fixed-name keys are still the paper's");
     }
 
     // —— 一句话的其余部分 ——————————————————————————————————
