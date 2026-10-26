@@ -20,7 +20,7 @@ def load(name, filename):
     return module
 
 
-device = load('tpm_device', ACCEPTANCE / 'tpm-device.py')
+device = load('tpm_device', HERE.parent / 'tpm-device.py')
 harness = load('tpm_acceptance', ACCEPTANCE / 'tpm-acceptance.py')
 
 DEVICE_REPORT = {

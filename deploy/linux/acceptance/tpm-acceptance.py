@@ -53,14 +53,15 @@ PENDING = [
 ]
 
 
-def load(name, filename):
-    spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(filename))
+def load(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
-DEVICE = load('tpm_device', 'tpm-device.py')
+# The device policy lives beside install.py, which is the other loader of it.
+DEVICE = load('tpm_device', Path(__file__).resolve().parents[1] / 'tpm-device.py')
 
 
 class AcceptanceError(Exception):
