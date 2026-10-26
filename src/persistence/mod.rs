@@ -25,7 +25,7 @@ use crate::principal::Principal;
 use crate::security::config::ServiceConfig;
 use clock::Time;
 
-const SCHEMA: i64 = 3;
+const SCHEMA: i64 = 4;
 const APPLICATION: i64 = 0x414e504b;
 const GENESIS: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
@@ -315,6 +315,19 @@ impl Database {
             append(
                 &tx,
                 &json!({"event":"SCHEMA_MIGRATED","from":2,"to":3,"at":now.wall}),
+            )?;
+            tx.commit().map_err(db_error)?;
+        }
+        if version < 4 {
+            let tx = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(db_error)?;
+            tx.execute_batch(include_str!("migration-v4.sql"))
+                .map_err(db_error)?;
+            append(
+                &tx,
+                &json!({"event":"SCHEMA_MIGRATED","from":3,"to":4,"at":now.wall}),
             )?;
             tx.commit().map_err(db_error)?;
         }

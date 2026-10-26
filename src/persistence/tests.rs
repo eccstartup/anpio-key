@@ -259,7 +259,7 @@ fn recovery_preserves_consumption_and_marks_incomplete_requests_unknown() {
     f.db.connection.execute_batch("INSERT INTO vaults VALUES('vault','vaults/vault','active'); INSERT INTO keys VALUES('key','vault','did','did#hot','hot','digest','active',0,0,''); INSERT INTO policies VALUES('policy',1,'{}','digest');").unwrap();
     f.db.connection
         .execute(
-            "INSERT INTO grants VALUES('grant',?1,'key','policy',1,1,9999,2,1,'active')",
+            "INSERT INTO grants VALUES('grant',?1,'key','policy',1,1,9999,'request',0,2,1,0,0,'active')",
             [principal],
         )
         .unwrap();
@@ -576,10 +576,44 @@ fn legacy_commands_reject_managed_vault_even_through_symlink() {
     std::fs::remove_file(alias).unwrap();
 }
 
+/// 把 schema-4 的库回退成 `version` 的样子,好让迁移链整段重跑。
+///
+/// `grants` 只能重建不能 DROP COLUMN:交叉列的 CHECK 让 SQLite 拒绝删列。
+fn rewind_schema(c: &Connection, version: i64) {
+    c.execute_batch(&format!(
+        "PRAGMA foreign_keys=OFF;
+         DROP TABLE IF EXISTS grant_operations;
+         CREATE TABLE grants_old (
+          grant_id TEXT PRIMARY KEY, principal_id TEXT NOT NULL REFERENCES principals(principal_id),
+          key_id TEXT NOT NULL REFERENCES keys(key_id), policy_id TEXT NOT NULL, policy_version INTEGER NOT NULL,
+          boot_epoch INTEGER NOT NULL CHECK(boot_epoch>=0), expiry INTEGER NOT NULL,
+          max_uses INTEGER NOT NULL CHECK(max_uses>0), used_uses INTEGER NOT NULL CHECK(used_uses>=0 AND used_uses<=max_uses),
+          state TEXT NOT NULL CHECK(state IN ('active','revoked','revoked_restart','exhausted','expired')),
+          FOREIGN KEY(policy_id,policy_version) REFERENCES policies(policy_id,version)
+         ) STRICT;
+         INSERT INTO grants_old SELECT grant_id,principal_id,key_id,policy_id,policy_version,boot_epoch,expiry,max_uses,used_uses,state FROM grants;
+         DROP TABLE grants;
+         ALTER TABLE grants_old RENAME TO grants;
+         ALTER TABLE service_meta RENAME TO meta_old;
+         CREATE TABLE service_meta(singleton INTEGER PRIMARY KEY CHECK(singleton=1),schema_version INTEGER NOT NULL CHECK(schema_version={version}),instance_id TEXT NOT NULL,boot_epoch INTEGER NOT NULL,mutation_epoch INTEGER NOT NULL) STRICT;
+         INSERT INTO service_meta SELECT singleton,{version},instance_id,boot_epoch,mutation_epoch FROM meta_old;
+         DROP TABLE meta_old;
+         PRAGMA foreign_keys=ON;
+         PRAGMA user_version={version};"
+    ))
+    .unwrap();
+}
+
 #[test]
 fn v1_migration_is_transactional_and_bound_to_instance_and_audit() {
     let mut f = Fixture::new();
-    f.db.connection.execute_batch("DROP TABLE grant_deadlines; DROP TABLE file_operations; ALTER TABLE keys DROP COLUMN document_digest; ALTER TABLE service_meta RENAME TO meta_old; CREATE TABLE service_meta(singleton INTEGER PRIMARY KEY CHECK(singleton=1),schema_version INTEGER NOT NULL CHECK(schema_version=1),instance_id TEXT NOT NULL,boot_epoch INTEGER NOT NULL,mutation_epoch INTEGER NOT NULL) STRICT; INSERT INTO service_meta SELECT singleton,1,instance_id,boot_epoch,mutation_epoch FROM meta_old; DROP TABLE meta_old; PRAGMA user_version=1;").unwrap();
+    rewind_schema(&f.db.connection, 1);
+    f.db.connection
+        .execute_batch(
+            "DROP TABLE grant_deadlines; DROP TABLE file_operations;
+             ALTER TABLE keys DROP COLUMN document_digest;",
+        )
+        .unwrap();
     let mut foreign = f.config.clone();
     foreign.instance_id = uuid();
     assert!(f.db.recovery(&foreign, now()).is_err());
@@ -603,7 +637,7 @@ fn v1_migration_is_transactional_and_bound_to_instance_and_audit() {
         f.db.connection
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-    assert_eq!(version, 3);
+    assert_eq!(version, 4);
     verify_audit(&f.db.connection).unwrap();
 }
 
@@ -1327,7 +1361,10 @@ fn prepared_grant_cannot_extend_deadline_at_commit_or_bypass_exhaustion() {
 fn v2_to_v3_migration_is_atomic_and_invalidates_old_grants() {
     let (mut f, key, policy) = grant_fixture();
     let g = new_grant(&mut f, &key, &policy);
-    f.db.connection.execute_batch("DROP TABLE grant_deadlines; ALTER TABLE service_meta RENAME TO meta_old; CREATE TABLE service_meta(singleton INTEGER PRIMARY KEY CHECK(singleton=1),schema_version INTEGER NOT NULL CHECK(schema_version=2),instance_id TEXT NOT NULL,boot_epoch INTEGER NOT NULL,mutation_epoch INTEGER NOT NULL) STRICT; INSERT INTO service_meta SELECT singleton,2,instance_id,boot_epoch,mutation_epoch FROM meta_old; DROP TABLE meta_old; PRAGMA user_version=2;").unwrap();
+    rewind_schema(&f.db.connection, 2);
+    f.db.connection
+        .execute_batch("DROP TABLE grant_deadlines;")
+        .unwrap();
     f.db.connection.execute_batch("CREATE TRIGGER fail_migration BEFORE INSERT ON audit_events WHEN CAST(NEW.event_data AS TEXT) LIKE '%SCHEMA_MIGRATED%' BEGIN SELECT RAISE(ABORT,'fail'); END;").unwrap();
     assert!(f.db.recovery(&f.config, now()).is_err());
     assert_eq!(
@@ -1347,6 +1384,198 @@ fn v2_to_v3_migration_is_atomic_and_invalidates_old_grants() {
         "revoked_restart"
     );
     verify_audit(&f.db.connection).unwrap();
+}
+
+fn origin_policy(f: &mut Fixture, max_renewals: u32) -> String {
+    let id = uuid();
+    apply_change(
+        f,
+        catalog::CatalogChange::PublishPolicy {
+            policy_id: id.clone(),
+            version: 1,
+            content: json!({"schema_version":2,"name":"im-origin","purpose":"origin-proof",
+              "limits":{"max_duration_seconds":900,"max_uses":100000,"max_lifetime_seconds":86400,"max_renewals":max_renewals},
+              "content":{"methods":["direct.send"],"target_kinds":["agent"],"body":{"mode":"bounded","max_bytes":8192}}}),
+        },
+    );
+    id
+}
+
+fn origin_proof() -> crate::security::origin::OriginProof {
+    crate::security::origin::OriginProofRequest {
+        method: "direct.send".into(),
+        meta: json!({"profile":"anp.direct.base.v1","target":{"kind":"agent","did":"did:wba:example.com:alice"}}),
+        body: json!({"text":"hi"}),
+        expires: Some(1_100),
+        nonce: Some("n-1".into()),
+    }
+    .validate(1_000)
+    .unwrap()
+}
+
+fn new_session(f: &mut Fixture, key: &str, policy: &str, expiry: i64) -> grants::Grant {
+    let principal = f.config.principals[0].principal_id.clone();
+    let p = f
+        .db
+        .prepare(
+            1002,
+            Change::Grant {
+                change: grants::GrantChange::CreateSession {
+                    principal_id: principal.clone(),
+                    key_id: key.into(),
+                    policy_id: policy.into(),
+                    policy_version: 1,
+                    expiry,
+                    max_uses: 10_000,
+                },
+            },
+            now(),
+        )
+        .unwrap();
+    let id = p.effect["effect"]["grant"]["grant_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.db.commit(1002, &p.operation_id, &p.digest, now())
+        .unwrap();
+    f.db.grant_status(&principal, &id, now()).unwrap()
+}
+
+#[test]
+fn session_grants_carry_their_operation_and_authorize_only_that_purpose() {
+    let (mut f, key, _) = grant_fixture();
+    let policy = origin_policy(&mut f, 16);
+    let g = new_session(&mut f, &key, &policy, 1_900);
+    assert_eq!(g.kind, "session");
+    assert_eq!(g.max_renewals, 16);
+    assert_eq!(g.created_at, 1_000);
+    let operations: Vec<String> = {
+        let mut s = f
+            .db
+            .connection
+            .prepare("SELECT operation FROM grant_operations WHERE grant_id=?1")
+            .unwrap();
+        s.query_map([&g.grant_id], |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap()
+    };
+    assert_eq!(operations, ["SIGN_ORIGIN_PROOF"]);
+    let (_, selected) = f
+        .db
+        .authorize_origin(&g.principal_id, &g.grant_id, &origin_proof(), now())
+        .unwrap();
+    assert_eq!(selected.key_id, key);
+    // 同一个 grant 不能拿来签 HTTP:操作集里只有它被建出来的那一个。
+    assert!(f
+        .db
+        .authorize_http(&g.principal_id, &g.grant_id, &canonical(), now())
+        .is_err());
+    verify_audit(&f.db.connection).unwrap();
+}
+
+#[test]
+fn session_renewal_extends_to_the_nearest_ceiling_and_is_audited() {
+    let (mut f, key, _) = grant_fixture();
+    let policy = origin_policy(&mut f, 16);
+    let g = new_session(&mut f, &key, &policy, 1_900);
+    let later = Time {
+        wall: 1_500,
+        monotonic_ms: 500_000,
+    };
+    // 请求 10000,实际给到 now+900。
+    let renewed = f
+        .db
+        .renew_grant(&g.principal_id, &g.grant_id, 10_000, later)
+        .unwrap();
+    assert_eq!((renewed.expiry, renewed.renewals), (2_400, 1));
+    // 不能原地踏步,也不能把到期日往下压。
+    assert!(matches!(
+        f.db.renew_grant(&g.principal_id, &g.grant_id, 2_400, later),
+        Err(KeydError::Misuse(c)) if c == "GRANT_INVALID"
+    ));
+    let renewed: i64 = f
+        .db
+        .connection
+        .query_row(
+            "SELECT monotonic_deadline FROM grant_deadlines WHERE grant_id=?1",
+            [&g.grant_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(renewed, 500_000 + 900_000);
+    let events: Vec<String> = {
+        let mut s = f
+            .db
+            .connection
+            .prepare("SELECT json_extract(CAST(event_data AS TEXT),'$.event') FROM audit_events")
+            .unwrap();
+        s.query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap()
+    };
+    assert!(events.iter().any(|e| e == "GRANT_CREATED"));
+    assert!(events.iter().any(|e| e == "GRANT_RENEWED"));
+    verify_audit(&f.db.connection).unwrap();
+}
+
+#[test]
+fn renewal_stops_at_the_absolute_lifetime_and_at_the_renewal_budget() {
+    let (mut f, key, _) = grant_fixture();
+    let policy = origin_policy(&mut f, 1);
+    let g = new_session(&mut f, &key, &policy, 1_900);
+    // 只给一次续期预算。
+    let once = Time {
+        wall: 1_500,
+        monotonic_ms: 500_000,
+    };
+    assert!(f
+        .db
+        .renew_grant(&g.principal_id, &g.grant_id, 2_400, once)
+        .is_ok());
+    let again = Time {
+        wall: 2_000,
+        monotonic_ms: 900_000,
+    };
+    assert!(matches!(
+        f.db.renew_grant(&g.principal_id, &g.grant_id, 3_000, again),
+        Err(KeydError::Misuse(c)) if c == "GRANT_RENEWALS_EXHAUSTED"
+    ));
+    // 绝对寿命天花板:created_at+86400,不会被 now+900 顶上去。
+    f.db.connection
+        .execute(
+            "UPDATE grants SET expiry=87000,renewals=0 WHERE grant_id=?1",
+            [&g.grant_id],
+        )
+        .unwrap();
+    f.db.connection
+        .execute(
+            "UPDATE grant_deadlines SET monotonic_deadline=87400000 WHERE grant_id=?1",
+            [&g.grant_id],
+        )
+        .unwrap();
+    let near_end = Time {
+        wall: 86_900,
+        monotonic_ms: 86_900_000,
+    };
+    let renewed = f
+        .db
+        .renew_grant(&g.principal_id, &g.grant_id, 200_000, near_end)
+        .unwrap();
+    assert_eq!(renewed.expiry, 87_400);
+    verify_audit(&f.db.connection).unwrap();
+}
+
+#[test]
+fn a_one_shot_grant_cannot_be_renewed() {
+    let (mut f, key, policy) = grant_fixture();
+    let g = new_grant(&mut f, &key, &policy);
+    assert_eq!(g.kind, "request");
+    assert!(matches!(
+        f.db.renew_grant(&g.principal_id, &g.grant_id, 5_000, now()),
+        Err(KeydError::Misuse(c)) if c == "GRANT_INVALID"
+    ));
 }
 
 #[test]

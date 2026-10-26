@@ -1,5 +1,5 @@
 CREATE TABLE service_meta (
- singleton INTEGER PRIMARY KEY CHECK(singleton=1), schema_version INTEGER NOT NULL CHECK(schema_version=3),
+ singleton INTEGER PRIMARY KEY CHECK(singleton=1), schema_version INTEGER NOT NULL CHECK(schema_version=4),
  instance_id TEXT NOT NULL, boot_epoch INTEGER NOT NULL CHECK(boot_epoch>=0),
  mutation_epoch INTEGER NOT NULL CHECK(mutation_epoch>=0)
 ) STRICT;
@@ -26,10 +26,14 @@ CREATE TABLE grants (
  grant_id TEXT PRIMARY KEY, principal_id TEXT NOT NULL REFERENCES principals(principal_id),
  key_id TEXT NOT NULL REFERENCES keys(key_id), policy_id TEXT NOT NULL, policy_version INTEGER NOT NULL,
  boot_epoch INTEGER NOT NULL CHECK(boot_epoch>=0), expiry INTEGER NOT NULL,
+ kind TEXT NOT NULL CHECK(kind IN ('request','session')),
+ created_at INTEGER NOT NULL CHECK(created_at>=0),
  max_uses INTEGER NOT NULL CHECK(max_uses>0), used_uses INTEGER NOT NULL CHECK(used_uses>=0 AND used_uses<=max_uses),
+ max_renewals INTEGER NOT NULL CHECK(max_renewals>=0), renewals INTEGER NOT NULL CHECK(renewals>=0 AND renewals<=max_renewals),
  state TEXT NOT NULL CHECK(state IN ('active','revoked','revoked_restart','exhausted','expired')),
  FOREIGN KEY(policy_id,policy_version) REFERENCES policies(policy_id,version)
 ) STRICT;
+CREATE TABLE grant_operations (grant_id TEXT NOT NULL REFERENCES grants(grant_id), operation TEXT NOT NULL, PRIMARY KEY(grant_id,operation)) STRICT;
 CREATE TABLE requests (
  principal_id TEXT NOT NULL REFERENCES principals(principal_id), request_id TEXT NOT NULL,
  grant_id TEXT NOT NULL REFERENCES grants(grant_id), input_digest TEXT NOT NULL,

@@ -8,6 +8,7 @@ pub mod json;
 pub mod limits;
 pub mod management_ui;
 pub mod migration;
+pub mod origin;
 pub mod paths;
 pub mod protocol;
 pub(crate) mod se_session;
