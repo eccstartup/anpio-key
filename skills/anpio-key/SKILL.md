@@ -79,3 +79,5 @@ macOS 使用同一条命令安装本机预览，始终 `protected_supported=fals
 - 离线迁移使用 `deploy/linux/migrate-vault.py` 的 dry-run 和恢复验证，要求 root 控制的冻结源与恢复目录。Agent 不执行维护操作。
 
 旧 `serve`、`sign` 和未带 `--config` 的 MCP 仅用于明确选择的开发模式；不自动回退 v1。软件整套目录加口令可以解封；硬件保护的是解封材料，签名仍在普通进程内存中执行。
+
+要把一个**自己拿着私钥签名**的工具改成通过本服务签名，用 `anpio-key-integration` 技能：那里是语言无关的接入规约（能力协商、grant 生命周期、六个操作的映射、编码一致性、拒绝形态、验收清单）。
