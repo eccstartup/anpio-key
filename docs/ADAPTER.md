@@ -295,6 +295,32 @@ CLI 读取管理口令，daemon 单次、短期、精确绑定地完成根签名
 
 重启后所有旧 grant 失效、密钥锁定、未决批准失效。Agent 应暂停工作，等待管理员重新解锁及建权；不能从本地文件恢复旧 active 标记。备份恢复还需验证真实认证、旧权限失效和公开文档状态，文件解密成功只是其中一步。
 
+### 7.4 设备入组与撤销
+
+一台设备在文档里是**两把**钥匙：`{device}-sign`（挂在 `authentication` 与 `assertionMethod` 下）和 `{device}-agreement`（只挂 `keyAgreement`）。入组和撤销都改这一对：只撤签名键，旧设备仍然能谈会话密钥，而会话密钥能读的东西比签名多。
+
+入组是四步，顺序不能换：
+
+1. **铸**（不公布）。`{"kind":"IssueDeviceKeys","root_key_id":"ROOT_KEY_UUID"}`，用 complete-secret-operation 带根的口令完成。返回：
+
+   ```json
+   {"keys":[{"kid":"DID#device-sign","algorithm":"ed25519","public_multibase":"z6Mk…"},
+            {"kid":"DID#device-agreement","algorithm":"x25519","public_multibase":"z6LS…"}],
+    "next":"reissue_document"}
+   ```
+
+   两把信封用**这一次**的口令封装，第二因素仍是本机 `device.secret`。先解开根、再铸两把、最后一起落盘：口令错或硬件根不可用时一个信封都不留，不会出现"签名键进去了、协商键没有"的半套设备。名字在 prepare 时就定下（基名，其次 `-2`、`-3`……取文档与本机信封里都没用过的最小那个），完成时要求逐字相同 —— 管理员批准的是"铸 `device-sign-2` 这一对"，不是"铸某个空闲名字"。daemon 不接受调用方交进来的私钥：交进来的那一份已经过客户端的手。
+
+2. **公布**。`{"kind":"ReissueDocument","root_key_id":"ROOT_KEY_UUID","add":[{"kid":"DID#device-sign","relationships":["authentication","assertionMethod"]},{"kid":"DID#device-agreement","relationships":["keyAgreement"]}]}`，同样带根口令完成。无签名文档由 daemon 拼，根在**带凭据的那一步**才签；批准之后文档被别人动过（哪怕语义等价）就拒绝签字。关系名只有这三个，与角色那张表逐项相等，否则 `ADMIN_OPERATION_INVALID`。根由 DID 路径段绑定，既不能 `add` 也不能 `remove`。完成时文件投影立刻写入本机 `did.json`。
+
+3. **登记**。`{"kind":"Catalog","change":{"action":"EnrollVault","vault_id":"VAULT_UUID"}}`，它按本机信封重扫一遍，新信封在这里成为 catalog 行（已有 kid 的 `key_id` 与 `generation` 保留、自增）。必须排在公布之后：它核对的是文档里的方法。
+
+4. **确认角色**。签名键 `{"action":"ConfirmRole","key_id":"…","role":"device_signing","purpose":"device_assertion"}`，协商键 `{"action":"ConfirmRole","key_id":"…","role":"key_agreement"}`。
+
+撤销一台设备只有一步：拿它的两个 kid 走 `ReissueDocument` 的 `remove`。投影完成时两把都变成 `retired`，会话协商随之失效。信封不删 —— 删文件不可逆，摘引用可逆。
+
+`IssueDeviceKeys` 铸的是随机种子，**不在助记词里**：换台机器用那 24 个词恢复出来的是纸上原先那四把（§11.6），不是后铸的这一对；后铸的只能靠归档带走。
+
 ## 8. 失败和重试处理
 
 服务端错误、CLI 失败和网络错误是不同层。Rust client 将非 OK code 返回为错误；当前 Node 包装器的 CLI 失败可能表现为子进程异常，不能保证错误对象含独立稳定 code。生产集成应保留原 request_id，并用状态查询判断已发生的事，避免仅凭错误文案分类。
@@ -353,9 +379,9 @@ anpio-key mcp --config /etc/anpio-key/service.json
 
 新增对端、SDK 版本、平台或策略形态时重新验证相应路径，不能沿用历史记录扩大支持范围。
 
-## 11. 强对接契约（P1–P3 已实现，P4–P5 规划中）
+## 11. 强对接契约（P1–P4 的管理平面已实现，P5 规划中）
 
-本节冻结与 awiki-cli-rs2、anpio-cli 强对接的接口形状。**P1 已实现**：`SIGN_ORIGIN_PROOF`、`RENEW_GRANT`、session grant、策略 v2、能力协商；**P2 已实现**：`device_signing` 角色与 `SIGN_PURPOSE`（每用途一个开关）；**P3 已实现**：X25519 `key_agreement` 角色、`ECDH`（默认关）、`add-agreement-key`。P4–P5 的部分仍只有形状。每阶段结束更新本节的状态列和 §1 的兼容表。已冻结的名字、字节和版本号不再改；新增能力只能追加新名字。
+本节冻结与 awiki-cli-rs2、anpio-cli 强对接的接口形状。**P1 已实现**：`SIGN_ORIGIN_PROOF`、`RENEW_GRANT`、session grant、策略 v2、能力协商；**P2 已实现**：`device_signing` 角色与 `SIGN_PURPOSE`（每用途一个开关）；**P3 已实现**：X25519 `key_agreement` 角色、`ECDH`（默认关）、`add-agreement-key`；**P4 已实现**：一个助记词恢复四类密钥、`keygen` 一次性显示 24 词、管理平面的 `ReissueDocument` 与 `IssueDeviceKeys`（§7.4），§11.8 末尾是客户端侧还差的部分。P5 的部分仍只有形状。每阶段结束更新本节的状态列和 §1 的兼容表。已冻结的名字、字节和版本号不再改；新增能力只能追加新名字。
 
 ### 11.1 三层接口
 
@@ -438,7 +464,7 @@ catalog 角色追加 `device_signing`、`key_agreement`（现有五个不变）�
 
 `key_agreement` 同理：这把键必须是 X25519、`purpose` 留空、只挂在文档的 `keyAgreement` 下。曲线在注册和授权两处各判一次——一把 Ed25519 信封配一把 X25519 文档方法（或反过来）在角色判断之前就被拒，所以"挂错关系"和"换条曲线冒充"都到不了签名路径。X25519 键的 thumbprint 是 `x1_` 前缀（RFC 7638，本地算，上游 `compute_multikey_fingerprint` 只认 Ed25519），信封文件名随之也是 `x1_…json`。
 
-`add-agreement-key` 是数据面之外的管理命令（和 `add-recovery-key` 同一条脊柱）：它只造 X25519、只写 `keyAgreement`、重签文档。名字默认 `device-agreement`，再加法顺序是 `device-agreement-2`、`-3`……不复用编号。
+`add-agreement-key` 是数据面之外的管理命令（和 `add-recovery-key` 同一条脊柱）：它只造 X25519、只写 `keyAgreement`、当场重签文档。名字规则与 `IssueDeviceKeys` 相同：基名（`device-agreement` / `device-sign`），其次 `-2`、`-3`……取文档与本机信封里都没用过的最小那个，不复用编号。区别在公布方式：前者当场签文档，后者只铸信封，进文档要走 `ReissueDocument`（§7.4）。
 
 策略 v2（P1 起）：
 
@@ -492,3 +518,5 @@ catalog 角色追加 `device_signing`、`key_agreement`（现有五个不变）�
 ### 11.8 客户端对接要求
 
 awiki-cli-rs2 的适配器不在本仓库，但要满足：用 async `IdentityCustody` 那条接缝，不走 `ProviderIdentitySigner`（它对 `sign`/`sign_root`/`ecdh` 一律 `PermissionDenied`）；每条消息的 origin proof、每个 KeyPackage 的设备断言、每个 secure-direct 会话的 ECDH 各对应 §11.3 一个操作。`anpio-cli` 的 `custody.rs` 从子进程 `document`/`sign` 扩到同一批操作，参数保持管理员固定、不接受调用方覆盖 config/socket/did/kid。
+
+P4 的验收还有客户端那一半没做：这两份适配器都要把本地私钥交进 daemon（走 §7.4 的入组或 `import-mnemonic`），改完之后客户端目录里不再有任何私钥文件，而登录、发消息、建会话三条路都仍然正常。这一步要在各自仓库里跑，`anpio-key` 这边能提供的只是 §11.3 的数据面操作与 §7.4 的管理变更。

@@ -27,7 +27,8 @@
 - [x] 强对接 P3（daemon 侧）：X25519 密钥（`0x03`，multikey 头 `0xec01`，thumbprint `x1_`）、`keyAgreement` 文档支持与 `key_agreement` 角色（曲线在注册和授权两处各判一次，错曲线/错关系在角色判断前就被拒）、`ECDH` 操作（`features.ecdh` 默认关，启动落一条 `ECDH_ENABLED`）、策略 `ecdh` purpose 的 peer 白名单（逐字节、无通配）、`add-agreement-key` 管理命令。共享密钥**不落库**：`requests.result` 恒为 NULL，重放得到 `completed`+空结果（客户端翻成 `OUTCOME_UNKNOWN`）；审计只记 `peer_fingerprint`/`peer_multibase`/grant。低阶 peer → `ECDH_PEER_INVALID`。RFC 7748 §6.1 向量逐字节过。
 - [ ] 强对接 P3 收尾：在 Docker/Linux 上用真守护进程跑 secure-direct 建会话全链路（socket 往返、共享密钥与 RFC 7748 向量一致、重放拿不到第二次、peer 不在白名单被拒），并让 awiki-cli-rs2 的 secure-direct 改走 `ECDH`，客户端不再持 `{device}-agreement`。
 - [x] 强对接 P4（助记词与自建）：`import-mnemonic` 用一个 24 词助记词恢复四类键（`bip39-entropy-v2`，`key-1` 字节与 v1 相同）；本机没有该 DID 的文档时按四把重建并自签；本机已有文档时以文档为准，热密钥的名字按公钥找回、轮换过的不恢复并明说。`keygen` 铸任何东西**之前**把 24 词当场显示一次（只写 tty），答"没抄"则一个字节不写。发布构建断言无导出路径：`tests/cli.rs` 跑真二进制，`export-seed` 是不认识的子命令、`--help` 上也没有。验收里可自测的那半已过：集成测试在两套独立布局上跑通"换台机器只用助记词完整恢复"，四把公钥逐个相同、文档四把。
-- [ ] 强对接 P4 收尾（管理平面）：`AdminRequest` 上导入既有四类密钥材料、签发新设备密钥、重发 DID 文档、撤销旧设备。验收的另一半留在这一条：客户端目录里不再有任何私钥，登录、发消息、建会话三条路都正常。
+- [x] 强对接 P4（管理平面）：`ReissueDocument` 收 `add`/`remove` 两个公开输入，daemon 自己拼无签名文档、根在**带凭据的完成步**才签；完成时重算并要求与批准时逐字节相同，批准之后文档被别人动过（哪怕语义等价）就拒签；根由 DID 路径段绑定，既不能 add 也不能 remove；`keyAgreement` 现在也能撤，撤销一台设备时签名键与协商键一起退休（此前会话协商能在撤销后继续）。`IssueDeviceKeys` 铸 `device-sign` + `device-agreement` 一对信封但不公布：名字在 prepare 时定下、完成时逐字核对，先解根再铸、两把都算完才落盘，口令错或硬件根不可用不留半套。**不接受调用方交进来的私钥** —— 已有身份走本机 `import-mnemonic`/`import-archive`，socket 上没有、也不打算有导入路径。入组四步与撤销见 `docs/ADAPTER.md` §7.4。
+- [ ] 强对接 P4 收尾（客户端侧）：awiki-cli-rs2 与 anpio-cli 把本地私钥交出去（按 `docs/ADAPTER.md` §7.4 入组，或在本机 `import-mnemonic`），验收是客户端目录里不再有任何私钥文件，而登录、发消息、建会话三条路都正常。这一步在各自仓库跑，`anpio-key` 这边只提供数据面操作与管理变更。
 - [ ] 强对接 P5：`SIGN_OBJECT_PROOF`、`SIGN_DOCUMENT_PROOF` 与管理平面的根操作（在场/租约）。验收：换设备、轮换根密钥不需要把 root 私钥交给客户端。
 
 已实现：独立管理通道与服务 UID 认证、主体/角色/策略、exact-key grant、期限与撤销、事务签名、去重、结果恢复、资源限制、旧审计关联、离线迁移与恢复校验、管理注册 proof、预配置热密钥轮换、发行特性检查。

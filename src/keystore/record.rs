@@ -24,7 +24,8 @@ pub enum KeyAlgorithm {
     Ed25519,
     P256,
     /// 只为把线上编号定死而存在:`0x03` 一旦被别的算法占了,协商键
-    /// 就再也进不来。这个构建**不造**这种钥匙(见 `docs/ADAPTER.md` §11.5)。
+    /// 就再也进不来。造它的是 `add-agreement-key` 与 `IssueDeviceKeys`
+    /// (见 `docs/ADAPTER.md` §11.5)。
     X25519,
 }
 
