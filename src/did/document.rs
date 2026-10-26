@@ -19,6 +19,12 @@ use crate::sign::{LockedSigningKey, Signer};
 // 钥匙保管往前走 —— 见那个模块的头。
 pub use crate::did::spec::{DidDocumentSpec, SpecFile, ROOT_FRAGMENT};
 
+/// 设备签名密钥的名字。第一把用这个名字,不编号 —— 上游按 kid 找它。
+pub const DEVICE_SIGN_FRAGMENT: &str = "device-sign";
+/// 协商密钥的名字(第一把;再多是 `device-agreement-2`、`-3`,见
+/// [`crate::ops::keys`])。
+pub const DEVICE_AGREEMENT_FRAGMENT: &str = "device-agreement";
+
 /// 文档里**除根密钥之外**的一把验证方法。
 ///
 /// 上游的 `SuppliedDidKey` 里有一个 `role` 字段,但**它不会写进文档** ——

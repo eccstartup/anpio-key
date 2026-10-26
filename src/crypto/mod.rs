@@ -1,6 +1,7 @@
 //! 密码学原语。这一层不做策略判断,只做正确的运算。
 
 pub mod aead;
+pub mod derive;
 pub mod hygiene;
 pub mod kdf;
 pub mod mnemonic;

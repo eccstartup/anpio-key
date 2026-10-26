@@ -29,6 +29,21 @@ pub struct Created {
     pub verification_method: String,
 }
 
+/// 一个助记词铸出来的整套身份:四把钥匙、同一份文档。
+///
+/// 四把的 seed **全部由同一个根 seed 推出**(`key-1` 是它本身,另外三把各走
+/// 一条 HKDF 域串,见 [`crate::crypto::derive`])。所以纸丢了就是全套丢了,
+/// 纸还在就是全套都在 —— 这是助记词能称作"备份"的唯一理由。
+///
+/// `extras` 和 `document_keys` 一一对应且同序:前者是落盘的信封,后者是要
+/// 挂进 DID 文档的验证方法。
+pub struct Identity {
+    pub did: String,
+    pub root: WrappedKey,
+    pub extras: Vec<WrappedKey>,
+    pub document_keys: Vec<ExtraKey>,
+}
+
 /// 只生成,不碰磁盘。
 ///
 /// `hardware` 在这里才用得上,而不是由调用方先跑:硬件根的定位符**就是这把
@@ -47,7 +62,24 @@ pub fn generate(
 ) -> Result<Created> {
     // seed 从生到封一直待在锁定区里,中途不出现裸副本。
     let seed = LockedBytes::generate()?;
-    let (verifying, public_multibase) = wrap::seed_to_public(&seed);
+    generate_from_seed(spec, label, passphrase, device_secret, argon, hardware, &seed)
+}
+
+/// 同上,但 seed 由调用方给 —— 助记词恢复和"一个助记词四把钥匙"走这条。
+///
+/// 和 [`generate`] 只差 seed 从哪来,其余每一步必须**逐字相同**:两种来源
+/// 落下的信封只有 seed 不同,封装参数、AAD、硬件绑定全是一套代码。
+pub fn generate_from_seed(
+    spec: &DidDocumentSpec,
+    label: &str,
+    passphrase: &[u8],
+    device_secret: &LockedBytes,
+    argon: Argon2Config,
+    hardware: HardwareChoice,
+    seed: &LockedBytes,
+) -> Result<Created> {
+    let (verifying, public_multibase) = wrap::seed_to_public(seed);
+
     let thumbprint = e1_segment(&verifying)?;
 
     // DID 由坐标 + 公钥合成 —— `e1_` 段就是我们刚算出的那个指纹,所以
@@ -69,7 +101,7 @@ pub fn generate(
         label: label.to_string(),
         passphrase,
         device_secret,
-        seed: &seed,
+        seed,
         argon,
         hardware,
     })?;
@@ -128,7 +160,33 @@ pub fn generate_extra(
     hardware: HardwareChoice,
 ) -> Result<(WrappedKey, ExtraKey)> {
     let seed = LockedBytes::generate()?;
-    let (verifying, public_multibase) = wrap::seed_to_public(&seed);
+    generate_extra_from_seed(
+        did,
+        fragment,
+        relationships,
+        label,
+        passphrase,
+        device_secret,
+        argon,
+        hardware,
+        &seed,
+    )
+}
+
+/// 同上,但 seed 由调用方给 —— 助记词恢复时热密钥和设备签名密钥走这条。
+#[allow(clippy::too_many_arguments)]
+pub fn generate_extra_from_seed(
+    did: &str,
+    fragment: &str,
+    relationships: Vec<anp::authentication::DidVerificationRelationship>,
+    label: &str,
+    passphrase: &[u8],
+    device_secret: &LockedBytes,
+    argon: Argon2Config,
+    hardware: HardwareChoice,
+    seed: &LockedBytes,
+) -> Result<(WrappedKey, ExtraKey)> {
+    let (verifying, public_multibase) = wrap::seed_to_public(seed);
     // 指纹算的是**这把**钥匙,不是 DID 最后一段。
     let thumbprint = e1_segment(&verifying)?;
 
@@ -145,7 +203,7 @@ pub fn generate_extra(
         label: label.to_string(),
         passphrase,
         device_secret,
-        seed: &seed,
+        seed,
         argon,
         hardware,
     })?;
@@ -202,7 +260,31 @@ pub fn generate_agreement(
     hardware: HardwareChoice,
 ) -> Result<(WrappedKey, ExtraKey)> {
     let seed = LockedBytes::generate()?;
-    let (public, public_multibase) = wrap::seed_to_x25519_public(&seed);
+    generate_agreement_from_seed(
+        did,
+        fragment,
+        label,
+        passphrase,
+        device_secret,
+        argon,
+        hardware,
+        &seed,
+    )
+}
+
+/// 同上,但 seed 由调用方给 —— 助记词恢复时协商密钥走这条。
+#[allow(clippy::too_many_arguments)] // 见 `generate_extra` 上面那一段
+pub fn generate_agreement_from_seed(
+    did: &str,
+    fragment: &str,
+    label: &str,
+    passphrase: &[u8],
+    device_secret: &LockedBytes,
+    argon: Argon2Config,
+    hardware: HardwareChoice,
+    seed: &LockedBytes,
+) -> Result<(WrappedKey, ExtraKey)> {
+    let (public, public_multibase) = wrap::seed_to_x25519_public(seed);
     let thumbprint = crate::crypto::thumbprint::x1_segment(&x25519_dalek::PublicKey::from(public));
 
     let hardware = hardware::seal_new(hardware, &thumbprint)?;
@@ -218,7 +300,7 @@ pub fn generate_agreement(
         label: label.to_string(),
         passphrase,
         device_secret,
-        seed: &seed,
+        seed,
         argon,
         hardware,
     })?;
@@ -259,11 +341,115 @@ pub fn create_agreement(
     Ok((wrapped, key))
 }
 
+/// 从一个助记词熵铸出**四把钥匙**的整套身份。
+///
+/// 四把的 seed 都从 `root_seed` 推:根就是它本身,热/设备签名/协商各走一条
+/// HKDF 域串(见 [`crate::crypto::derive`])。所以一张纸能把整套身份再铸一遍
+/// —— 这是 `keygen` 显示 24 个词的唯一理由,算法之外没有第二份备份。
+///
+/// # 先全算出来,再一起落盘
+///
+/// 四个信封在写第一个字节之前就全部造完。硬件根不可用这类失败因此**什么都
+/// 不留**,而不是留下"两把进去了、两把没有"的半套身份 —— 那种状态下 DID
+/// 文档要么缺键、要么指向不存在的键。
+///
+/// # 这里仍然不写文档
+///
+/// 和 [`create`] 一样:没有签名的文档写下去只会被误认为已发布。调用方拿到
+/// [`Identity::document_keys`] 之后自己构造并签名。
+pub fn create_identity(
+    layout: &KeydLayout,
+    spec: &DidDocumentSpec,
+    label: &str,
+    passphrase: &[u8],
+    argon: Argon2Config,
+    hardware: HardwareChoice,
+    root_seed: &LockedBytes,
+) -> Result<Identity> {
+    layout.ensure()?;
+    let device_secret = device::load_or_create(layout)?;
+
+    let root = generate_from_seed(
+        spec,
+        label,
+        passphrase,
+        &device_secret,
+        argon,
+        hardware,
+        root_seed,
+    )?;
+    let did = root.did.clone();
+
+    // 编号在"只有根"的那份文档上算 —— 新身份的文档里只有 `key-1`,
+    // 热密钥因此从 `key-2` 起。已经躺在 `keys/` 里的编号也要算进去:
+    // 摘掉一把钥匙不删信封,而重用一个退休过的编号会让两份内容不同的文档
+    // 顶同一个 `id`。
+    let (_, base) = crate::did::document::build_unsigned(spec, &root.wrapped.verifying_key()?)?;
+    let hot_fragment = crate::did::lifecycle::next_hot_fragment(
+        &base,
+        &did,
+        &store::envelope_fragments(layout, &did)?,
+    )?;
+
+    let (hot, hot_key) = generate_extra_from_seed(
+        &did,
+        &hot_fragment,
+        vec![anp::authentication::DidVerificationRelationship::Authentication],
+        "hot",
+        passphrase,
+        &device_secret,
+        argon,
+        hardware,
+        &crate::crypto::derive::hot(root_seed)?,
+    )?;
+
+    // 设备签名键要**两处都挂**:上游把同时出现在 `authentication` 与
+    // `assertionMethod` 读成 `DeviceSigning` 角色。只挂一处会落到热密钥或
+    // 恢复密钥的角色上,而那把钥匙就干不了设备断言。
+    let (device_sign, device_sign_key) = generate_extra_from_seed(
+        &did,
+        crate::did::document::DEVICE_SIGN_FRAGMENT,
+        vec![
+            anp::authentication::DidVerificationRelationship::Authentication,
+            anp::authentication::DidVerificationRelationship::AssertionMethod,
+        ],
+        "device-sign",
+        passphrase,
+        &device_secret,
+        argon,
+        hardware,
+        &crate::crypto::derive::device_sign(root_seed)?,
+    )?;
+
+    let (agreement, agreement_key) = generate_agreement_from_seed(
+        &did,
+        crate::did::document::DEVICE_AGREEMENT_FRAGMENT,
+        "device-agreement",
+        passphrase,
+        &device_secret,
+        argon,
+        hardware,
+        &crate::crypto::derive::device_agreement(root_seed)?,
+    )?;
+
+    store::save_new(layout, &root.wrapped)?;
+    store::save_new(layout, &hot)?;
+    store::save_new(layout, &device_sign)?;
+    store::save_new(layout, &agreement)?;
+
+    Ok(Identity {
+        did,
+        root: root.wrapped,
+        extras: vec![hot, device_sign, agreement],
+        document_keys: vec![hot_key, device_sign_key, agreement_key],
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::crypto::thumbprint::e1_from_did;
-    use crate::did::document::{build_unsigned, ROOT_FRAGMENT};
+    use crate::did::document::{build_unsigned, build_unsigned_with, ROOT_FRAGMENT};
     use crate::sign::Signer;
     use serde_json::Value;
 
@@ -314,6 +500,107 @@ mod tests {
         let b = generate(&spec(), "alice", b"pw", &device(), fast(), HardwareChoice::None).unwrap();
         assert_ne!(a.did, b.did, "each key must get its own DID");
         assert_ne!(a.wrapped.sk_ciphertext, b.wrapped.sk_ciphertext);
+    }
+
+    #[test]
+    fn create_identity_mints_four_keys_and_one_document() {
+        let dir = std::env::temp_dir().join(format!("keyd-identity-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let layout = KeydLayout::at(dir.clone());
+        let seed = LockedBytes::fill(|bytes| *bytes = [0x07; 32]).unwrap();
+        let identity = create_identity(
+            &layout,
+            &spec(),
+            "alice",
+            b"pw",
+            fast(),
+            HardwareChoice::None,
+            &seed,
+        )
+        .unwrap();
+
+        // 四个信封、四个指纹,全都解得开并且属于同一个 DID。
+        let mut thumbprints = std::collections::BTreeSet::new();
+        for wrapped in std::iter::once(&identity.root).chain(identity.extras.iter()) {
+            assert!(thumbprints.insert(wrapped.id.thumbprint.clone()), "two keys collided");
+            assert_eq!(wrapped.id.did, identity.did);
+            assert_eq!(
+                store::load(&layout, &wrapped.id.thumbprint).unwrap().id,
+                wrapped.id
+            );
+        }
+        assert_eq!(thumbprints.len(), 4);
+
+        // 编号:根 `key-1`(由 spec 定),热密钥从 `key-2` 起。
+        let fragments: Vec<&str> = identity
+            .document_keys
+            .iter()
+            .map(|key| key.fragment.as_str())
+            .collect();
+        assert_eq!(fragments, ["key-2", "device-sign", "device-agreement"]);
+
+        // 一份文档装得下四把,而且每把挂在它该在的关系下。
+        let root = identity.root.verifying_key().unwrap();
+        let (did, document) =
+            build_unsigned_with(&spec(), &root, identity.document_keys.clone()).unwrap();
+        assert_eq!(did, identity.did);
+        assert_eq!(document["verificationMethod"].as_array().unwrap().len(), 4);
+
+        let names = |relationship: &str| -> Vec<String> {
+            document[relationship]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|id| {
+                    id.as_str()
+                        .unwrap()
+                        .rsplit('#')
+                        .next()
+                        .unwrap()
+                        .to_string()
+                })
+                .collect()
+        };
+        assert_eq!(
+            names("authentication"),
+            ["key-1", "key-2", "device-sign"],
+            "the agreement key must not be able to authenticate"
+        );
+        assert_eq!(names("assertionMethod"), ["key-1", "device-sign"]);
+        assert_eq!(names("keyAgreement"), ["device-agreement"]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 同一张纸必须铸出同一套身份 —— 换台机器恢复时这是唯一的依据。
+    #[test]
+    fn the_same_seed_restores_the_same_four_keys() {
+        let mut public = Vec::new();
+        for name in ["a", "b"] {
+            let dir = std::env::temp_dir()
+                .join(format!("keyd-identity-same-{}-{name}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            let layout = KeydLayout::at(dir.clone());
+            let seed = LockedBytes::fill(|bytes| *bytes = [0x42; 32]).unwrap();
+
+            let identity = create_identity(
+                &layout,
+                &spec(),
+                "alice",
+                b"pw",
+                fast(),
+                HardwareChoice::None,
+                &seed,
+            )
+            .unwrap();
+            let mut keys = vec![identity.root.public_multibase.clone()];
+            keys.extend(identity.extras.iter().map(|key| key.public_multibase.clone()));
+            public.push((identity.did, keys));
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        // 信封里的密码学材料相同 —— 盐和 nonce 当然每次不同,那不影响身份。
+        assert_eq!(public[0], public[1]);
     }
 
     #[test]

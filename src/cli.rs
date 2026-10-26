@@ -100,8 +100,8 @@ fn help_template() -> String {
          \n\
          Identity and documents — in your own terminal:\n\
          \x20 spec                Write a document spec file (a template to edit).\n\
-         \x20 keygen              Generate a new did:wba key, write the envelope into `keys/`.\n\
-         \x20 publish             Build the document from the spec, self-sign a proof, write did.json.\n\
+         \x20 keygen              Mint an identity from 24 new words: four keys, and a signed did.json.\n\
+         \x20 publish             Rebuild the document from a spec, self-sign it, write did.json.\n\
          \x20 verify-doc          Check that a document really belongs to the DID it claims.\n\
          \x20 probe               Check whether this machine can keep the tool's promises.\n\
          \n\
@@ -1477,18 +1477,53 @@ fn keygen(root: Option<&Path>, args: KeygenArgs) -> Result<()> {
     let passphrase =
         tty::read_secret_twice(&tty, "New passphrase for this key: ", "Repeat it: ")?;
 
-    let created = crate::keystore::create::create(
+    // 一个助记词铸出整套身份,所以词必须在**铸之前**先让人抄下来。
+    //
+    // 顺序反过来(先铸、再显示词)的代价是:人一句"我没抄",磁盘上就已经
+    // 躺着一套**没有备份**的身份了 —— 而这套身份的四把钥匙里有一把是只能
+    // 靠纸恢复的。所以这条路上唯一的落盘点排在"抄好了吗"之后。
+    let seed = crate::crypto::hygiene::LockedBytes::generate()?;
+    let words = crate::crypto::mnemonic::to_words(&seed)?;
+    show_words(&tty, &words)?;
+    if !tty::confirm(&tty, "Have you written these 24 words down?")? {
+        return Err(KeydError::Misuse(
+            "the words were not written down, so nothing was minted: they are the only backup \
+             this identity will ever have"
+                .into(),
+        ));
+    }
+
+    let identity = crate::keystore::create::create_identity(
         &layout,
         &spec,
         &args.label,
         passphrase.as_bytes(),
         Argon2Config::default(),
         args.hardware.choice,
+        &seed,
     )?;
 
-    // 落审计:这台机器上多出来一把身份。**和 `import` 那条对称** —— 那条
-    // 记的是"别人那份身份搬到了这里",这条记的是"这里自己生了一把";只记
-    // 前者,事后问"这个 DID 什么时候出现的"就漏掉最常走的那条路。
+    // 文档由这里当场签出来。`publish` 不再是必经之路,原因不是省一步:
+    // 文档里挂什么,只有**刚刚铸出这四把的人**知道。让 `publish` 从 `keys/`
+    // 反推的话,一把被 `remove-key` 摘掉的钥匙会随着下一次重发复活 ——
+    // 而摘钥匙的整个意思就是让它别回来。
+    let device_secret = device::load(&layout)?;
+    let key = crate::keystore::unwrap::unlock(
+        &identity.root,
+        passphrase.as_bytes(),
+        &device_secret,
+    )?;
+    let (did, unsigned) = document::build_unsigned_with(
+        &spec,
+        &key.verifying_key()?,
+        identity.document_keys.clone(),
+    )?;
+    let signed = document::sign_document(&unsigned, &key, &identity.root.id.kid)?;
+    document::verify_path_binding(&did, &signed)?;
+    store::write_did_document(&layout, &did, &signed)?;
+
+    // 落审计:这台机器上多出来一套身份。**每条信封一条**,和 `import` 那条
+    // 对称 —— 只记根的话,事后问"`#device-sign` 是什么时候出现的"就答不上。
     //
     // 位置在**打印之前**:先落账,再告诉人它成了。反过来的话,一条记录写不
     // 下去的机器上,人照样会拿到一个 DID 去发布 —— 而那个 DID 在日志里不
@@ -1496,23 +1531,74 @@ fn keygen(root: Option<&Path>, args: KeygenArgs) -> Result<()> {
     //
     // `hardware` 取自**刚写下去的那个信封**,不是命令行上要的那个。
     let mut audit = AuditLog::open(&layout.audit_dir())?;
-    audit.append(&Event::Keygen {
-        did: created.did.clone(),
-        kid: created.verification_method.clone(),
-        hardware: created.wrapped.hardware.as_ref().map_or("none", HardwareRoot::kind).to_string(),
+    for wrapped in std::iter::once(&identity.root).chain(identity.extras.iter()) {
+        audit.append(&Event::Keygen {
+            did: did.clone(),
+            kid: wrapped.id.kid.clone(),
+            hardware: wrapped
+                .hardware
+                .as_ref()
+                .map_or("none", HardwareRoot::kind)
+                .to_string(),
+        })?;
+    }
+    // 词出现过了 —— 记下来,但**不记词**。
+    audit.append(&Event::MnemonicShown {
+        did: did.clone(),
+        scheme: crate::crypto::derive::DERIVATION_V2.to_string(),
     })?;
+    let digest = lifecycle::document_digest(&signed)?;
+    audit.append(&Event::Published { did: did.clone(), document_digest: digest })?;
 
-    // 只打印 DID,不打印文档。文档还没签名,落盘只会让人以为它已经发布了;
-    // 签名是 `publish` 的事,因为它需要私钥在场 —— 而这里已经没有私钥了。
-    println!("{}", created.did);
+    println!("{did}");
     println!();
-    println!("envelope written to {}", layout.key_path(&created.wrapped.id.thumbprint)?.display());
+    println!("four keys, all derived from the words you just wrote down:");
+    println!("    {}  root — signs the DID document", spec.fragment);
+    for extra in &identity.document_keys {
+        let what = match extra.fragment.as_str() {
+            crate::did::document::DEVICE_SIGN_FRAGMENT => "device signing — device assertions",
+            crate::did::document::DEVICE_AGREEMENT_FRAGMENT => "key agreement — ECDH only",
+            _ => "hot — everyday request signing",
+        };
+        println!("    {}  {what}", extra.fragment);
+    }
     println!();
-    println!("publish it with:");
-    println!("    anpio-key publish --did {} --spec {}", created.did, args.spec.display());
+    println!("envelopes in {}", layout.keys_dir().display());
+    println!("signed document at {}", layout.did_path(&did).display());
     println!();
     println!("it must then be served at:");
-    println!("    {}", did_url_path(&created.did)?);
+    println!("    {}", did_url_path(&did)?);
+    println!();
+    println!("note: this tool cannot host anything — put that file at the URL above yourself.");
+    Ok(())
+}
+
+/// 在终端上把 24 个词摊开,一次,并且说明它备份的是什么、不备份什么。
+///
+/// 两件事必须说清楚,否则这张纸会被当成比它实际更强的保证:
+///
+/// 1. **没有第二次。** 没有导出路径是设计的一部分(`seed-export` 在默认
+///    构建里连代码都不存在),所以这一屏就是唯一的机会。
+/// 2. **纸只盖住此刻铸出来的那四把。** 以后轮换出来的热密钥是另一把随机
+///    钥匙,不在这些词里 —— 那类钥匙只能靠归档带走。
+fn show_words(tty: &std::fs::File, words: &str) -> Result<()> {
+    use std::fmt::Write as _;
+
+    let mut screen = zeroize::Zeroizing::new(String::new());
+    let _ = writeln!(screen, "\nThese 24 words are the only backup of this identity.\n");
+    for (number, word) in words.split_whitespace().enumerate() {
+        let _ = writeln!(screen, "  {:>2}. {word}", number + 1);
+    }
+    let _ = write!(
+        screen,
+        "\nWrite them down by hand, now. They are shown once: this tool has no\n\
+         export path, so no later command can print them again.\n\
+         \n\
+         The words restore the four keys minted next (root, hot, device signing,\n\
+         key agreement). A key rotated later is NOT on this paper — rotation mints\n\
+         a fresh random key that only ever lives on this machine.\n\n"
+    );
+    tty::show(tty, &screen)?;
     Ok(())
 }
 

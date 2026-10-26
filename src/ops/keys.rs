@@ -194,18 +194,18 @@ fn next_agreement_fragment(
     did: &str,
     used: &std::collections::BTreeSet<String>,
 ) -> Result<String> {
-    const BASE: &str = "device-agreement";
+    let base: &str = crate::did::document::DEVICE_AGREEMENT_FRAGMENT;
     let listed: Vec<String> = lifecycle::extra_keys(document, did)?
         .into_iter()
         .map(|key| key.fragment)
         .collect();
     let taken =
         |name: &str| listed.iter().any(|f| f == name) || used.contains(name);
-    if !taken(BASE) {
-        return Ok(BASE.to_string());
+    if !taken(base) {
+        return Ok(base.to_string());
     }
     (2u32..)
-        .map(|n| format!("{BASE}-{n}"))
+        .map(|n| format!("{base}-{n}"))
         .find(|name| !taken(name))
         .ok_or_else(|| crate::error::KeydError::Did("no free agreement fragment".into()))
 }

@@ -210,6 +210,23 @@ pub enum Event {
         /// `none` / `secure-enclave` / `tpm` / `software`。
         hardware: String,
     },
+    /// 24 个词在终端上显示过一次。
+    ///
+    /// **词本身不进审计,也不进任何文件。** 这里记的是"什么时候、给哪个
+    /// DID 显示过、用的哪套推导":人以为备份已经抄下来了、而屏幕上其实
+    /// 什么也没出来时,得有地方能对质。反过来说,审计链里出现 24 个词就
+    /// 等于把备份抄了一份进日志 —— 那条链从此有一个擦不掉的地方。
+    ///
+    /// 这条和 [`Event::Keygen`] 一起落、落在后面:没铸成的那次显示没有
+    /// DID 可写,而显示又必须发生在任何字节落地**之前**(人说了"没抄"
+    /// 就什么都不该铸)。
+    MnemonicShown {
+        did: String,
+        /// 推导方案的名字,现在是 `bip39-entropy-v2`
+        /// ([`crate::crypto::derive::DERIVATION_V2`])—— 一个固定的版本标签,
+        /// 不是任何算出来的值。
+        scheme: String,
+    },
     /// 一份文档被写成了本机发布的那一份(`dids/<did>.json`)。
     ///
     /// **记摘要,而且和 [`Event::DocumentRead`] / [`Event::RotateHot`] 那几条

@@ -133,6 +133,18 @@ fn tty_writer(tty: &File) -> Result<File> {
     tty.try_clone().map_err(KeydError::Io)
 }
 
+/// 往**终端**上打一段,不经过 stdout。
+///
+/// 助记词走这条。stdout 是可以被重定向的 —— 一个 `anpio-key keygen > log`
+/// 或者 `| tee`,词就落进了一个谁都读得到的文件,而写那个管道的是启动方。
+/// 词只该出现在人正看着的那块屏幕上,并且只出现这一次。
+pub fn show(tty: &File, text: &str) -> Result<()> {
+    let mut out = tty_writer(tty)?;
+    out.write_all(text.as_bytes())?;
+    out.flush()?;
+    Ok(())
+}
+
 /// 关回显,并且在离开作用域时**无条件**恢复。
 ///
 /// 用 guard 而不是"关掉…做事…打开":中间任何一条 `?` 提前返回都会把

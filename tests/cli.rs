@@ -86,6 +86,9 @@ fn default_rules() -> Vec<(&'static str, String)> {
 
 struct Outcome {
     stdout_and_stderr: String,
+    /// 单独接到管子上的 stdout(只有 [`run_in_terminal_keeping_stdout_separate`]
+    /// 会填它)。默认那条路三头都在 pty 上,所以这里恒为空。
+    stdout: String,
     code: Option<i32>,
     timed_out: bool,
 }
@@ -124,6 +127,27 @@ impl Outcome {
 
 /// 在一个**真终端**里跑一条命令,按规则回答提问,等它结束。
 fn run_in_terminal(root: &Path, args: &[&str], rules: &[(&str, String)]) -> Outcome {
+    spawn_and_drive(root, args, rules, false)
+}
+
+/// 同 [`run_in_terminal`],但 **stdout 接一根管子**,不接终端。
+///
+/// 用来证明"某个东西只走终端":pty 上看到的是人类屏幕,管子里看到的是能
+/// 被重定向、被 `tee`、被日志收走的那一份。助记词必须只出现在前者。
+fn run_in_terminal_keeping_stdout_separate(
+    root: &Path,
+    args: &[&str],
+    rules: &[(&str, String)],
+) -> Outcome {
+    spawn_and_drive(root, args, rules, true)
+}
+
+fn spawn_and_drive(
+    root: &Path,
+    args: &[&str],
+    rules: &[(&str, String)],
+    separate_stdout: bool,
+) -> Outcome {
     let pair = nix::pty::openpty(None, None).expect("openpty");
     let master = File::from(pair.master);
     let slave = File::from(pair.slave);
@@ -133,10 +157,15 @@ fn run_in_terminal(root: &Path, args: &[&str], rules: &[(&str, String)]) -> Outc
     command.arg(args[0]).args(&args[1..]);
     command.arg("--root").arg(root);
 
-    // 三头都接到从设备上:这样 stdout 和 stderr 一起进 pty,读起来是一条
-    // 按时间排好的流 —— 而这条流正是人类在屏幕上看到的东西。
+    // 默认三头都接到从设备上:这样 stdout 和 stderr 一起进 pty,读起来是一条
+    // 按时间排好的流 —— 而这条流正是人类在屏幕上看到的东西。`keygen` 那条
+    // 例外:stdout 单独走管子,好在事后查它是不是空的。
     command.stdin(Stdio::from(slave.try_clone().expect("clone the pty slave")));
-    command.stdout(Stdio::from(slave.try_clone().expect("clone the pty slave")));
+    command.stdout(if separate_stdout {
+        Stdio::piped()
+    } else {
+        Stdio::from(slave.try_clone().expect("clone the pty slave"))
+    });
     command.stderr(Stdio::from(slave.try_clone().expect("clone the pty slave")));
 
     unsafe {
@@ -161,7 +190,22 @@ fn run_in_terminal(root: &Path, args: &[&str], rules: &[(&str, String)]) -> Outc
     drop(command);
     drop(slave);
 
-    drive(&master, &mut child, rules)
+    // 管子要在等子进程之前就开始排空:超过管道缓冲(64 KiB)时,写不进去的
+    // 子进程会停下来等、而这边在等它退出 —— 两边一起卡死。
+    let stdout_pipe = separate_stdout.then(|| {
+        let mut pipe = child.stdout.take().expect("piped stdout");
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            let _ = pipe.read_to_string(&mut text);
+            text
+        })
+    });
+
+    let mut outcome = drive(&master, &mut child, rules);
+    if let Some(reader) = stdout_pipe {
+        outcome.stdout = reader.join().unwrap_or_default();
+    }
+    outcome
 }
 
 /// 读主设备那头,见到提示语就照规则回答,直到子进程结束。
@@ -214,6 +258,7 @@ fn drive(master: &File, child: &mut Child, rules: &[(&str, String)]) -> Outcome 
     let text = seen.lock().unwrap().clone();
     Outcome {
         stdout_and_stderr: text,
+        stdout: String::new(),
         code: status.code(),
         timed_out: status.code().is_none(),
     }
@@ -297,6 +342,7 @@ fn run_bare(args: &[&str]) -> Outcome {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         ),
+        stdout: String::new(),
         code: output.status.code(),
         timed_out: false,
     }
@@ -451,20 +497,125 @@ fn spec_writes_a_file_that_keygen_can_use() {
 }
 
 #[test]
-fn keygen_writes_an_envelope_with_the_did_it_printed() {
+fn keygen_mints_four_keys_and_writes_the_signed_document() {
     let dir = TempDir::new("keygen");
     let did = keygen(&dir, "bot");
 
     assert!(did.starts_with("did:wba:example.com:agents:bot:e1_"), "got {did:?}");
 
+    // 一个助记词铸出四把:根、热、设备签名、协商。四份信封都不该是被别的东西
+    // 顺手写下的 —— 数量少一把就说明某条推导没跑到。
     let keys: Vec<_> = std::fs::read_dir(dir.path().join("keys"))
         .expect("keys/ exists")
         .map(|entry| entry.unwrap().path())
         .collect();
-    assert_eq!(keys.len(), 1, "exactly one envelope: {keys:?}");
+    assert_eq!(keys.len(), 4, "root, hot, device-sign, device-agreement: {keys:?}");
 
-    let mode = std::fs::metadata(&keys[0]).unwrap().permissions().mode() & 0o777;
-    assert_eq!(mode, 0o600, "the envelope is a secret: {mode:o}");
+    for key in &keys {
+        let mode = std::fs::metadata(key).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "{} is a secret: {mode:o}", key.display());
+    }
+
+    // 文档已经签好、落在本地那一份上 —— 它和钥匙是同一趟里出来的,所以
+    // 四把都在里面。(文件名不是 `{did}.json`:DID 里的 `:` 落不了地。)
+    let documents: Vec<_> = std::fs::read_dir(dir.path().join("dids"))
+        .expect("keygen writes a signed document")
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(documents.len(), 1, "{documents:?}");
+    let document: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&documents[0]).unwrap()).unwrap();
+    assert_eq!(document["id"], did);
+    assert_eq!(document["verificationMethod"].as_array().unwrap().len(), 4);
+
+    let listed = |relationship: &str| -> Vec<String> {
+        document[relationship]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|id| id.as_str().unwrap().rsplit('#').next().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(listed("authentication"), ["key-1", "key-2", "device-sign"]);
+    assert_eq!(listed("assertionMethod"), ["key-1", "device-sign"]);
+    assert_eq!(listed("keyAgreement"), ["device-agreement"]);
+}
+
+/// 词出现过一次,而且**只在终端上** —— 重定向过的 stdout 里不能有。
+///
+/// 这一条盯的是"有没有第二次":没有导出路径是设计的一部分,所以抄写那一屏
+/// 就是全部机会。它同时盯住词不走 stdout —— 走 stdout 的话,一个
+/// `keygen > log` 就把备份写进了谁都能读的文件。
+#[test]
+fn keygen_shows_the_words_on_the_terminal_and_never_on_stdout() {
+    let dir = TempDir::new("words");
+    let spec = spec_file(&dir, "bot", &a_spec_for("example.com", "agents/bot"));
+    let outcome = run_in_terminal_keeping_stdout_separate(
+        dir.path(),
+        &["keygen", "--spec", &spec],
+        &default_rules(),
+    );
+    outcome.expect_ok();
+
+    let screen = outcome.text();
+    assert_eq!(
+        screen.matches("These 24 words are the only backup").count(),
+        1,
+        "the words are shown exactly once:\n{screen}"
+    );
+    let numbered = (1..=24)
+        .filter(|n| screen.contains(&format!("{n:>2}. ")))
+        .count();
+    assert_eq!(numbered, 24, "all 24 words have to be on that screen:\n{screen}");
+
+    // 词不能出现在 stdout 上:它是要被重定向、被 `tee`、被日志收走的那一份。
+    // 这里取屏幕上那串词里连续三个当探针 —— 单个词可能本来就是 nginx 之类的
+    // 普通词,连着的三个不是。
+    let words: Vec<&str> = screen
+        .lines()
+        .filter_map(|line| {
+            let rest = line.trim_start().split_once(". ")?.1;
+            (!rest.is_empty() && !rest.contains(' ')).then_some(rest)
+        })
+        .collect();
+    assert_eq!(words.len(), 24, "could not read the words back:\n{screen}");
+    let probe = words[..3].join(" ");
+    assert!(
+        !outcome.stdout.contains(&probe),
+        "the words must not reach stdout:\n{}",
+        outcome.stdout
+    );
+    assert!(!outcome.stdout.contains("These 24 words"));
+    assert!(
+        outcome.stdout.contains(&format!("did:wba:")),
+        "the DID itself is still on stdout — that part is not a secret:\n{}",
+        outcome.stdout
+    );
+}
+
+/// 说"没抄"就**什么都不铸** —— 一套没有备份的身份比没有身份更糟。
+#[test]
+fn keygen_writes_nothing_when_the_words_are_not_written_down() {
+    let dir = TempDir::new("no-backup");
+    let spec = spec_file(&dir, "bot", &a_spec_for("example.com", "agents/bot"));
+    let rules: Vec<(&str, String)> = vec![
+        ("New passphrase for this key: ", PASSPHRASE.to_string()),
+        ("Repeat it: ", PASSPHRASE.to_string()),
+        ("[y/N] ", "n".to_string()),
+    ];
+    let outcome = run_in_terminal(dir.path(), &["keygen", "--spec", &spec], &rules);
+    let text = outcome.expect_failure();
+
+    assert!(
+        text.contains("were not written down"),
+        "it has to say why nothing happened:\n{text}"
+    );
+    assert!(
+        !dir.path().join("keys").exists()
+            || std::fs::read_dir(dir.path().join("keys")).unwrap().count() == 0,
+        "no envelope may be written"
+    );
+    assert!(!dir.path().join("dids").exists(), "and no document either");
 }
 
 /// 两遍对不上就**什么都不写**,而不是留一个自己打不开的信封。
@@ -586,6 +737,8 @@ fn publish_refuses_a_spec_that_points_somewhere_else() {
         "elsewhere",
         &a_spec_for("example.com", "agents/someone-else"),
     );
+    // `keygen` 已经把文档写下去了,所以要盯的是**它没被改**,而不是"没写"。
+    let before_document = read_local_document(&dir, &did);
     let outcome = run_in_terminal(
         dir.path(),
         &["publish", "--did", &did, "--spec", &elsewhere],
@@ -597,10 +750,10 @@ fn publish_refuses_a_spec_that_points_somewhere_else() {
         text.contains("someone-else"),
         "the refusal has to name the path it could not reconcile:\n{text}"
     );
-    assert!(
-        !dir.path().join("dids").exists()
-            || std::fs::read_dir(dir.path().join("dids")).unwrap().count() == 0,
-        "a mismatched spec must not leave a document behind"
+    assert_eq!(
+        read_local_document(&dir, &did),
+        before_document,
+        "a mismatched spec must not touch the document that is already there"
     );
 }
 
@@ -785,6 +938,7 @@ fn run(root: &Path, args: &[&str]) -> Outcome {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         ),
+        stdout: String::new(),
         code: output.status.code(),
         timed_out: false,
     }
@@ -1019,7 +1173,7 @@ fn the_audit_log_records_the_signature_and_holds_no_secrets() {
 
     // 字段名是一个**封闭集合**,这就是"日志里没有秘密"的测法 —— 一个能装
     // 种子的字段一旦被加进来,这里立刻红,而不是等谁去想到它。
-    const FIELDS: [&str; 11] = [
+    const FIELDS: [&str; 12] = [
         "seq",
         "at",
         "prev",
@@ -1034,6 +1188,9 @@ fn the_audit_log_records_the_signature_and_holds_no_secrets() {
         // 装不下密钥材料 —— 这正是加进这个集合的门槛。
         "hardware",
         "document_digest",
+        // 助记词推导方案的名字(`bip39-entropy-v2`):一个写死的版本标签,
+        // 不是算出来的东西,更装不下密钥材料。
+        "scheme",
     ];
     for line in text.lines().filter(|line| !line.trim().is_empty()) {
         let event: serde_json::Value = serde_json::from_str(line).expect("one event per line");
@@ -1176,9 +1333,12 @@ fn the_same_digest_links_the_publish_to_the_read() {
     run(dir.path(), &["document", "--did", &did]).expect_ok();
 
     let text = audit_text(&dir);
+    // `publish` 会写第二条 `PUBLISHED`(`keygen` 自己已经写过一条),要的是
+    // **刚刚这次** —— 所以取最后一条,不是第一条。
     let line_with = |event: &str| {
         text.lines()
-            .find(|line| line.contains(&format!("\"event\":\"{event}\"")))
+            .filter(|line| line.contains(&format!("\"event\":\"{event}\"")))
+            .next_back()
             .unwrap_or_else(|| panic!("no {event} record:\n{text}"))
             .to_string()
     };
@@ -1251,7 +1411,12 @@ fn the_lifecycle_commands_rewrite_the_document() {
     let did = keygen(&dir, "bot");
     run_in_terminal(dir.path(), &["publish", "--did", &did], &default_rules()).expect_ok();
 
-    assert_eq!(fragments_of(&dir, &did), vec!["key-1"], "a fresh document has just the binding key");
+    // `keygen` 现在一个助记词铸四把,所以"新鲜文档"就是这四把。
+    assert_eq!(
+        fragments_of(&dir, &did),
+        vec!["key-1", "key-2", "device-sign", "device-agreement"],
+        "keygen mints root, hot, device signing and agreement"
+    );
 
     // —— 加一把恢复钥匙 ——
     let added = run_in_terminal(dir.path(), &["add-recovery-key", "--did", &did], &default_rules());
@@ -1268,20 +1433,24 @@ fn the_lifecycle_commands_rewrite_the_document() {
     );
 
     // —— 轮换热密钥 ——
+    //
+    // `keygen` 已经把 `key-2` 用掉了,所以轮换出来的是 `key-3`,而 `key-2`
+    // 退休出文档 —— 编号不回头。
     let rotated = run_in_terminal(dir.path(), &["rotate-hot-key", "--did", &did], &default_rules());
     rotated.expect_ok();
     let fragments = fragments_of(&dir, &did);
-    assert!(fragments.contains(&"key-2".to_string()), "the hot key lands as key-2: {fragments:?}");
+    assert!(fragments.contains(&"key-3".to_string()), "the rotated hot key lands as key-3: {fragments:?}");
+    assert!(!fragments.contains(&"key-2".to_string()), "the retired hot key leaves: {fragments:?}");
 
     // —— 摘掉它 ——
     let removed = run_in_terminal(
         dir.path(),
-        &["remove-key", "--did", &did, "--kid", "key-2"],
+        &["remove-key", "--did", &did, "--kid", "key-3"],
         &default_rules(),
     );
     removed.expect_ok();
     assert!(
-        !fragments_of(&dir, &did).contains(&"key-2".to_string()),
+        !fragments_of(&dir, &did).contains(&"key-3".to_string()),
         "the hot key must be gone: {:?}",
         fragments_of(&dir, &did)
     );
@@ -1294,7 +1463,7 @@ fn the_lifecycle_commands_rewrite_the_document() {
     rotated.expect_ok();
     let fragments = fragments_of(&dir, &did);
     assert!(
-        fragments.contains(&"key-3".to_string()) && !fragments.contains(&"key-2".to_string()),
+        fragments.contains(&"key-4".to_string()) && !fragments.contains(&"key-3".to_string()),
         "the fragment number must not be reused: {fragments:?}"
     );
 
@@ -1350,7 +1519,11 @@ fn migrate_marks_the_old_document_and_names_the_successor() {
     // 后继是**同一个主体**的绑定了新密钥的 DID:绑定密钥轮换只改最后那一
     // 段,路径不动。拿一条改了路径的 DID 当后继会被当场拒绝(见下一条断言),
     // 因为那在验证方眼里是**另一个主体**,不是同一个人换了钥匙。
-    let successor = keygen(&dir, "bot");
+    //
+    // 它在**另一个根**里铸:换机器的情形就是"后继不在这台机器上",而那正是
+    // 这条测试要说的那句提示成立的前提。
+    let other = TempDir::new("migrate-other");
+    let successor = keygen(&other, "bot");
     assert_ne!(successor, did, "a second keygen must mint a different binding key");
 
     let outcome = run_in_terminal(
@@ -1430,6 +1603,16 @@ fn deactivate_refuses_a_successor_that_is_itself() {
 fn a_lifecycle_command_without_a_published_document_says_what_to_run_first() {
     let dir = TempDir::new("unpublished");
     let did = keygen(&dir, "bot");
+
+    // `keygen` 现在自己把文档签好写下来。**没有本地文档**仍然是一种真实
+    // 状态 —— 它被删了、或者这台机器只持有钥匙而文档在别处 —— 而那种时候
+    // 命令必须让人先跑 `publish`,不能从 DID 现编一份再覆盖上去。
+    std::fs::remove_file(
+        dir.path()
+            .join("dids")
+            .join(format!("{}.json", did.replace(':', "_"))),
+    )
+    .expect("the document keygen just wrote");
 
     let outcome = run_in_terminal(dir.path(), &["add-recovery-key", "--did", &did], &default_rules());
     let text = outcome.expect_failure();
