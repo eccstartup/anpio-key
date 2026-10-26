@@ -87,6 +87,29 @@ def rename_commands(plan):
     return commands
 
 
+def membership_commands(plan, group_members):
+    """Rewrite stale short names inside groups whose members were renamed.
+
+    `dscl -change RecordName` renames the record, not the GroupMembership strings
+    other groups keep for it. Membership by GeneratedUID survives either way, but
+    the name lists still resolve the old name and confuse anything reading them.
+    """
+    commands = []
+    for _, old, new in plan:
+        members = group_members.get(old)
+        if members is None:
+            continue
+        for member_old, member_new in ACCOUNTS:
+            if member_old not in members:
+                continue
+            commands.append(['/usr/bin/dscl', '.', '-delete', '/Groups/' + new,
+                             'GroupMembership', member_old])
+            if member_new not in members:
+                commands.append(['/usr/bin/dscl', '.', '-append', '/Groups/' + new,
+                                 'GroupMembership', member_new])
+    return commands
+
+
 def wait_for_sockets_gone(config, timeout=10):
     deadline = time.monotonic() + timeout
     while any(os.path.lexists(config[name]) for name in ('sign_socket', 'admin_socket')):
@@ -118,14 +141,16 @@ def main():
     config = json.loads((OLD_BASE / 'service.json').read_text())
     with OLD_PLIST.open('rb') as handle:
         job = plistlib.load(handle)
-    plan = account_plan({u.pw_name for u in pwd.getpwall()}, {g.gr_name for g in grp.getgrall()})
+    groups = {g.gr_name: g.gr_mem for g in grp.getgrall()}
+    plan = account_plan({u.pw_name for u in pwd.getpwall()}, set(groups))
     moves = [(str(OLD_BASE), str(NEW_BASE))]
     if os.path.lexists(BINARY_OLD):
         moves.append((str(BINARY_OLD), str(BINARY_NEW)))
     moves.append((str(OLD_PLIST), str(NEW_PLIST)))
     if args.user_home and os.path.lexists(args.user_home / '.anp-keyd'):
         moves.append((str(args.user_home / '.anp-keyd'), str(args.user_home / '.anpio-key')))
-    print(json.dumps({'rename_records': plan, 'commands': rename_commands(plan), 'moves': moves,
+    print(json.dumps({'rename_records': plan, 'commands': rename_commands(plan),
+                      'membership': membership_commands(plan, groups), 'moves': moves,
                       'config': rewrite_config(config), 'launchd': rewrite_job(job),
                       'apply': args.apply,
                       'warning': 'no automatic rollback; the old record names stop existing'},
@@ -137,6 +162,8 @@ def main():
     subprocess.run(['/bin/launchctl', 'bootout', 'system/' + OLD_LABEL], env=ENV, timeout=20)
     wait_for_sockets_gone(config)
     for command in rename_commands(plan):
+        subprocess.run(command, env=ENV, check=True, timeout=20)
+    for command in membership_commands(plan, groups):
         subprocess.run(command, env=ENV, check=True, timeout=20)
     subprocess.run(['/usr/bin/dscacheutil', '-flushcache'], env=ENV, timeout=20)
     os.rename(OLD_BASE, NEW_BASE)

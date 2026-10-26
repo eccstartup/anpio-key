@@ -144,6 +144,7 @@ python3 deploy/macos/migrate-name.py --user-home "$HOME"
 ```
 
 It stops the job, waits for both sockets to disappear, renames the users/groups,
+rewrites the old short names still listed in those groups' `GroupMembership`,
 flushes the Directory Services cache, moves and renames the installation and its
 binary, rewrites `service.json` and the plist (including `UserName`/`GroupName`),
 and bootstraps the renamed job. An incomplete or already-migrated tree is refused

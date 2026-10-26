@@ -83,6 +83,30 @@ class Accounts(unittest.TestCase):
         ])
 
 
+class Membership(unittest.TestCase):
+    def test_stale_member_names_are_rewritten_inside_renamed_groups(self):
+        plan = [('both', '_anpkeyd', '_anpio'), ('group', '_anpkeyd_sign', '_anpio_sign')]
+        groups = {'_anpkeyd': [], '_anpkeyd_sign': ['_anpkeyd', '_anpagent']}
+        self.assertEqual(module.membership_commands(plan, groups), [
+            ['/usr/bin/dscl', '.', '-delete', '/Groups/_anpio_sign', 'GroupMembership', '_anpkeyd'],
+            ['/usr/bin/dscl', '.', '-append', '/Groups/_anpio_sign', 'GroupMembership', '_anpio'],
+        ])
+
+    def test_a_group_already_listing_the_new_name_only_drops_the_old_one(self):
+        plan = [('group', '_anpkeyd_admin', '_anpio_admin')]
+        groups = {'_anpkeyd_admin': ['_anpkeyd', '_anpio']}
+        self.assertEqual(module.membership_commands(plan, groups), [
+            ['/usr/bin/dscl', '.', '-delete', '/Groups/_anpio_admin', 'GroupMembership', '_anpkeyd'],
+        ])
+
+    def test_groups_without_stale_names_produce_nothing(self):
+        plan = [('group', '_anpkeyd_sign', '_anpio_sign')]
+        self.assertEqual(module.membership_commands(plan, {'_anpkeyd_sign': ['_anpagent']}), [])
+
+    def test_records_that_are_not_groups_produce_nothing(self):
+        self.assertEqual(module.membership_commands([('user', '_anpkeyd_sign', '_anpio_sign')], {}), [])
+
+
 class SocketWait(unittest.TestCase):
     def test_a_missing_socket_is_not_waited_on(self):
         module.wait_for_sockets_gone({'sign_socket': '/nonexistent/sign.sock',
