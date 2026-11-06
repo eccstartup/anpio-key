@@ -1,4 +1,22 @@
+import fs from 'node:fs'
+import path from 'node:path'
 import { defineConfig } from 'vitepress'
+
+const FRONTMATTER_RE = /^---\r?\n[\s\S]*?\r?\n---\r?\n?/
+
+// The built site no longer serves the .md files, so stash each page's Markdown in its
+// page data for the Copy for Agent button to read at runtime.
+function readAgentMarkdown(filePath: string | undefined, srcDir: string) {
+  if (!filePath) return undefined
+  try {
+    return fs
+      .readFileSync(path.join(srcDir, filePath), 'utf8')
+      .replace(FRONTMATTER_RE, '')
+      .trimStart()
+  } catch {
+    return undefined
+  }
+}
 
 // 中文按词切,而不是按字符切。VitePress 内置的本地搜索默认拿空白和标点分词,
 // 中文整段会变成一个巨大的词条 —— 搜什么都搜不出来。
@@ -22,6 +40,10 @@ export default defineConfig({
   description:
     '跑在你自己机器上的守护进程,替 agent 保管 did:wba 的 Ed25519 私钥,并按 RFC 9421 签 HTTP 消息签名。',
   cleanUrls: true,
+  transformPageData(pageData, { siteConfig }) {
+    const agentMarkdown = readAgentMarkdown(pageData.filePath, siteConfig.srcDir)
+    if (agentMarkdown) return { agentMarkdown }
+  },
   head: [['meta', { name: 'theme-color', content: '#0f172a' }]],
 
   themeConfig: {
