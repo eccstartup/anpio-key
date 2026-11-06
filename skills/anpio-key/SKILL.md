@@ -1,83 +1,202 @@
 ---
 name: anpio-key
-description: 在本机安装 Anpio Key，或使用已安装的 v2 有限授权签署 did:wba HTTP 请求、查询授权密钥与请求结果、排查拒绝原因。安装是管理员动作；身份注册、解锁、轮换与迁移属于独立可信管理流程。
+description: 在本机安装或使用 Anpio Key。三条互斥路径：Linux 受保护服务、macOS 本机预览、两平台通用的无边界开发试跑。用于签署 did:wba HTTP 请求、查询授权密钥与请求结果、排查拒绝原因。安装与解锁是管理员动作，口令只在人类终端输入。
 ---
 
 # Anpio Key
 
-Linux v2 通过独立 OS UID 认证主体，daemon 执行 exact-key grant、目标策略、期限、次数、撤销和持久请求去重。仅正式 Linux 构建且 root 配置为 `linux-protected-v1` 时 `protected_supported=true`；旧 preview、调试、macOS 及敏感测试特性均为 false。同 UID 开发模式不提供抵御任意代码的私钥隔离。
+私钥不出本机的 daemon，调用方只拿签名结果和公钥。每次签名要一张 grant：哪把钥匙、签什么目标、多久、几次。
 
-## 首次安装
+## 先选路径
 
-安装需要 root，属于管理员动作。只有在人类明确批准、并临时提供 sudo 时，Agent 才能执行；否则把下面这一条命令交给人类，在自己的终端里运行。身份口令、解锁口令和 sudo 口令都不进入聊天、MCP、argv 或环境变量。
+先回答三个问题，再往下读：
 
-在人类审阅过的仓库根目录运行一条命令，安装服务并完成身份、策略、grant 和第一次解锁：
+1. **哪台机器？** Linux 走 A 节，macOS 走 B 节。
+2. **要边界，还是只想试功能？** 试功能走 C 节，两平台都行，但不建立安全边界。
+3. **你是谁？** 管理员（人类终端，能 sudo）还是 Agent（只能发请求）。
+
+A、B、C 三节互斥，不要混用命令。每节按“谁执行 / 前置 / 命令 / 成功判据”排列。
+
+## A. Linux：受保护服务
+
+**谁执行** 人类管理员，在自己的终端，仓库根目录。
+
+**前置** Rust 1.88+；审阅过的 checkout；一个非管理员 Agent 账号（不带 `--agent-user` 时安装器创建 `anp-agent`）。
+
+**安装并初始化**（身份、热钥匙、迁入受保护状态、策略、grant、首次解锁）
 
 ```bash
 ./install.sh --bootstrap --did-host agents.example.com \
   --target https://api.example.com/v1/status
 ```
 
-`--did-host` 是 DID 文档将来发布的域名，`--target` 是 Agent 要访问的完整 HTTPS 地址；省略时脚本会在终端里询问。执行中会多次要求人类输入口令：绑定钥匙、热钥匙、迁入受保护状态和解锁。口令由 Anpio Key 直接从 `/dev/tty` 读取；Agent 不要代输、捕获、转发或保存口令。
+- `--did-host`：DID 文档将来发布的域名。
+- `--target`：Agent 实际要访问的完整 HTTPS 地址，策略由此得出。
+- 省略时脚本在终端里询问。
+- 口令（绑定钥匙、热钥匙、迁入、解锁）由二进制从 `/dev/tty` 读取；不要代输、捕获或转交。
 
-成功后打印 DID 文档地址、vault、grant、有效期、恢复材料目录和 Agent 请求示例。把 DID 文档上传到打印的地址，把 grant 交给 Agent。
+只装空服务：`./install.sh`。先看计划不改系统：`./install.sh --dry-run`。物理 TPM：加 `--tpm-device`。
 
-只安装空服务、之后按 `deploy/LOCAL-USE.md` 手动初始化：
+**手动安装**（管理员要先独立核对摘要）
+
+```bash
+cargo build --locked --release --features mcp
+sha256sum target/release/anpio-key
+sudo python3 deploy/linux/install.py --binary target/release/anpio-key \
+  --sha256 VERIFIED_SHA256 --admin-user operator --agent-user agent-a
+sudo systemctl daemon-reload
+```
+
+**成功判据**
+
+```bash
+sudo systemctl status anpio-key
+sudo -u operator /usr/local/libexec/anpio-key admin \
+  --config /etc/anpio-key/service.json status
+```
+
+要 `signing_available=true` 才能签；`anpio-key build-info` 应报 `protected_supported=true`（正式 release 构建 + `linux-protected-v1` 配置）。
+
+**位置** 程序 `/usr/local/libexec/anpio-key`，配置 `/etc/anpio-key/service.json`。安装器拒绝已有或半成品安装，它不是更新或修复命令。
+
+## B. macOS：本机预览
+
+**谁执行** 人类管理员，在自己的终端，仓库根目录。
+
+**前置** Rust + 命令行工具；本地 APFS。不需要完整 Xcode、付费开发者账号、Secure Enclave 或 TPM。
+
+**安装**
 
 ```bash
 ./install.sh
 ```
 
-先看计划、不改系统：
+脚本先以你的账号构建，之后才要 sudo：创建 `_anpio`（服务）与 `_anpagent`（Agent）、四个组、root 所有的 `/Library/ANPIOKey` 和 launchd job，启动服务并做只读检查。
+
+**预览身份 + 首次授权**（只用于一次性身份，不要放真实密钥）
 
 ```bash
-./install.sh --dry-run
-```
-
-指定管理员、Agent 或 TPM：
-
-```bash
-./install.sh --admin-user operator --agent-user agent-a
-./install.sh --tpm-device --bootstrap --did-host agents.example.com \
+./install.sh --bootstrap --did-host agents.example.com \
   --target https://api.example.com/v1/status
 ```
 
-`--method` 可以重复，默认 `GET`；`--body-bytes`、`--grant-days`、`--max-uses` 限制请求体大小、有效天数和签名次数。指定多个 Agent 账号时，`--bootstrap` 只为第一个账号创建 grant。
+macOS 的 `--bootstrap` 固定使用 `_anpagent` 和 `--hardware none`，流程与 Linux 一致：生成身份、创建热钥匙、离线迁入、登记 vault、确认角色、发布策略、创建 grant、解锁。
 
-安装后确认：
+**手动安装**
 
 ```bash
-sudo systemctl status anpio-key
-sudo -u ADMIN_USER /usr/local/libexec/anpio-key admin \
-  --config /etc/anpio-key/service.json status
+cargo build --locked --release --features mcp
+shasum -a 256 target/release/anpio-key
+python3 deploy/macos/provision-accounts.py --admin-user YOUR_HUMAN_ACCOUNT
+sudo bash deploy/macos/setup-local.sh YOUR_HUMAN_ACCOUNT VERIFIED_SHA256
 ```
 
-macOS 使用同一条命令安装本机预览，始终 `protected_supported=false`。macOS 的 `--bootstrap` 只用于全新的本机预览：使用 `_anpagent`、`--hardware none` 和一次性身份完成身份、授权与首次解锁；真实身份或已有密钥按 `deploy/macos/AGENT.md` 手动迁入。安装完成后必须收回 Agent 账号的 sudo，否则受保护边界不成立。
+**成功判据**
 
-## 普通 Agent 工作流
+```bash
+/Library/ANPIOKey/bin/anpio-key admin --config /Library/ANPIOKey/service.json status
+sudo /usr/bin/python3 deploy/macos/acceptance/test-install.py
+```
 
-使用管理员提供的 `/etc/anpio-key/service.json` 和 grant。不要自行改 socket、服务 UID、DID、kid 或策略。用 `anpio-key data --config CONFIG --file REQUEST.json` 发送一个请求对象，或通过 MCP `anpio-key mcp --config CONFIG` 使用同样的 v2 工具。
+macOS 始终 `protected_supported=false`：这是 UID 边界预览，不是正式受保护的 macOS 发行。装完注销并重新登录，组成员关系才生效。已有身份或真实密钥要按 `deploy/macos/AGENT.md` 手动迁入。
 
-先用 `{"operation":"LIST_AUTHORIZED_KEYS"}` 查看当前主体可用的 key handle；使用 `GET_DOCUMENT` 时提供 `key_id`。没有授权时请管理端建权，解锁本身不会产生权限。
+**位置** 程序 `/Library/ANPIOKey/bin/anpio-key`，配置 `/Library/ANPIOKey/service.json`。
 
-签名请求示例：
+## C. 两平台通用：开发试跑（不建边界）
+
+**谁执行** 你自己的账号，不需要 sudo。
+
+```bash
+cargo build --locked --release --features mcp
+mkdir -p /tmp/keyd-lab
+./target/release/anpio-key --root /tmp/keyd-lab spec \
+  --host example.com --path agents/mybot --out /tmp/keyd-lab/mybot.spec.json
+./target/release/anpio-key --root /tmp/keyd-lab keygen --spec /tmp/keyd-lab/mybot.spec.json
+```
+
+`keygen` 在终端显示一次 24 词，确认抄好，输入两遍口令，然后打印 DID。
+
+```bash
+./target/release/anpio-key --root /tmp/keyd-lab publish --did DID
+./target/release/anpio-key --root /tmp/keyd-lab serve
+```
+
+另一个终端解锁并签名：
+
+```bash
+./target/release/anpio-key --root /tmp/keyd-lab unlock --did DID
+./target/release/anpio-key --root /tmp/keyd-lab sign --did DID \
+  --method GET --url https://service.example.net/orders/42
+```
+
+输出两行签名头，原样放进 HTTP 请求，不改任何字符。结束用 `... stop`。
+
+开发模式所有文件都在你自己的账号下，**同一账号的任意代码都能拿到密钥**，不构成隔离。
+
+## 装完之后：管理员怎么用
+
+Linux：
+
+```bash
+ADMIN="sudo -u operator /usr/local/libexec/anpio-key admin --config /etc/anpio-key/service.json"
+$ADMIN status
+$ADMIN catalog
+$ADMIN unlock --vault-id VAULT_ID --did DID --kid FULL_KID
+```
+
+macOS：
+
+```bash
+ADMIN="/Library/ANPIOKey/bin/anpio-key admin --config /Library/ANPIOKey/service.json"
+$ADMIN status
+$ADMIN unlock --vault-id VAULT_ID --did DID --kid FULL_KID --native-ui
+```
+
+所有变更走两步：`prepare --file change.json` 生成 effect 与摘要，人工核对后 `commit --operation-id ... --digest ...`。解锁只让钥匙可用，不产生授权；授权来自 grant。
+
+## 装完之后：Agent 怎么用
+
+整个 Agent（包括模型和所有工具进程）必须在 Agent 账号下运行，只给签名子进程换账号不算边界。
+
+```bash
+anpio-key data --config CONFIG --file request.json
+```
+
+`CONFIG`：Linux `/etc/anpio-key/service.json`，macOS `/Library/ANPIOKey/service.json`。
+
+MCP 方式（构建时带 `mcp` feature）：`anpio-key mcp --config CONFIG`。工具参数不能覆盖配置、socket、DID 或 kid。
+
+最小签名请求：
 
 ```json
-{"operation":"SIGN_HTTP","grant_id":"ADMIN_PROVIDED_GRANT","request_id":"PERSISTED_UUID","http":{"method":"GET","url":"https://service.example.com/orders","headers":{},"body":{"state":"absent"},"nonce":"SERVER_EXPECTED_FRESH_NONCE"}}
+{"operation":"SIGN_HTTP","grant_id":"ADMIN_GRANT","request_id":"落盘的UUID",
+ "http":{"method":"GET","url":"https://service.example.com/orders",
+ "headers":{},"body":{"state":"absent"},"nonce":null}}
 ```
 
-有 body 时明确使用 `{"state":"present","bytes":[...]}`；空 body 与无 body 不同。保存 request_id 和原始请求后再发送。响应丢失时以原 ID 查询 `GET_REQUEST_STATUS`；相同请求可用原 ID 重试，不生成新 ID 偷偷重签。`outcome_unknown` 不表示未签名，停止自动重试并交给管理端核对。
+规则：
 
-只在 `data.state=completed` 且存在 `data.result` 时交付签名。实际 HTTP 发送必须使用返回的规范化 URL、原 body 和返回的签名头，不自动跟随重定向。对端仍须检查用途、期限、nonce 和业务权限。Node 适配器见仓库 `adapters/anpio-key-v2.mjs`；不提供私钥导出、密码、raw 或 challenge 工具。
+- 每个新操作自己生成并**先落盘** `request_id`；重试复用原 ID，换了输入还在用旧 ID 会 `REQUEST_ID_CONFLICT`。
+- 只在 `data.state=completed` 且存在 `data.result` 时交付签名。
+- 发送时用返回的规范化 URL、原 body 和签名头，关闭自动重定向。
+- 响应丢失先用原 ID 查 `GET_REQUEST_STATUS`；`outcome_unknown` 不代表没签，停止自动重试并交管理员核对。
+- 基线六个操作永远可用；其余签名路各自一个开关，客户端只看 `GET_CAPABILITIES` 的 `operations`，不在列表里就是不支持。
 
-## 拒绝与管理边界
+## 拒绝怎么处理
 
-- `KEY_LOCKED`：由可信管理员解锁 exact hot key；不在聊天、MCP、argv 或环境变量里索要密码。
-- grant 无效、过期、耗尽或策略拒绝：管理员明确重新建权；不更换主体、密钥或目标绕过限制。
-- `AUDIT_UNAVAILABLE`：停止使用，管理端检查持久化和恢复。
-- 注册 proof 使用管理端两阶段 `RegistrationChallenge`，只兼容已支持的服务格式。轮换使用 `RotateHotKey`，返回公开文档必须独立发布并验证；本地写入不等于网络生效。
-- 离线迁移使用 `deploy/linux/migrate-vault.py` 的 dry-run 和恢复验证，要求 root 控制的冻结源与恢复目录。Agent 不执行维护操作。
+| 情况 | 动作 |
+|---|---|
+| `KEY_LOCKED` | 管理员解锁 exact hot key；不要向任何人索要口令 |
+| grant 过期、耗尽、撤销或策略拒绝 | 管理员重建 grant；不换主体、钥匙或目标绕过 |
+| `OPERATION_DISABLED` | 该签名路默认关，按不支持处理，不重试 |
+| `AUDIT_UNAVAILABLE` | 停止使用，管理员检查持久化与恢复 |
+| `OUTCOME_UNKNOWN` | 不重签；按原 `request_id` 查询并核对远端结果 |
+| `PROTOCOL_INVALID` / `REQUEST_ID_CONFLICT` | 修请求；新输入必须新 ID |
 
-旧 `serve`、`sign` 和未带 `--config` 的 MCP 仅用于明确选择的开发模式；不自动回退 v1。软件整套目录加口令可以解封；硬件保护的是解封材料，签名仍在普通进程内存中执行。
+## 边界
 
-要把一个**自己拿着私钥签名**的工具改成通过本服务签名，用 `anpio-key-integration` 技能：那里是语言无关的接入规约（能力协商、grant 生命周期、六个操作的映射、编码一致性、拒绝形态、验收清单）。
+- 注册、轮换、设备入组、撤销、迁移、策略与 grant 变更都是管理员动作，Agent 不执行。
+- 口令只进人类终端，不进聊天、MCP、argv 或环境变量。
+- 服务重启后所有 grant 失效、钥匙锁定，需要重新解锁和建权。
+- `--root` 开发模式与 `cargo install` 都不建立安全边界。
+- 要把一个自己拿私钥签名的工具改造成通过本服务签名，用 `anpio-key-integration` 技能。
