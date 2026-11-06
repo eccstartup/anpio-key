@@ -17,6 +17,36 @@ description: 在本机安装或使用 Anpio Key。三条互斥路径：Linux 受
 
 A、B、C 三节互斥，不要混用命令。每节按“谁执行 / 前置 / 命令 / 成功判据”排列。
 
+## DID 文档放哪（默认 awiki.me）
+
+`--did-host` 和 `--did-path` 一起决定 DID 和文档 URL：
+
+```
+did:wba:<host>:<path 各段>:<绑定公钥指纹>
+文档：https://<host>/<path 各段>/did.json
+```
+
+默认用 awiki.me，路径取 `user/<handle>`（`<handle>` 换成你在 awiki 注册的名字）：
+
+```bash
+./install.sh --bootstrap --did-host awiki.me --did-path user/mybot \
+  --target https://api.example.com/v1/status
+```
+
+在 awiki 注册 handle 时登记的就是 `keygen` 生成的绑定公钥；注册完成后文档由 awiki 托管，本地 `publish` 用来生成和核对文档。
+
+换别的 DID server 只改这两个参数：
+
+```bash
+./install.sh --bootstrap --did-host agents.example.com --did-path agents/mybot \
+  --target https://api.example.com/v1/status
+```
+
+- 任何能按 `https://<host>/<path 各段>/did.json` 提供文档的域名都可以；自建就是自己托管这份 JSON。
+- 文档必须带自签 proof：`publish` 生成，`verify-doc` 核对归属。
+- `--did-path` 的默认值是 `agents/anpio-key`，用自建域名时通常保留。
+- 换域名等于换 DID，不存在“换服务器、DID 不变”。
+
 ## A. Linux：受保护服务
 
 **谁执行** 人类管理员，在自己的终端，仓库根目录。
@@ -26,11 +56,11 @@ A、B、C 三节互斥，不要混用命令。每节按“谁执行 / 前置 / �
 **安装并初始化**（身份、热钥匙、迁入受保护状态、策略、grant、首次解锁）
 
 ```bash
-./install.sh --bootstrap --did-host agents.example.com \
+./install.sh --bootstrap --did-host awiki.me --did-path user/mybot \
   --target https://api.example.com/v1/status
 ```
 
-- `--did-host`：DID 文档将来发布的域名。
+- `--did-host` / `--did-path`：默认 awiki.me 的 `user/<handle>`；换 DID server 见上节。
 - `--target`：Agent 实际要访问的完整 HTTPS 地址，策略由此得出。
 - 省略时脚本在终端里询问。
 - 口令（绑定钥匙、热钥匙、迁入、解锁）由二进制从 `/dev/tty` 读取；不要代输、捕获或转交。
@@ -76,7 +106,7 @@ sudo -u operator /usr/local/libexec/anpio-key admin \
 **预览身份 + 首次授权**（只用于一次性身份，不要放真实密钥）
 
 ```bash
-./install.sh --bootstrap --did-host agents.example.com \
+./install.sh --bootstrap --did-host awiki.me --did-path user/mybot \
   --target https://api.example.com/v1/status
 ```
 
@@ -110,9 +140,11 @@ macOS 始终 `protected_supported=false`：这是 UID 边界预览，不是正�
 cargo build --locked --release --features mcp
 mkdir -p /tmp/keyd-lab
 ./target/release/anpio-key --root /tmp/keyd-lab spec \
-  --host example.com --path agents/mybot --out /tmp/keyd-lab/mybot.spec.json
+  --host awiki.me --path user/mybot --out /tmp/keyd-lab/mybot.spec.json
 ./target/release/anpio-key --root /tmp/keyd-lab keygen --spec /tmp/keyd-lab/mybot.spec.json
 ```
+
+开发模式不会向 awiki 注册，`publish` 只在本地生成 `did.json`；这个 DID 在本机之外解析不到。
 
 `keygen` 在终端显示一次 24 词，确认抄好，输入两遍口令，然后打印 DID。
 
