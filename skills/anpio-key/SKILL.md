@@ -30,16 +30,25 @@ did:wba:<host>:<path 各段>:<绑定公钥指纹>
 
 ```bash
 ./install.sh --bootstrap --did-host awiki.me --did-path user/mybot \
-  --target https://api.example.com/v1/status
+  --method POST --target https://awiki.me/user-service/v1/did-auth/rpc
 ```
 
 在 awiki 注册 handle 时登记的就是 `keygen` 生成的绑定公钥；注册完成后文档由 awiki 托管，本地 `publish` 用来生成和核对文档。
 
-换别的 DID server 只改这两个参数：
+`--target` 与 DID host 无关，它是 Agent 实际要调用的完整 URL，策略里的 origin、path、method 都从它得出。awiki 常用的两个目标：
+
+| 用途 | target | 方法 |
+|---|---|---|
+| 登录 / 注册 proof | `https://awiki.me/user-service/v1/did-auth/rpc` | `POST` |
+| 消息 / ANP 接口 | `https://awiki.me/anp-im/rpc` | `POST` |
+
+默认只允许 `GET`；签 awiki 的 POST 接口必须同时给 `--method POST`。一条策略对应一个 origin + path，要签两个端点就建两张 grant。
+
+换别的 DID server 只改 `--did-host` 和 `--did-path`，target 按你实际调用的服务填：
 
 ```bash
 ./install.sh --bootstrap --did-host agents.example.com --did-path agents/mybot \
-  --target https://api.example.com/v1/status
+  --target https://service.example.com/v1/status
 ```
 
 - 任何能按 `https://<host>/<path 各段>/did.json` 提供文档的域名都可以；自建就是自己托管这份 JSON。
@@ -57,11 +66,11 @@ did:wba:<host>:<path 各段>:<绑定公钥指纹>
 
 ```bash
 ./install.sh --bootstrap --did-host awiki.me --did-path user/mybot \
-  --target https://api.example.com/v1/status
+  --method POST --target https://awiki.me/user-service/v1/did-auth/rpc
 ```
 
 - `--did-host` / `--did-path`：默认 awiki.me 的 `user/<handle>`；换 DID server 见上节。
-- `--target`：Agent 实际要访问的完整 HTTPS 地址，策略由此得出。
+- `--target`：Agent 实际访问的完整 HTTPS URL，策略由此得出；awiki 的 RPC 要配 `--method POST`。
 - 省略时脚本在终端里询问。
 - 口令（绑定钥匙、热钥匙、迁入、解锁）由二进制从 `/dev/tty` 读取；不要代输、捕获或转交。
 
@@ -107,7 +116,7 @@ sudo -u operator /usr/local/libexec/anpio-key admin \
 
 ```bash
 ./install.sh --bootstrap --did-host awiki.me --did-path user/mybot \
-  --target https://api.example.com/v1/status
+  --method POST --target https://awiki.me/user-service/v1/did-auth/rpc
 ```
 
 macOS 的 `--bootstrap` 固定使用 `_anpagent` 和 `--hardware none`，流程与 Linux 一致：生成身份、创建热钥匙、离线迁入、登记 vault、确认角色、发布策略、创建 grant、解锁。
