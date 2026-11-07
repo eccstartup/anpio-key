@@ -56,9 +56,11 @@ feature; the installer grants only `/dev/tpmrm0` and pins the transport. Run the
 separate acceptance in [TPM.md](TPM.md) before claiming hardware protection.
 
 The installer creates its own non-login service account, socket groups,
-root-owned executable/configuration, SQLite state and systemd unit. It refuses
-partial or existing installations rather than silently repairing or replacing
-them. Without `--bootstrap` it does not migrate user keys; use the offline
+root-owned executable/configuration, SQLite state and systemd unit. The entry
+point is idempotent: on an installed machine `./install.sh` prints the state and
+exits 0 without building or prompting, partial installations are refused with
+exit 2, and `./install.sh --status` reports what is on disk without writing
+anything. Without `--bootstrap` it does not migrate user keys; use the offline
 migration procedure below for existing installations. Establish fresh sessions
 after group changes.
 
@@ -128,6 +130,12 @@ sudo python3 deploy/linux/install.py --binary target/release/anpio-key \
 # Stop the service before update. The tool also requires the exclusive state lock.
 sudo python3 deploy/linux/install.py --update --binary target/release/anpio-key --sha256 VERIFIED_SHA256
 ```
+
+Through the entry point the same operations are `./install.sh --upgrade`
+(stop, replace, start; same digest is a no-op that does not restart),
+`./install.sh --uninstall` (disable/stop, remove unit and binary, retain
+config/state/accounts), `./install.sh --verify` (read-only acceptance) and
+`./install.sh --status`. Add `--dry-run` to see a plan without a build or sudo.
 
 `--allow-development-build` is an explicit testing opt-in; software test doubles
 and seed-export builds are rejected even with this flag. Updates never overwrite

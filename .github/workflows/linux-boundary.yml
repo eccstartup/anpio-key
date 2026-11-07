@@ -5,6 +5,8 @@ on:
       - 'src/**'
       - 'tests/**'
       - 'deploy/linux/**'
+      - 'deploy/tests/**'
+      - 'install.sh'
       - 'adapters/**'
       - 'Cargo.*'
       - '.github/workflows/linux-boundary.yml'
@@ -13,6 +15,8 @@ on:
       - 'src/**'
       - 'tests/**'
       - 'deploy/linux/**'
+      - 'deploy/tests/**'
+      - 'install.sh'
       - 'adapters/**'
       - 'Cargo.*'
       - '.github/workflows/linux-boundary.yml'
@@ -41,6 +45,8 @@ jobs:
         run: |
           node --check adapters/anpio-key-v2.mjs
           node --check adapters/test-sdk.mjs
+      - name: Entry-point lint (bash parse and full-width adjacency)
+        run: python3 -m unittest discover -s deploy/tests -p 'test_*.py'
       - name: Build and test disposable service/admin/Agent domains
         run: >-
           docker run --rm

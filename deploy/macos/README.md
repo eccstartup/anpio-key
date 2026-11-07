@@ -69,14 +69,31 @@ terminal only. Use a disposable identity and a public password, never real keys.
 
 The script asks for sudo only after the build. It creates `_anpio` / `_anpagent`,
 four groups, root-owned installation/configuration and a launchd job, starts the
-service and runs limited read-only checks. It refuses existing or partial setup.
-It is not an update or repair command. Do not repeat `launchctl bootstrap` after
-successful setup: the job is already loaded. Log out/in to refresh group
-membership. Initial state contains no user keys. `--bootstrap` only applies to a
-fresh empty installation; use the operator procedure in [AGENT.md](AGENT.md) to
-import an existing identity or real keys. Further Agents need their own
-independently provisioned non-admin UIDs, transport membership and explicit
-principal registration; this setup creates one Agent.
+service and runs limited read-only checks. Runs are state-driven: on a fresh
+machine it installs; on an installed machine `./install.sh` prints the state and
+exits 0 without building or prompting; partial installations are refused with
+exit 2. Do not repeat `launchctl bootstrap` after successful setup: the job is
+already loaded. Log out/in to refresh group membership. Initial state contains no
+user keys. `--bootstrap` only applies to a fresh empty installation; use the
+operator procedure in [AGENT.md](AGENT.md) to import an existing identity or real
+keys. Further Agents need their own independently provisioned non-admin UIDs,
+transport membership and explicit principal registration; this setup creates one
+Agent.
+
+Daily commands, all through the same entry point:
+
+```sh
+./install.sh --status      # read-only: state, running, installed digest, accounts
+./install.sh --verify      # read-only acceptance; exit 3 on failure
+./install.sh --upgrade     # replace the binary, keep config/state; same digest = no restart
+./install.sh --uninstall   # stop the job, remove binary and plist, keep config/state/accounts
+```
+
+`--uninstall` deliberately retains `/Library/ANPIOKey/service.json`, `state/`,
+`sign/`, `admin/` and the `_anpio*` accounts: removing them would destroy the
+identity and allow UID reuse. A later `./install.sh` therefore reports `data`
+(exit 2) instead of silently reusing or wiping that state. Removing it is a
+separate, manual, destructive decision.
 
 For a manually reviewed release, the same steps are:
 
@@ -183,7 +200,11 @@ the entire Agent under its own UID.
 
 Stopping/restarting leaves configuration/state intact but locks keys and
 invalidates grants. `KeepAlive=false`; crash recovery does not automatically
-restart/unlock. The verified binary updater is plan-only by default:
+restart/unlock. The normal update is `./install.sh --upgrade`; it builds as you,
+stops/starts the job through `update-local.py` and skips everything when the
+installed digest already matches, so it never restarts for a no-op. `--dry-run`
+prints the plan. For an independently reviewed digest, run the updater directly
+— it is plan-only by default:
 
 ```sh
 python3 deploy/macos/update-local.py --binary target/release/anpio-key --sha256 VERIFIED_SHA256

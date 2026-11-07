@@ -26,6 +26,10 @@ usage() {
   --binary PATH       使用已构建的程序，跳过构建
   --sha256 HASH       使用给定的 SHA-256，跳过计算
   --dry-run           只打印计划，不做任何修改
+  --status            只读显示安装状态、运行状态和已安装摘要
+  --verify            对已安装服务跑只读验收，失败退出 3
+  --upgrade           用当前构建替换已安装二进制，保留配置和状态
+  --uninstall         停止服务并删除二进制和服务单元，保留配置、状态和账号
   -h, --help          显示本帮助
 
 初始化身份和 grant（老路：受保护迁移用；macOS 只用于本机预览）:
@@ -40,6 +44,10 @@ usage() {
 
 示例:
   ./install.sh
+  ./install.sh --status
+  ./install.sh --verify
+  ./install.sh --upgrade
+  ./install.sh --uninstall
   ./install.sh --agent-user agent-a --agent-user agent-b
   ./install.sh --tpm-device
   ./install.sh --bootstrap --did-host agents.example.com \
@@ -64,6 +72,7 @@ SHA256=""
 DRY_RUN=0
 ROOT_PHASE=0
 BOOTSTRAP=0
+COMMAND=install
 DID_HOST=""
 DID_PATH="agents/anpio-key"
 TARGET=""
@@ -117,6 +126,18 @@ while (($#)); do
       SHA256="$2"; shift 2 ;;
     --dry-run)
       DRY_RUN=1; shift ;;
+    --status)
+      [[ "$COMMAND" == install ]] || die "只能选择一个动作"
+      COMMAND=status; shift ;;
+    --verify)
+      [[ "$COMMAND" == install ]] || die "只能选择一个动作"
+      COMMAND=verify; shift ;;
+    --upgrade)
+      [[ "$COMMAND" == install ]] || die "只能选择一个动作"
+      COMMAND=upgrade; shift ;;
+    --uninstall)
+      [[ "$COMMAND" == install ]] || die "只能选择一个动作"
+      COMMAND=uninstall; shift ;;
     --_root)
       ROOT_PHASE=1; shift ;;
     -h|--help)
@@ -132,6 +153,125 @@ case "$(uname -s)" in
   *) die "只支持 Linux 和 macOS" ;;
 esac
 
+case "$PLATFORM" in
+  macos)
+    CONFIG_PATH=/Library/ANPIOKey/service.json
+    BINARY_PATH=/Library/ANPIOKey/bin/anpio-key
+    UNIT_PATH=/Library/LaunchDaemons/org.anpio-key.local.plist
+    SOCKET_PATH=/Library/ANPIOKey/admin/admin.sock
+    ACCOUNTS=(_anpio _anpagent) ;;
+  linux)
+    CONFIG_PATH=/etc/anpio-key/service.json
+    BINARY_PATH=/usr/local/libexec/anpio-key
+    UNIT_PATH=/etc/systemd/system/anpio-key.service
+    SOCKET_PATH=/run/anpio-key/admin/admin.sock
+    ACCOUNTS=() ;;
+esac
+
+missing_prerequisite() { echo "install: $*" >&2; exit 4; }
+
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+
+# Read-only state model. Anything but "none" is never repaired automatically.
+detect_state() {
+  local config=0 binary=0 unit=0
+  [[ -e "$CONFIG_PATH" ]] && config=1
+  [[ -e "$BINARY_PATH" ]] && binary=1
+  [[ -e "$UNIT_PATH" ]] && unit=1
+  if ((config == 0 && binary == 0 && unit == 0)); then
+    echo none
+  elif ((config == 1 && binary == 1 && unit == 1)); then
+    echo installed
+  elif ((config == 1 && binary == 0 && unit == 0)); then
+    echo data
+  else
+    echo partial
+  fi
+}
+
+is_running() {
+  if [[ "$PLATFORM" == macos ]]; then
+    [[ -S "$SOCKET_PATH" ]]
+  else
+    systemctl is-active --quiet anpio-key.service 2>/dev/null
+  fi
+}
+
+describe() { if [[ -e "$1" ]]; then echo 存在; else echo 缺失; fi; }
+
+print_status() {
+  local state running digest uid account
+  state="$(detect_state)"
+  if is_running; then running=运行中; else running=未运行; fi
+  if [[ -f "$BINARY_PATH" ]]; then digest="$(sha256_of "$BINARY_PATH")"; else digest="（无二进制）"; fi
+  echo "平台:       $PLATFORM"
+  echo "状态:       ${state}（${running}）"
+  echo "配置:       ${CONFIG_PATH}（$(describe "$CONFIG_PATH")）"
+  echo "程序:       ${BINARY_PATH}（$(describe "$BINARY_PATH")）"
+  echo "服务单元:   ${UNIT_PATH}（$(describe "$UNIT_PATH")）"
+  echo "已安装摘要: $digest"
+  if ((${#ACCOUNTS[@]})); then
+    for account in "${ACCOUNTS[@]}"; do
+      if uid="$(id -u "$account" 2>/dev/null)"; then
+        echo "账号:       $account uid=$uid"
+      fi
+    done
+  fi
+  case "$state" in
+    none) echo "建议:       ./install.sh" ;;
+    installed) echo "建议:       ./install.sh --upgrade | --verify | --uninstall" ;;
+    data) echo "建议:       服务已卸载；配置、状态和账号保留，恢复或清除见部署文档" ;;
+    partial) echo "建议:       人工核对残留后再安装" ;;
+  esac
+}
+
+upgrade_macos() {
+  upgrade_args=(/usr/bin/python3 "$REPO_ROOT/deploy/macos/update-local.py" --binary "$BINARY" --sha256 "$SHA256")
+  if [[ -e /Library/ANPIOKey/bin/anpio-key.previous ]]; then
+    echo "==> 已有上一版备份，本次先归档到摘要命名的文件"
+    upgrade_args+=(--archive-previous)
+  fi
+  "${upgrade_args[@]}" --apply
+}
+
+upgrade_linux() {
+  command -v systemctl >/dev/null 2>&1 || missing_prerequisite "缺少 systemctl"
+  echo "==> 停止服务（会锁钥匙并作废 grant）"
+  systemctl stop anpio-key.service
+  if ! python3 "$REPO_ROOT/deploy/linux/install.py" --binary "$BINARY" --sha256 "$SHA256" --update; then
+    echo "更新失败；服务保持停止，旧二进制按工具输出保留。" >&2
+    systemctl status --no-pager anpio-key.service || true
+    exit 3
+  fi
+  echo "==> 启动服务"
+  systemctl start anpio-key.service
+  for _ in {1..30}; do [[ -S "$SOCKET_PATH" ]] && break; sleep 1; done
+  if ! systemctl is-active --quiet anpio-key.service; then
+    systemctl status --no-pager anpio-key.service || true
+    journalctl -u anpio-key.service -n 50 --no-pager || true
+    exit 3
+  fi
+  echo "升级完成。服务已重启；旧钥匙需要重新解锁，grant 已按重启语义作废。"
+}
+
+verify_install() {
+  case "$PLATFORM" in
+    macos)
+      command -v /usr/bin/python3 >/dev/null 2>&1 || missing_prerequisite "缺少 /usr/bin/python3"
+      /usr/bin/python3 "$REPO_ROOT/deploy/macos/acceptance/test-install.py" || exit 3 ;;
+    linux)
+      command -v runuser >/dev/null 2>&1 || missing_prerequisite "缺少 runuser"
+      runuser -u "$ADMIN_USER" -- "$BINARY_PATH" admin --config "$CONFIG_PATH" status || exit 3
+      runuser -u "$ADMIN_USER" -- "$BINARY_PATH" probe --security --config "$CONFIG_PATH" || true ;;
+  esac
+}
+
 if ((${#AGENT_USERS[@]} == 0)); then
   if [[ "$PLATFORM" == linux ]]; then
     AGENT_USERS=("anp-agent")
@@ -140,18 +280,21 @@ if ((${#AGENT_USERS[@]} == 0)); then
   fi
 fi
 
-[[ "$ADMIN_USER" != "root" ]] || die "管理员不能是 root；请用普通账号运行，或指定 --admin-user"
-for agent in "${AGENT_USERS[@]}"; do
-  [[ "$agent" != "root" ]] || die "Agent 不能是 root"
-  [[ "$agent" != "$ADMIN_USER" ]] || die "管理员和 Agent 必须是不同账号"
-done
-if [[ "$PLATFORM" == macos ]]; then
-  ((${#AGENT_USERS[@]} == 1)) && [[ "${AGENT_USERS[0]}" == "_anpagent" ]] \
-    || die "macOS 预览只支持 _anpagent 作为 Agent 账号"
-  [[ -z "$TPM_DEVICE" ]] || die "macOS 不使用 --tpm-device"
+if [[ "$COMMAND" == install || "$COMMAND" == upgrade ]]; then
+  [[ "$ADMIN_USER" != "root" ]] || die "管理员不能是 root；请用普通账号运行，或指定 --admin-user"
+  for agent in "${AGENT_USERS[@]}"; do
+    [[ "$agent" != "root" ]] || die "Agent 不能是 root"
+    [[ "$agent" != "$ADMIN_USER" ]] || die "管理员和 Agent 必须是不同账号"
+  done
+  if [[ "$PLATFORM" == macos ]]; then
+    ((${#AGENT_USERS[@]} == 1)) && [[ "${AGENT_USERS[0]}" == "_anpagent" ]] \
+      || die "macOS 预览只支持 _anpagent 作为 Agent 账号"
+    [[ -z "$TPM_DEVICE" ]] || die "macOS 不使用 --tpm-device"
+  fi
 fi
 
 if ((BOOTSTRAP)); then
+  [[ "$COMMAND" == install ]] || die "--bootstrap 只用于安装"
   [[ "$GRANT_DAYS" =~ ^[0-9]+$ ]] || die "--grant-days 必须是整数"
   [[ "$MAX_USES" =~ ^[0-9]+$ ]] || die "--max-uses 必须是整数"
   [[ "$BODY_BYTES" =~ ^[0-9]+$ ]] || die "--body-bytes 必须是整数"
@@ -174,36 +317,123 @@ elif [[ -n "$DID_HOST$TARGET" || ${#METHODS[@]} -gt 0 ]]; then
   die "身份初始化选项需要同时带上 --bootstrap"
 fi
 
-if [[ -z "$BINARY" ]]; then
-  command -v cargo >/dev/null 2>&1 \
-    || die "未找到 cargo。先安装 Rust（https://rustup.rs），或用 --binary 指定已构建的程序；也可以不用 sudo 直接运行 ./install.sh，脚本会先构建再提权"
-  features="mcp"
-  [[ -n "$TPM_DEVICE" ]] && features="$features,hardware-tpm"
-  echo "==> 构建 release（features: $features）"
-  ( cd "$REPO_ROOT" && cargo build --locked --release --features "$features" )
-  BINARY="$REPO_ROOT/target/release/anpio-key"
+STATE="$(detect_state)"
+
+if [[ "$COMMAND" == status ]]; then
+  print_status
+  exit 0
 fi
 
-[[ -f "$BINARY" && -x "$BINARY" ]] || die "程序不可执行: $BINARY"
-BINARY="$(cd -- "$(dirname -- "$BINARY")" && pwd -P)/$(basename -- "$BINARY")"
+if [[ "$COMMAND" == uninstall ]]; then
+  case "$STATE" in
+    none|data)
+      echo "没有已安装的服务需要卸载（状态: ${STATE}）。"
+      echo "配置、状态和账号保留在 ${CONFIG_PATH%/*} 及其之下。"
+      exit 0 ;;
+  esac
+  if ((DRY_RUN)); then
+    echo "将停止服务并删除:"
+    echo "  $BINARY_PATH"
+    echo "  $UNIT_PATH"
+    echo "保留: ${CONFIG_PATH}、状态目录和系统账号。"
+    exit 0
+  fi
+  if ((EUID != 0)); then
+    echo "==> 卸载需要 root，接着会调用 sudo"
+    exec sudo -- "$SCRIPT_DIR/install.sh" --_root --uninstall
+  fi
+  case "$PLATFORM" in
+    macos) /usr/bin/python3 "$REPO_ROOT/deploy/macos/install.py" --uninstall --apply ;;
+    linux) python3 "$REPO_ROOT/deploy/linux/install.py" --uninstall ;;
+  esac
+  exit $?
+fi
 
-if [[ -z "$SHA256" ]]; then
-  if command -v sha256sum >/dev/null 2>&1; then
-    SHA256="$(sha256sum "$BINARY" | awk '{print $1}')"
+if [[ "$COMMAND" == verify ]]; then
+  [[ "$STATE" == installed ]] || { echo "没有已安装的服务可验收（状态: ${STATE}）。" >&2; exit 2; }
+  if ((DRY_RUN)); then
+    case "$PLATFORM" in
+      macos) echo "将运行只读验收: /usr/bin/python3 deploy/macos/acceptance/test-install.py" ;;
+      linux) echo "将运行只读验收: runuser -u ${ADMIN_USER} -- ${BINARY_PATH} admin --config ${CONFIG_PATH} status" ;;
+    esac
+    echo "只读，不修改任何内容（--dry-run）。"
+    exit 0
+  fi
+  if ((EUID != 0)); then
+    exec sudo -- "$SCRIPT_DIR/install.sh" --_root --verify --admin-user "$ADMIN_USER"
+  fi
+  verify_install
+  exit $?
+fi
+
+if [[ "$COMMAND" == upgrade ]]; then
+  [[ "$STATE" == installed ]] || { echo "没有可升级的安装（状态: ${STATE}）；全新安装请直接运行 ./install.sh。" >&2; exit 2; }
+elif [[ "$COMMAND" == install ]]; then
+  case "$STATE" in
+    installed)
+      if is_running; then RUNNING=运行中; else RUNNING=未运行; fi
+      echo "已安装（${RUNNING}），没有修改任何内容。"
+      echo "换二进制: ./install.sh --upgrade    卸载: ./install.sh --uninstall    状态: ./install.sh --status"
+      exit 0 ;;
+    data)
+      echo "服务已卸载，但配置、状态和账号仍保留在 ${CONFIG_PATH%/*}。" >&2
+      echo "默认安装不会覆盖已有配置；恢复二进制或彻底清除需按部署文档人工执行。" >&2
+      exit 2 ;;
+    partial)
+      echo "检测到半成品安装，拒绝自动修复。现存:" >&2
+      [[ -e "$CONFIG_PATH" ]] && echo "  配置 $CONFIG_PATH" >&2
+      [[ -e "$BINARY_PATH" ]] && echo "  程序 $BINARY_PATH" >&2
+      [[ -e "$UNIT_PATH" ]] && echo "  服务单元 $UNIT_PATH" >&2
+      echo "先人工核对并清除残留，再重新安装。" >&2
+      exit 2 ;;
+  esac
+fi
+
+BUILD_PENDING=0
+if [[ -z "$BINARY" ]]; then
+  if ((DRY_RUN)); then
+    BINARY="$REPO_ROOT/target/release/anpio-key"
+    BUILD_PENDING=1
   else
-    SHA256="$(shasum -a 256 "$BINARY" | awk '{print $1}')"
+    command -v cargo >/dev/null 2>&1 \
+      || missing_prerequisite "未找到 cargo。先安装 Rust（https://rustup.rs），或用 --binary 指定已构建的程序；也可以不用 sudo 直接运行 ./install.sh，脚本会先构建再提权"
+    features="mcp"
+    [[ -n "$TPM_DEVICE" ]] && features="$features,hardware-tpm"
+    echo "==> 构建 release（features: ${features}）"
+    ( cd "$REPO_ROOT" && cargo build --locked --release --features "$features" )
+    BINARY="$REPO_ROOT/target/release/anpio-key"
   fi
 fi
-SHA256="$(printf '%s' "$SHA256" | tr 'A-F' 'a-f')"
-[[ "$SHA256" =~ ^[0-9a-f]{64}$ ]] || die "SHA-256 格式不对: $SHA256"
+
+if ((BUILD_PENDING == 0)); then
+  [[ -f "$BINARY" && -x "$BINARY" ]] || die "程序不可执行: $BINARY"
+  BINARY="$(cd -- "$(dirname -- "$BINARY")" && pwd -P)/$(basename -- "$BINARY")"
+fi
+
+if ((BUILD_PENDING == 0)) && [[ -z "$SHA256" ]]; then
+  SHA256="$(sha256_of "$BINARY")"
+fi
+if [[ -n "$SHA256" ]]; then
+  SHA256="$(printf '%s' "$SHA256" | tr 'A-F' 'a-f')"
+  [[ "$SHA256" =~ ^[0-9a-f]{64}$ ]] || die "SHA-256 格式不对: $SHA256"
+fi
+
+if [[ "$COMMAND" == upgrade && -n "$SHA256" && -f "$BINARY_PATH" ]]; then
+  if [[ "$(sha256_of "$BINARY_PATH")" == "$SHA256" ]]; then
+    echo "已安装的二进制就是该构建（${SHA256}）；跳过，服务未重启。"
+    exit 0
+  fi
+fi
 
 if ((DRY_RUN)); then
   cat <<EOF
 平台:       $PLATFORM
+动作:       $COMMAND
+当前状态:   $STATE
 管理员:     $ADMIN_USER
 Agent:      ${AGENT_USERS[*]}
-程序:       $BINARY
-SHA-256:    $SHA256
+程序:       $BINARY$( ((BUILD_PENDING)) && echo "（将构建）" )
+SHA-256:    ${SHA256:-（构建后计算）}
 TPM 设备:   ${TPM_DEVICE:-无}
 身份初始化: $( ((BOOTSTRAP)) && echo "是" || echo "否" )$(
   if ((BOOTSTRAP)); then
@@ -213,8 +443,8 @@ TPM 设备:   ${TPM_DEVICE:-无}
 )
 
 将执行:
-  - 创建缺失的 Agent 账号（Linux: anp-agent；macOS: _anpagent）
-  - 安装 root 持有的程序、配置和 systemd/launchd 服务
+  - 构建 release（未给 --binary 时）
+  - 安装 root 持有的程序、配置和 systemd/launchd 服务（升级时只替换二进制）
   - 启动服务并做只读检查
 $( ((BOOTSTRAP)) && printf '  - 生成新身份，离线迁入受保护状态，创建策略和 grant，并解锁\n  - 口令由你在这个终端输入\n' )
 
@@ -224,8 +454,10 @@ EOF
 fi
 
 if ((EUID != 0)); then
-  echo "==> 安装需要 root，接着会调用 sudo"
-  args=(--_root --admin-user "$ADMIN_USER" --binary "$BINARY" --sha256 "$SHA256")
+  echo "==> ${COMMAND} 需要 root，接着会调用 sudo"
+  args=(--_root --admin-user "$ADMIN_USER" --binary "$BINARY")
+  [[ -n "$SHA256" ]] && args+=(--sha256 "$SHA256")
+  [[ "$COMMAND" == upgrade ]] && args+=(--upgrade)
   for agent in "${AGENT_USERS[@]}"; do args+=(--agent-user "$agent"); done
   [[ -n "$TPM_DEVICE" ]] && args+=(--tpm-device "$TPM_DEVICE")
   if ((BOOTSTRAP)); then
@@ -237,6 +469,14 @@ if ((EUID != 0)); then
 fi
 
 # ---- root phase ----
+
+if [[ "$COMMAND" == upgrade ]]; then
+  case "$PLATFORM" in
+    macos) upgrade_macos ;;
+    linux) upgrade_linux ;;
+  esac
+  exit $?
+fi
 
 [[ "$(id -u "$ADMIN_USER")" != "0" ]] || die "管理员不能是 root"
 

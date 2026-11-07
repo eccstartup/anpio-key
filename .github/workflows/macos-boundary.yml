@@ -1,9 +1,9 @@
 name: macOS local boundary preview
 on:
   push:
-    paths: ['src/**', 'tests/**', 'examples/**', 'deploy/macos/**', 'Cargo.*', '.github/workflows/macos-boundary.yml']
+    paths: ['src/**', 'tests/**', 'examples/**', 'deploy/macos/**', 'deploy/tests/**', 'install.sh', 'Cargo.*', '.github/workflows/macos-boundary.yml']
   pull_request:
-    paths: ['src/**', 'tests/**', 'examples/**', 'deploy/macos/**', 'Cargo.*', '.github/workflows/macos-boundary.yml']
+    paths: ['src/**', 'tests/**', 'examples/**', 'deploy/macos/**', 'deploy/tests/**', 'install.sh', 'Cargo.*', '.github/workflows/macos-boundary.yml']
 permissions:
   contents: read
 jobs:
@@ -14,6 +14,8 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+      - name: Entry-point lint (bash 3.2 parse and full-width adjacency)
+        run: python3 -m unittest discover -s deploy/tests -p 'test_*.py'
       - name: Installer identity policy (no host changes)
         run: python3 -m unittest discover -s deploy/macos/tests -p 'test_*.py'
       - name: Regression tests
@@ -30,6 +32,22 @@ jobs:
         run: |
           cargo build --locked --release --features mcp
           target/release/anpio-key build-info | python3 -c 'import json,sys; i=json.load(sys.stdin); assert i["release"] and not i["protected_supported"] and not i["seed_export"] and not i["hardware_software"]'
+      - name: Install is idempotent and upgrade with the same digest is a no-op
+        run: |
+          digest=$(shasum -a 256 target/release/anpio-key | awk '{print $1}')
+          sudo ./install.sh --binary target/release/anpio-key --sha256 "$digest" --admin-user "$USER"
+          ./install.sh --status
+          ./install.sh
+          ./install.sh --upgrade --binary target/release/anpio-key --sha256 "$digest"
+      - name: Uninstall stops the job but keeps config, state and accounts
+        run: |
+          sudo ./install.sh --uninstall
+          test ! -e /Library/ANPIOKey/bin/anpio-key
+          test ! -e /Library/LaunchDaemons/org.anpio-key.local.plist
+          test -f /Library/ANPIOKey/service.json
+          rc=0; ./install.sh || rc=$?
+          test "$rc" = 2
+          ./install.sh --status
 
   signing-harness-regression:
     runs-on: ubuntu-latest

@@ -38,7 +38,19 @@
 ./install.sh --dry-run
 ```
 
-`--agent-user` 可以写多个，每个 Agent 一个账号；`--bootstrap` 只为第一个账号创建 grant。`--method` 可以重复，默认 `GET`；`--body-bytes`、`--grant-days`、`--max-uses` 分别限制请求体大小、有效天数和签名次数。安装器拒绝覆盖已有安装。
+`--agent-user` 可以写多个，每个 Agent 一个账号；`--bootstrap` 只为第一个账号创建 grant。`--method` 可以重复，默认 `GET`；`--body-bytes`、`--grant-days`、`--max-uses` 分别限制请求体大小、有效天数和签名次数。
+
+安装完成后，日常只用这一个入口：
+
+| 命令 | 做什么 |
+|---|---|
+| `./install.sh` | 已安装时只打印状态并退出 0；不构建、不提权 |
+| `./install.sh --status` | 只读查看状态、是否运行、已装二进制摘要 |
+| `./install.sh --verify` | 对已安装服务跑只读验收，失败退出 3 |
+| `./install.sh --upgrade` | 用当前构建替换二进制，保留配置和状态；摘要相同时不重启 |
+| `./install.sh --uninstall` | 停止服务并删除二进制和服务单元，保留配置、状态和账号 |
+
+退出码：0 成功或本来就是这个状态，2 状态不符（例如半成品安装、卸载后只剩配置），3 验收失败，4 缺前置（cargo、python3、systemd）。加 `--dry-run` 只打印计划。
 
 手动完成身份和授权时，按[本机使用](/guide/local-use)执行登记 vault、确认 root/hot 角色、发布策略、创建 grant 和解锁。
 
@@ -69,18 +81,14 @@ sudo systemctl enable --now anpio-key
 
 </details>
 
-更新用 `--update`，先停服务：
+更新用 `--upgrade`。它先停服务、换二进制、再起服务，配置和状态不动：
 
 ```bash
 cargo build --locked --release
-sha256sum target/release/anpio-key
-sudo systemctl stop anpio-key
-sudo python3 deploy/linux/install.py --update \
-  --binary target/release/anpio-key --sha256 你核对过的SHA256
-sudo systemctl start anpio-key
+./install.sh --upgrade
 ```
 
-更新不会覆盖配置和状态，也不会自动重启。旧 grant 在重启后失效。
+先看计划加 `--dry-run`；也可以显式给 `--binary` 和核对过的 `--sha256`。重启会锁钥匙并作废已有 grant，这是重启语义，不是升级的副作用。手动分步（`systemctl stop` → `deploy/linux/install.py --update` → `systemctl start`）见仓库 `deploy/linux/README.md`。
 
 ### 什么时候报告 `protected_supported=true`
 
@@ -112,11 +120,11 @@ macOS 预览不要求完整 Xcode、付费开发者会员或 Secure Enclave。�
 
 加上 `--bootstrap --did-host HOST --target https://...` 可以在同一次运行里用一次性身份创建身份、迁入受保护状态并创建首张 grant；这条路径固定使用 `_anpagent` 和 `--hardware none`。
 
-安装器建立独立账号和 launchd 服务，拒绝覆盖已有安装。它始终报告 `protected_supported=false`。已有身份或真实密钥不在 `--bootstrap` 范围内，需按 `deploy/macos/AGENT.md` 手动迁入。
+安装器建立独立账号和 launchd 服务，始终报告 `protected_supported=false`。已有身份或真实密钥不在 `--bootstrap` 范围内，需按 `deploy/macos/AGENT.md` 手动迁入。
 
 整个 Agent 必须在独立的非管理员账号下运行。只切换签名子进程的账号不构成隔离。
 
-已有的安装不要重复执行 setup；更新按 `deploy/macos/update-local.py` 的步骤先看计划、核对后再执行。
+重复运行 `./install.sh` 不会改动已安装的实例（退出 0）。换二进制用 `./install.sh --upgrade`，验收用 `--verify`，卸载用 `--uninstall`——它停止 launchd job、删除 `/Library/ANPIOKey/bin/anpio-key` 和 plist，保留 `service.json`、`state/` 和 `_anpio*` 账号，避免身份丢失和 UID 复用。
 
 ## 本地开发
 
@@ -133,7 +141,7 @@ anpio-key probe
 |---|---|
 | `mcp` | 启用 MCP；v2 用 `mcp --config` |
 | `seed-export` | 离线维护用的明文导出；默认不编入，启用后不声明保护支持 |
-| `hardware-se` | macOS Secure Enclave 后端；正式发行和持久化未验收 |
+| `hardware-se` | macOS Secure Enclave 后端；开发签名身份下持久化与主机生命周期已验收，正式分发未完成 |
 | `hardware-tpm` | Linux TPM 后端；部署范围已验收，实体芯片保护声明未做 |
 | `hardware-software` | 测试替身，不是硬件；release 构建拒绝 |
 

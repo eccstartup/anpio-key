@@ -111,7 +111,18 @@ git clone https://github.com/eccstartup/anpio-key.git && cd anpio-key
 ./install.sh
 ```
 
-先看计划不改系统：`./install.sh --dry-run`；物理 TPM 加 `--tpm-device`。安装器创建服务、管理员与 Agent 三个系统账号、受保护配置和 systemd 单元，**不生成身份**。
+先看计划不改系统：`./install.sh --dry-run`；物理 TPM 加 `--tpm-device`。安装器创建服务、管理员与 Agent 三个系统账号、受保护配置和 systemd 单元，**不生成身份**。已经是这个状态时再跑一次只会打印状态并退出 0，不构建、不提权。
+
+日常命令：
+
+```bash
+./install.sh --status      # 只读：状态、是否运行、已装二进制摘要
+./install.sh --verify      # 只读验收；失败退出 3
+./install.sh --upgrade     # 换二进制，保留配置和状态；摘要相同不重启
+./install.sh --uninstall   # 停服务、删二进制和单元，保留配置、状态和账号
+```
+
+状态不符退出 2（半成品安装、卸载后只剩配置），缺前置退出 4（cargo、python3、systemd）。
 
 装完之后建身份。DID、handle、文档与注册由 `anpio-cli did create` 一条命令完成，默认钥匙由 CLI 本机保管：
 
@@ -150,7 +161,7 @@ anpio-cli did create --host awiki.me --handle mybot --email you@example.com --ke
 
 `--method` 可以重复，默认只允许 `GET`；`--body-bytes` 限制请求体大小，`--grant-days` 和 `--max-uses` 限制这张 grant 的有效期和签名次数。指定多个 Agent 账号时，`--bootstrap` 只为第一个账号创建 grant。
 
-macOS 用 `./install.sh` 安装本机预览，始终 `protected_supported=false`；装完同样用 `anpio-cli did create` 建身份。`--bootstrap` 在 macOS 上仍会铸一份一次性预览身份并完成首次解锁；真实身份或已有密钥按[本机使用指南](deploy/LOCAL-USE.md)手动迁入。
+macOS 用 `./install.sh` 安装本机预览，始终 `protected_supported=false`；装完同样用 `anpio-cli did create` 建身份。`--bootstrap` 在 macOS 上仍会铸一份一次性预览身份并完成首次解锁；真实身份或已有密钥按[本机使用指南](deploy/LOCAL-USE.md)手动迁入。重复运行不会改动已安装的实例；换二进制用 `--upgrade`，卸载用 `--uninstall`（保留 `service.json`、`state/` 和 `_anpio*` 账号）。
 
 手动校验发行包、更新和离线迁移见 [Linux 部署](deploy/linux/README.md)，TPM 见 [TPM 说明](deploy/linux/TPM.md)。
 

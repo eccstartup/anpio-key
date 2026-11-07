@@ -31,6 +31,6 @@ for attempt in {1..30}; do
   if [ -S /Library/ANPIOKey/admin/admin.sock ]; then break; fi
   /bin/sleep 1
 done
-/usr/bin/python3 "$script_dir/test-install.py"
+/usr/bin/python3 "$script_dir/acceptance/test-install.py"
 echo 'Service is already loaded and running; do not run launchctl bootstrap again.'
 echo 'Local empty-state installation checked. No real keys migrated. Log out/in before operator use.'

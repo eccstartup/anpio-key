@@ -2,6 +2,8 @@
 """Fresh local-preview installation, never account creation or automatic startup.
 Run without --apply to inspect the exact plan. Accounts/groups must already exist.
 Updates/migration are deliberately refused; existing state is never overwritten.
+--uninstall stops the launchd job and removes the binary and plist, but keeps
+configuration, state and accounts so an uninstall cannot destroy an identity.
 """
 import argparse
 import ctypes
@@ -17,12 +19,15 @@ import re
 import stat
 import subprocess
 import sys
+import time
 import uuid
 
 BASE = Path('/Library/ANPIOKey')
 CONFIG = BASE / 'service.json'
 BINARY = BASE / 'bin/anpio-key'
 PLIST = Path('/Library/LaunchDaemons/org.anpio-key.local.plist')
+SOCKETS = (BASE / 'sign/sign.sock', BASE / 'admin/admin.sock')
+LABEL = 'org.anpio-key.local'
 
 
 def check_chain(path):
@@ -122,19 +127,72 @@ def write_new(path, data, mode=0o644):
     os.chmod(path, mode)
 
 
+def uninstall(apply):
+    plan = {'bootout': f'system/{LABEL}',
+            'remove': [str(BINARY), str(PLIST)],
+            'retain': [str(CONFIG), str(BASE / 'state'), str(BASE / 'sign'), str(BASE / 'admin')],
+            'apply': apply}
+    print(json.dumps(plan, indent=2))
+    if not apply:
+        return
+    if os.geteuid() != 0:
+        raise ValueError('--apply requires root')
+    check_chain(PLIST.parent)
+    if os.path.lexists(BASE):
+        check_chain(BASE)
+    # Not loaded is the expected steady state; the socket wait below is what
+    # decides whether the service actually went away.
+    result = subprocess.run(['/bin/launchctl', 'bootout', f'system/{LABEL}'],
+                            capture_output=True, text=True, check=False)
+    if result.returncode != 0 and result.stderr.strip():
+        print('launchctl: ' + result.stderr.strip(), file=sys.stderr)
+    for _ in range(30):
+        if not any(os.path.lexists(socket) for socket in SOCKETS):
+            break
+        time.sleep(1)
+    else:
+        raise ValueError('service sockets still present after 30s; refusing to remove the binary')
+    for path in (BINARY, PLIST):
+        if not os.path.lexists(path):
+            continue
+        meta = path.lstat()
+        if stat.S_ISLNK(meta.st_mode):
+            raise ValueError(f'refusing to remove symlink: {path}')
+        if meta.st_uid != 0:
+            raise ValueError(f'refusing to remove non-root file: {path}')
+        path.unlink()
+    print('Uninstalled. Service stopped; binary and launchd job removed.')
+    print('Retained: ' + str(CONFIG) + ', ' + str(BASE / 'state') + ', accounts.')
+    print('To remove the retained state by hand: sudo rm -rf ' + str(BASE) +
+          ' ' + str(PLIST) + ' (destroys the identity; accounts are separate).')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--binary', type=Path, required=True)
-    parser.add_argument('--sha256', required=True)
-    parser.add_argument('--service-user', required=True)
-    parser.add_argument('--admin-user', required=True)
-    parser.add_argument('--agent-user', action='append', required=True)
-    parser.add_argument('--sign-group', required=True)
-    parser.add_argument('--admin-group', required=True)
+    parser.add_argument('--uninstall', action='store_true')
+    parser.add_argument('--binary', type=Path)
+    parser.add_argument('--sha256')
+    parser.add_argument('--service-user')
+    parser.add_argument('--admin-user')
+    parser.add_argument('--agent-user', action='append')
+    parser.add_argument('--sign-group')
+    parser.add_argument('--admin-group')
     parser.add_argument('--apply', action='store_true')
     args = parser.parse_args()
     if sys.platform != 'darwin':
         raise ValueError('macOS only')
+    if args.uninstall:
+        given = [args.binary, args.sha256, args.service_user, args.admin_user,
+                 args.agent_user, args.sign_group, args.admin_group]
+        if any(value is not None for value in given):
+            raise ValueError('--uninstall takes no installation arguments')
+        uninstall(args.apply)
+        return
+    missing = [name for name in ('binary', 'sha256', 'service_user', 'admin_user',
+                                 'agent_user', 'sign_group', 'admin_group')
+               if getattr(args, name) is None]
+    if missing:
+        raise ValueError('missing installation arguments: ' + ', '.join('--' + n.replace('_', '-') for n in missing))
     if not re.fullmatch(r'[0-9a-f]{64}', args.sha256):
         raise ValueError('expected lowercase SHA-256 required')
     service, admin = map(pwd.getpwnam, (args.service_user, args.admin_user))

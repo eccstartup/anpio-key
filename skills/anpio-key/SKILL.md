@@ -113,7 +113,18 @@ sudo -u operator /usr/local/libexec/anpio-key admin \
 
 `signing_available` 只表示执行器没停，空安装也会是 `true`，不代表有钥匙或 grant。能否签看 `LIST_AUTHORIZED_KEYS`、grant 和实际签名结果。`anpio-key build-info` 应报 `protected_supported=true`（正式 release 构建 + `linux-protected-v1` 配置）。
 
-**位置** 程序 `/usr/local/libexec/anpio-key`，配置 `/etc/anpio-key/service.json`。安装器拒绝已有或半成品安装，它不是更新或修复命令。
+**位置** 程序 `/usr/local/libexec/anpio-key`，配置 `/etc/anpio-key/service.json`。
+
+**日常入口**（同一脚本，按状态决定动作）
+
+```bash
+./install.sh --status      # 只读：状态、是否运行、已装摘要
+./install.sh --verify      # 只读验收；失败退出 3
+./install.sh --upgrade     # 换二进制，保留配置和状态；摘要相同不重启
+./install.sh --uninstall   # 停服务、删二进制和单元，保留配置、状态和账号
+```
+
+已安装时直接跑 `./install.sh` 不会重建，只打印状态并退出 0。状态不符（半成品安装、卸载后只剩配置）退出 2，缺前置退出 4。**不要**为了"重新安装"而手工删 `/etc/anpio-key`、`/var/lib/anpio-key` 或账号。
 
 ## B. macOS：本机预览
 
@@ -128,6 +139,8 @@ sudo -u operator /usr/local/libexec/anpio-key admin \
 ```
 
 脚本先以你的账号构建，之后才要 sudo：创建 `_anpio`（服务）与 `_anpagent`（Agent）、四个组、root 所有的 `/Library/ANPIOKey` 和 launchd job，启动服务并做只读检查。
+
+已安装时直接跑 `./install.sh` 只打印状态并退出 0。日常用 `--status` / `--verify` / `--upgrade` / `--uninstall`，语义与 Linux 一节相同：升级保留配置和状态，卸载保留 `service.json`、`state/` 和 `_anpio*` 账号。不要手工删这些路径或账号。
 
 **建身份** 和 Linux 一样用 `anpio-cli did create`（要本服务保管钥匙就由管理员加 `--key anpio-key`）。但 macOS 预览同样是受保护平面，只接受已迁入 vault、登记成 `{did}#key-1` 的 DID 绑定钥匙；命名钥匙的登记还没做，所以要让预览服务真正签一把钥匙，仍用 `--bootstrap` 这条老路（一次性预览身份、迁入、登记、策略、grant、解锁）。配置在 `/Library/ANPIOKey/service.json`。
 
