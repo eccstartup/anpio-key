@@ -1712,7 +1712,7 @@ fn keygen(root: Option<&Path>, args: KeygenArgs) -> Result<()> {
     // 靠纸恢复的。所以这条路上唯一的落盘点排在"抄好了吗"之后。
     let seed = crate::crypto::hygiene::LockedBytes::generate()?;
     let words = crate::crypto::mnemonic::to_words(&seed)?;
-    show_words(&tty, &words)?;
+    show_words(&tty, &words, "this identity", IDENTITY_WORDS_NOTE)?;
     if !tty::confirm(&tty, "Have you written these 24 words down?")? {
         return Err(KeydError::Misuse(
             "the words were not written down, so nothing was minted: they are the only backup \
@@ -1863,7 +1863,7 @@ fn key_create(root: Option<&Path>, args: KeyCreateArgs) -> Result<()> {
     // 和 `keygen` 同一条顺序:词先落纸,再落盘。人说了"没抄"就什么都不铸。
     let seed = crate::crypto::hygiene::LockedBytes::generate()?;
     let words = crate::crypto::mnemonic::to_words(&seed)?;
-    show_words(&tty, &words)?;
+    show_words(&tty, &words, &format!("key {name}"), NAMED_WORDS_NOTE)?;
     if !tty::confirm(&tty, "Have you written these 24 words down?")? {
         return Err(KeydError::Misuse(
             "the words were not written down, so nothing was minted: they are the only backup \
@@ -2010,7 +2010,7 @@ fn key_rotate(root: Option<&Path>, args: KeyRotateArgs) -> Result<()> {
         tty::read_secret_twice(&tty, "New passphrase for this key: ", "Repeat it: ")?;
     let seed = crate::crypto::hygiene::LockedBytes::generate()?;
     let words = crate::crypto::mnemonic::to_words(&seed)?;
-    show_words(&tty, &words)?;
+    show_words(&tty, &words, &format!("the new key {}", args.name), NAMED_WORDS_NOTE)?;
     if !tty::confirm(&tty, "Have you written these 24 words down?")? {
         return Err(KeydError::Misuse(
             "the words were not written down, so nothing was rotated: the old key is still there"
@@ -2372,11 +2372,24 @@ fn grant_create(root: Option<&Path>, args: GrantCreateArgs) -> Result<()> {
 ///    构建里连代码都不存在),所以这一屏就是唯一的机会。
 /// 2. **纸只盖住此刻铸出来的那四把。** 以后轮换出来的热密钥是另一把随机
 ///    钥匙,不在这些词里 —— 那类钥匙只能靠归档带走。
-fn show_words(tty: &std::fs::File, words: &str) -> Result<()> {
+/// One mnemonic, four envelopes — this is what `keygen` mints.
+const IDENTITY_WORDS_NOTE: &str =
+    "The words restore the four keys minted next (root, hot, device signing,\n\
+     key agreement). A key rotated later is NOT on this paper — rotation mints\n\
+     a fresh random key that only ever lives on this machine.";
+
+/// A named key is one envelope with no DID; the same seed is its whole backup.
+const NAMED_WORDS_NOTE: &str =
+    "The words reproduce this key's seed, and no DID. To recover it, run\n\
+     `import-mnemonic` with a DID whose `e1_` segment is this key's fingerprint;\n\
+     it comes back as that DID's binding key. A rotated key is NOT on this paper —\n\
+     rotation mints a fresh random key that only ever lives on this machine.";
+
+fn show_words(tty: &std::fs::File, words: &str, subject: &str, note: &str) -> Result<()> {
     use std::fmt::Write as _;
 
     let mut screen = zeroize::Zeroizing::new(String::new());
-    let _ = writeln!(screen, "\nThese 24 words are the only backup of this identity.\n");
+    let _ = writeln!(screen, "\nThese 24 words are the only backup of {subject}.\n");
     for (number, word) in words.split_whitespace().enumerate() {
         let _ = writeln!(screen, "  {:>2}. {word}", number + 1);
     }
@@ -2385,9 +2398,7 @@ fn show_words(tty: &std::fs::File, words: &str) -> Result<()> {
         "\nWrite them down by hand, now. They are shown once: this tool has no\n\
          export path, so no later command can print them again.\n\
          \n\
-         The words restore the four keys minted next (root, hot, device signing,\n\
-         key agreement). A key rotated later is NOT on this paper — rotation mints\n\
-         a fresh random key that only ever lives on this machine.\n\n"
+         {note}\n\n"
     );
     tty::show(tty, &screen)?;
     Ok(())
