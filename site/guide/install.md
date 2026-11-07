@@ -4,7 +4,36 @@
 
 ## Linux 受保护部署
 
-服务、管理员和 Agent 会用三个系统账号。在人类审阅过的仓库根目录运行一条命令，安装、创建身份、发布策略、创建 grant 并解锁一次完成：
+服务、管理员和 Agent 会用三个系统账号。
+
+### 先装服务
+
+在人类审阅过的仓库根目录运行：
+
+```bash
+./install.sh
+```
+
+它构建 release、校验摘要、创建服务账号、安装并启动 systemd 服务，**只装服务**：不建身份、不收口令、不发 grant。装完可以立刻用 `./install.sh --status` 确认，但 `signing_available` 会是 false，因为还没有身份。
+
+### 再建身份
+
+装好之后，新身份用一条命令建进服务，全程**一次口令确认**：
+
+```bash
+anpio-cli did create --host awiki.me --handle mybot --email you@example.com \
+  --agent mybot --key anpio-key
+```
+
+CLI 准备 `ProvisionIdentity`（坐标、device、策略、grant），服务的 `complete-secret-operation --new-secret` 在**你的终端**读两遍新口令，铸根钥匙、设备签名钥匙和 X25519 协商钥匙，用同一口令封存并解锁，`AddKeys` + 发布策略 + 发 grant 在一个事务里完成；CLI 再用根钥匙签文档、把第一份文档 `InstallDocument` 进 vault、注册 handle，最后打印给 Agent 的 `did attach` 命令。口令只在终端出现，不进 argv、环境变量、MCP 或日志；之后 agent 自己签名，不再问人。
+
+`--target` / `--method` 决定 HTTP 策略覆盖的路径和方法，`--ecdh-peer` 才发 ECDH grant，`--device` 决定文档里的设备名；这些旗标只在装了受保护服务时有效。不带 `--key anpio-key` 时钥匙仍由 CLI 本机保管（0600 文件），不进入服务。
+
+已有的身份（钥匙还在本地 store）用接管：macOS 上是 `sudo ./install.sh --adopt`（见下文 macOS 一节）；Linux 的接管命令尚未提供。接管只迁移钥匙，DID 和已发布文档一字不改。
+
+### 老路：一次性预览
+
+`--bootstrap` 仍是原来那条一条命令完成安装和初始化的路，**只用于一次性预览身份，不要用于真实钥匙**：
 
 ```bash
 ./install.sh --bootstrap --did-host agents.example.com \
@@ -18,18 +47,10 @@
 
 成功后打印 DID 文档地址、vault、grant、有效期、恢复材料目录和一段 Agent 请求示例。把 DID 文档上传到打印出的地址，把 grant 交给 Agent。
 
-只安装空服务、之后手动初始化：
-
-```bash
-./install.sh
-```
-
-指定管理员和 Agent，或先用 TPM：
+指定管理员和 Agent：
 
 ```bash
 ./install.sh --admin-user operator --agent-user agent-a --agent-user agent-b
-./install.sh --tpm-device --bootstrap --did-host agents.example.com \
-  --target https://api.example.com/v1/status
 ```
 
 先看计划、不改系统：
@@ -108,7 +129,7 @@ preview、调试构建和 macOS 都是 false。这个标志是支持范围声明
 ./install.sh --tpm-device
 ```
 
-安装器只授予 `/dev/tpmrm0` 并把传输固定到该设备。验收步骤见[TPM 说明](/advanced/hardware-root)和仓库 `deploy/linux/TPM.md`。
+安装器只授予 `/dev/tpmrm0` 并把传输固定到该设备。装完照上面的 `did create --key anpio-key` 把新身份建进服务；`--bootstrap` 预览在 TPM 上同样只该用一次性身份。验收步骤见[TPM 说明](/advanced/hardware-root)和仓库 `deploy/linux/TPM.md`。
 
 ## macOS 本机预览
 
@@ -118,9 +139,19 @@ macOS 预览不要求完整 Xcode、付费开发者会员或 Secure Enclave。�
 ./install.sh
 ```
 
-加上 `--bootstrap --did-host HOST --target https://...` 可以在同一次运行里用一次性身份创建身份、迁入受保护状态并创建首张 grant；这条路径固定使用 `_anpagent` 和 `--hardware none`。
+装完后用**接管**把已有身份迁进服务：
 
-安装器建立独立账号和 launchd 服务，始终报告 `protected_supported=false`。已有身份或真实密钥不在 `--bootstrap` 范围内，需按 `deploy/macos/AGENT.md` 手动迁入。
+```bash
+sudo ./install.sh --adopt --identity ~/.anpio-cli/mybot/default/identity.json \
+  --cli-binary /path/to/anpio-cli --cli-sha256 "$(shasum -a 256 /path/to/anpio-cli | cut -d' ' -f1)" \
+  --target https://awiki.me/anp-im/rpc
+```
+
+`--adopt` 只用于 macOS 本机预览，且至少给一个 `--target`。脚本把三把 DID 绑定钥匙迁入 vault（DID 与已发布文档不变），确认 root / hot / key_agreement 角色，发布 HTTP 与文档 proof 两条策略，给 Agent 账号建 grant，解锁，安装 CLI，并在 `/Library/ANPIOKey/agent/home` 写好 Agent 记录。口令只从你的终端读取；可重跑；不删除源 store；grant 和 unlock 都在最后一次重启之后。
+
+`--bootstrap --did-host HOST --target https://...` 在 macOS 上仍可用，固定使用 `_anpagent` 和 `--hardware none`，只用于一次性预览身份，不要用真实钥匙试错。
+
+安装器建立独立账号和 launchd 服务，始终报告 `protected_supported=false`。需要逐步核对时按 `deploy/macos/AGENT.md` 手动执行。
 
 整个 Agent 必须在独立的非管理员账号下运行。只切换签名子进程的账号不构成隔离。
 

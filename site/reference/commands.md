@@ -9,14 +9,19 @@
 
 ## Linux 受保护部署
 
-安装和初始化用仓库根目录的一条命令：
+先装服务，再建身份。安装入口在仓库根目录：
 
 ```bash
-./install.sh --bootstrap --did-host agents.example.com \
-  --target https://api.example.com/v1/status
+./install.sh
 ```
 
-它按平台调用 `deploy/linux/bootstrap.py` 或 `deploy/macos/bootstrap.py`，按顺序生成身份、创建热钥匙、离线迁入、登记 vault、确认角色、发布策略、创建 grant 并解锁。macOS 只用于本机预览，固定使用 `_anpagent` 和 `--hardware none`。只安装服务时去掉 `--bootstrap`。下面的管理命令用于之后的日常操作。
+它按平台调用 `deploy/linux/install.py` 或 macOS 的安装器，**只装服务**：构建、校验摘要、建账号、安装并启动 systemd 服务，不建身份、不收口令、不发 grant。装完用 `anpio-cli did create --host HOST --handle NAME --key anpio-key` 把新身份 provision 进服务——一条命令、一次口令确认，服务建钥匙、发布策略、发 grant，CLI 签首份文档并注册 handle（详见[安装](/guide/install)）。
+
+已有身份（钥匙还在本地 store）用接管：macOS 是 `sudo ./install.sh --adopt --identity FILE --cli-binary PATH --cli-sha256 HASH --target URL`；Linux 的接管命令尚未提供。
+
+`--bootstrap` 是原来的老路：按平台调 `deploy/*/bootstrap.py`，生成一次性身份、建热钥匙、离线迁入、登记 vault、确认角色、发布策略、创建 grant 并解锁。它还在，但**只用于一次性预览身份**；macOS 上固定 `_anpagent` 和 `--hardware none`。
+
+下面的管理命令用于之后的日常操作。
 
 安装入口本身按状态工作，重复执行是空操作：
 
@@ -42,7 +47,8 @@
 | `admin --config FILE commit --operation-id UUID --digest HASH` | 管理员 | 提交刚才核对过的变更 |
 | `admin --config FILE unlock --vault-id UUID --did DID --kid KID` | 管理员 | 读取口令并解锁指定热钥匙 |
 | `admin --config FILE lock-all` | 管理员 | 移除驻留内存的钥匙 |
-| `admin --config FILE complete-secret-operation --operation-id UUID --digest HASH` | 管理员 | 完成注册 proof 或热钥匙轮换 |
+| `admin --config FILE complete-secret-operation --operation-id UUID --digest HASH` | 管理员 | 完成注册 proof 或热钥匙轮换；`--new-secret` 时读两遍新口令，`ProvisionIdentity` 走它 |
+| `admin --config FILE sign-first-document --vault-id UUID --did DID --document FILE [--domain HOST] [--challenge HEX]` | 管理员 | 签一份 DID 的**首份**文档；只在 `ProvisionIdentity` 之后紧接着有效，之后走 `SIGN_DOCUMENT_PROOF` |
 | `probe --security --config FILE` | 任何人 | 检查当前账号能访问哪个端点、配置是否有效、支持声明是什么 |
 
 Agent 可用的数据操作：
@@ -65,6 +71,25 @@ Agent 可用的数据操作：
 关着的操作不会出现在 `operations` 里，发过去是 `OPERATION_DISABLED`。各操作的字段、编码和错误码见仓库 [ADAPTER.md §11](https://github.com/eccstartup/anpio-key/blob/master/docs/ADAPTER.md)。
 
 Agent 不能解锁、不能索取私钥、不能请求任意字节签名。唯一能用根键的数据面操作是 `SIGN_DOCUMENT_PROOF`，它的 grant 只能由管理面签发；换设备、改文档、注册这些根操作全部留在管理面。
+
+### 命名钥匙
+
+`key` 这一组按名字管钥匙，不需要 DID。名字只是本机的地址；host、path、DID 和注册属于 `anpio-cli`。
+
+| 命令 | 做什么 |
+|---|---|
+| `key create [--name NAME] [--algorithm ed25519\|x25519] [--label LABEL]` | 铸一把命名钥匙；24 词只显示一次，口令读两遍后才写封装。不给名字时生成 `k-xxxxxxxx` |
+| `key list` | 名字、指纹、是否解锁 |
+| `key unlock --name NAME` | 按名字解锁（口令从终端读） |
+| `key rotate --name NAME` | 同名换一把新钥匙 |
+| `key sign-document --name NAME --keyid KEYID --document FILE [--domain HOST] [--challenge HEX] [--out FILE]` | 管理员动作：给一份 JSON 文档签 proof，不经过 grant |
+| `key bind-did --identity FILE --out DIR [--source-root DIR]` | 接管前把命名钥匙重封成 DID 绑定封装；种子、公钥、指纹不变，源 store 只读 |
+
+`x25519` 只能用于 ECDH，不能签名。命名钥匙进不了受保护 catalog；要把它们交给受保护服务，先用 `key bind-did` 重封，再按 macOS 的 `--adopt` 接管。
+
+### grant
+
+`grant create` 在受保护管理面上发 grant，只支持两种用途：`--purpose http-authentication`（要 Hot 钥匙和 `--target`）与 `--purpose document-proof`（要 Root 钥匙）。`--kid` 直接点名已登记的钥匙，`--key` 用本地名字反查 DID 并与指纹核对，两者只给一个。`--ttl` 默认 `24h`，`--uses` 默认 `100`；提交前会把完整摘要打出来问一次。
 
 管理 JSON 的格式和完整流程见[本机使用](/guide/local-use)，接入代码见[接到 Agent 上](/advanced/agent)。
 

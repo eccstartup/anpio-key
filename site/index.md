@@ -65,14 +65,20 @@ anpio-key --root /tmp/keyd-lab sign --did 你的DID \
 
 ## 正式使用
 
-Linux 上把服务、管理员和 Agent 分成三个系统账号，Agent 读不到私钥和状态。一条命令完成安装、身份、策略、grant 和解锁：
+Linux 上把服务、管理员和 Agent 分成三个系统账号，Agent 读不到私钥和状态。先装服务：
 
 ```bash
-./install.sh --bootstrap --did-host agents.example.com \
-  --target https://api.example.com/v1/status
+./install.sh
 ```
 
-命令会打印 DID 文档地址和 grant 编号。上传 DID 文档、把 grant 交给 Agent，就可以开始签名。详细说明见[安装](/guide/install)，手动分步完成见[本机使用](/guide/local-use)。
+它只装服务，不建身份。装好之后，新身份用一条命令 provision 进去，全程只在你的终端确认一次口令：
+
+```bash
+anpio-cli did create --host awiki.me --handle mybot --email you@example.com \
+  --agent mybot --key anpio-key
+```
+
+服务铸根钥匙、设备签名钥匙和协商钥匙，发布策略、按用途发 grant；CLI 签首份文档、注册 handle，并打印给 Agent 的 `did attach` 命令。详细说明见[安装](/guide/install)，手动分步完成见[本机使用](/guide/local-use)。
 
 ## 从哪儿开始
 

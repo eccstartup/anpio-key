@@ -42,7 +42,13 @@ anpio-key keygen --spec mybot.spec.json --hardware secure-enclave
 ./install.sh --tpm-device
 ```
 
-同一次运行里完成身份、策略、grant 和解锁：
+装完照常把新身份 provision 进服务：
+
+```bash
+anpio-cli did create --host awiki.me --handle mybot --key anpio-key
+```
+
+根钥匙、设备签名钥匙和协商钥匙都由服务的 TPM 后端铸出并封存。`--bootstrap` 预览在 TPM 上同样只该用一次性身份：
 
 ```bash
 ./install.sh --tpm-device --bootstrap --did-host agents.example.com \
