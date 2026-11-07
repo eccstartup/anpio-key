@@ -385,9 +385,8 @@ fn help_lists_every_command() {
 
     for command in [
         "serve",
-        "keygen",
-        "spec",
-        "publish",
+        "key",
+        "grant",
         "verify-doc",
         "list",
         "status",
@@ -404,6 +403,22 @@ fn help_lists_every_command() {
         "import-archive",
     ] {
         assert!(text.contains(command), "`{command}` is missing from --help:\n{text}");
+    }
+
+    // 老名字还在,但**不上 help**:它们要继续能用,只是不再被推荐。
+    // 按命令表里的**整词**判,不是子串 —— `spec` 在别的说明文字里也出现过。
+    let listed: Vec<&str> = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("  "))
+        .filter_map(|line| line.split_whitespace().next())
+        .collect();
+    for retired in ["keygen", "spec", "publish"] {
+        assert!(
+            !listed.contains(&retired),
+            "`{retired}` is retired and must not be advertised:\n{text}"
+        );
+        let outcome = run_bare(&[retired, "--help"]);
+        outcome.expect_ok();
     }
 }
 

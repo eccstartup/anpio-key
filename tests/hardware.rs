@@ -291,6 +291,7 @@ fn the_same_seed_exports_the_same_words_whether_bound_or_not() {
             algorithm: anpio_key::keystore::record::KeyAlgorithm::Ed25519,
             public_multibase: public_multibase.clone(),
             label: "words".into(),
+            name: String::new(),
             passphrase: PASS,
             device_secret: &device(7),
             seed: &seed,
@@ -309,6 +310,7 @@ fn the_same_seed_exports_the_same_words_whether_bound_or_not() {
         algorithm: anpio_key::keystore::record::KeyAlgorithm::Ed25519,
         public_multibase,
         label: "words".into(),
+        name: String::new(),
         passphrase: PASS,
         device_secret: &device(7),
         seed: &seed,
@@ -317,10 +319,11 @@ fn the_same_seed_exports_the_same_words_whether_bound_or_not() {
     })
     .unwrap();
 
-    // 两个信封是**不一样**的 —— 版本号就不一样。否则下面那一步可能只是在
-    // 比较同一个对象。
-    assert_eq!(bound.version, anpio_key::keystore::record::RECORD_VERSION_HARDWARE);
-    assert_eq!(plain.version, anpio_key::keystore::record::RECORD_VERSION);
+    // 两个信封**不一样** —— 新写入都是 v3,区别在硬件根在不在。
+    assert_eq!(bound.version, anpio_key::keystore::record::RECORD_VERSION_NAMED);
+    assert_eq!(plain.version, anpio_key::keystore::record::RECORD_VERSION_NAMED);
+    assert!(bound.hardware.is_some() && bound.hs_ciphertext.is_some());
+    assert!(plain.hardware.is_none() && plain.hs_ciphertext.is_none());
 
     let bound_seed =
         anpio_key::keystore::unwrap::open_seed(&bound, PASS, &device(7)).expect("the bound one opens");

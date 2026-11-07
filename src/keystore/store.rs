@@ -41,6 +41,104 @@ pub fn exists(layout: &KeydLayout, thumbprint: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// 把一个**名字钥匙**写到 `keys/<name>.json`,权限 0600。
+///
+/// 和 [`save_new`] 一样拒绝覆盖:撞名说明调用方该换一个名字,而不是拿
+/// 新钥匙盖掉一个还活着的旧钥匙。
+pub fn save_named(layout: &KeydLayout, wrapped: &WrappedKey) -> Result<()> {
+    if !wrapped.is_named() {
+        return Err(KeydError::Protocol(
+            "save_named was handed an envelope without a key name".into(),
+        ));
+    }
+    wrapped.validate()?;
+    let path = layout.key_name_path(&wrapped.name)?;
+    if path.exists() {
+        return Err(KeydError::KeyExists(wrapped.name.clone()));
+    }
+    write_named(layout, wrapped)
+}
+
+/// 无条件写一个名字信封。轮换走这条 —— 它对"我在覆盖同一把钥匙"是知情的。
+pub fn write_named(layout: &KeydLayout, wrapped: &WrappedKey) -> Result<()> {
+    if !wrapped.is_named() {
+        return Err(KeydError::Protocol(
+            "write_named was handed an envelope without a key name".into(),
+        ));
+    }
+    wrapped.validate()?;
+    let path = layout.key_name_path(&wrapped.name)?;
+    let mut bytes = serde_json::to_vec_pretty(wrapped)?;
+    let result = layout::write_atomic(&path, &bytes, SECRET_FILE_MODE);
+    zeroize::Zeroize::zeroize(&mut bytes);
+    result
+}
+
+pub fn named_exists(layout: &KeydLayout, name: &str) -> bool {
+    layout
+        .key_name_path(name)
+        .map(|p| p.exists())
+        .unwrap_or(false)
+}
+
+/// 按名字读回一个信封。
+///
+/// 和 [`load`] 是同一条检查:文件名必须就是文件内容说的那个名字。把
+/// `keys/bot.json` 复制成 `keys/backup.json` 之后,后者读出来会被拒 ——
+/// 否则"备份"和"另一把钥匙"就没法区分了。
+pub fn load_named(layout: &KeydLayout, name: &str) -> Result<WrappedKey> {
+    let path = layout.key_name_path(name)?;
+    if !path.exists() {
+        return Err(KeydError::KeyNotFound(name.to_string()));
+    }
+    read_checked(layout, &path)
+}
+
+/// 删掉一个名字信封。不可逆,调用方负责先确认。
+pub fn delete_named(layout: &KeydLayout, name: &str) -> Result<()> {
+    let path = layout.key_name_path(name)?;
+    fs::remove_file(&path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            KeydError::KeyNotFound(name.to_string())
+        } else {
+            KeydError::Io(e)
+        }
+    })
+}
+
+/// 读一个信封,**并确认它就在自己声称的位置上**。
+///
+/// 两种寻址各有一个期望路径:名字钥匙看 `name`,DID 绑定的看指纹。实际
+/// 路径与它不一致,就是"搬了家"——`cp A.json B.json` 之后内容自洽,AAD
+/// 当然算得过,但 B 这个位置上是 A 的钥匙。
+///
+/// 报 `Protocol` 而不是 `AadMismatch`:摘要本身没被改,是被搬了家。
+/// "改名"和"改头"是两种事故,给两个不同的错才好查。
+fn read_checked(layout: &KeydLayout, path: &std::path::Path) -> Result<WrappedKey> {
+    let bytes = layout::read_secret_file(path)?;
+    let wrapped: WrappedKey = serde_json::from_slice(&bytes)
+        .map_err(|e| KeydError::Protocol(format!("{} is not a readable envelope: {e}", path.display())))?;
+
+    wrapped.validate()?;
+    let expected = if wrapped.is_named() {
+        layout.key_name_path(&wrapped.name)?
+    } else {
+        layout.key_path(&wrapped.id.thumbprint)?
+    };
+    if expected != path {
+        let identity = if wrapped.is_named() {
+            format!("the key named {:?}", wrapped.name)
+        } else {
+            format!("{}'s key", wrapped.id.thumbprint)
+        };
+        return Err(KeydError::Protocol(format!(
+            "{} was renamed: it contains {identity}",
+            path.display()
+        )));
+    }
+    Ok(wrapped)
+}
+
 /// 按指纹读回一个信封,并确认**文件名与文件内容说的是同一把钥匙**。
 ///
 /// 这一条挡的是计划 M1 负例 C 的文件那一面:`cp A.json B.json` 之后,
@@ -54,19 +152,7 @@ pub fn load(layout: &KeydLayout, thumbprint: &str) -> Result<WrappedKey> {
     if !path.exists() {
         return Err(KeydError::KeyNotFound(thumbprint.to_string()));
     }
-    let bytes = layout::read_secret_file(&path)?;
-    let wrapped: WrappedKey = serde_json::from_slice(&bytes)
-        .map_err(|e| KeydError::Protocol(format!("{} is not a readable envelope: {e}", path.display())))?;
-
-    wrapped.validate()?;
-    if wrapped.id.thumbprint != thumbprint {
-        return Err(KeydError::Protocol(format!(
-            "{} was renamed: it contains {}'s key, not {thumbprint}'s",
-            path.display(),
-            wrapped.id.thumbprint
-        )));
-    }
-    Ok(wrapped)
+    read_checked(layout, &path)
 }
 
 /// 读出所有信封,按指纹排序。
@@ -75,11 +161,7 @@ pub fn load(layout: &KeydLayout, thumbprint: &str) -> Result<WrappedKey> {
 pub fn load_all(layout: &KeydLayout) -> Result<Vec<WrappedKey>> {
     let mut out = Vec::new();
     for path in layout.list_key_paths()? {
-        let stem = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .ok_or_else(|| KeydError::Protocol(format!("odd envelope filename: {}", path.display())))?;
-        out.push(load(layout, stem)?);
+        out.push(read_checked(layout, &path)?);
     }
     out.sort_by(|a, b| a.id.thumbprint.cmp(&b.id.thumbprint));
     Ok(out)
@@ -272,6 +354,7 @@ mod tests {
             algorithm: KeyAlgorithm::Ed25519,
             public_multibase: multibase,
             label: "alice".into(),
+            name: String::new(),
             passphrase: b"pw",
             device_secret: &device,
             seed: &seed,
@@ -466,6 +549,88 @@ mod tests {
         let found = envelopes_for_did(&l, DID).unwrap();
         assert_eq!(found.len(), 2, "the hot key's file is named after its own thumbprint");
 
+        let _ = fs::remove_dir_all(l.root());
+    }
+
+    // ————————————————————————————————————————————————————————————————————
+    // 名字寻址:一条独立的坐标,不能和指纹那一条混。
+    // ————————————————————————————————————————————————————————————————————
+
+    fn named(name: &str) -> WrappedKey {
+        let seed = LockedBytes::fill(|d| *d = [0x11; 32]).unwrap();
+        let (_, multibase) = seed_to_public(&seed);
+        let device = LockedBytes::fill(|d| *d = [0x22; 32]).unwrap();
+        seal(SealRequest {
+            id: KeyId { did: String::new(), kid: String::new(), thumbprint: "e1_name".into() },
+            algorithm: KeyAlgorithm::Ed25519,
+            public_multibase: multibase,
+            label: String::new(),
+            name: name.to_string(),
+            passphrase: b"pw",
+            device_secret: &device,
+            seed: &seed,
+            argon: fast(),
+            hardware: None,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn a_named_envelope_roundtrips_through_its_name() {
+        let l = layout("named-roundtrip");
+        let w = named("team/bot");
+        save_named(&l, &w).unwrap();
+
+        let back = load_named(&l, "team/bot").unwrap();
+        assert_eq!(back.name, "team/bot");
+        assert!(back.id.did.is_empty());
+        assert_eq!(back.id.thumbprint, w.id.thumbprint);
+
+        // 它也在全量列表里(递归扫到了子目录)。
+        let all = load_all(&l).unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].name, "team/bot");
+
+        let _ = fs::remove_dir_all(l.root());
+    }
+
+    #[test]
+    fn save_named_refuses_to_overwrite_a_live_key() {
+        let l = layout("named-overwrite");
+        save_named(&l, &named("bot")).unwrap();
+        assert!(matches!(
+            save_named(&l, &named("bot")),
+            Err(KeydError::KeyExists(_))
+        ));
+        let _ = fs::remove_dir_all(l.root());
+    }
+
+    /// 名字信封被复制成另一个名字:内容自洽,但那个位置不是它该在的地方。
+    #[test]
+    fn a_copied_named_envelope_is_refused() {
+        let l = layout("named-copied");
+        save_named(&l, &named("bot")).unwrap();
+        let copy = l.key_name_path("backup").unwrap();
+        fs::copy(l.key_name_path("bot").unwrap(), &copy).unwrap();
+        fs::set_permissions(&copy, fs::Permissions::from_mode(0o600)).unwrap();
+
+        assert!(matches!(load_named(&l, "backup"), Err(KeydError::Protocol(_))));
+        assert!(load_named(&l, "bot").is_ok());
+
+        let _ = fs::remove_dir_all(l.root());
+    }
+
+    /// 按指纹打开一个名字信封:路径对不上,拒绝。
+    #[test]
+    fn a_named_envelope_is_not_reachable_by_thumbprint() {
+        let l = layout("named-by-thumbprint");
+        let w = named("bot");
+        save_named(&l, &w).unwrap();
+
+        assert!(matches!(
+            load(&l, &w.id.thumbprint),
+            Err(KeydError::KeyNotFound(_))
+        ));
         let _ = fs::remove_dir_all(l.root());
     }
 

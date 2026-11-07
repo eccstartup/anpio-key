@@ -237,6 +237,8 @@ async fn a_signature_made_over_the_socket_verifies_with_the_upstream_verifier() 
                     body: None,
                     covered: vec![],
                     nonce: None,
+                    key: String::new(),
+                    keyid: String::new(),
                 })
                 .unwrap();
 
@@ -253,6 +255,8 @@ async fn a_signature_made_over_the_socket_verifies_with_the_upstream_verifier() 
                     body: Some(br#"{"hello":"world"}"#.to_vec()),
                     covered: vec![],
                     nonce: None,
+                    key: String::new(),
+                    keyid: String::new(),
                 })
                 .unwrap();
 
@@ -324,6 +328,8 @@ async fn the_signature_is_bound_to_the_request_it_was_made_for() {
                     body: Some(b"amount=10".to_vec()),
                     covered: vec![],
                     nonce: None,
+                    key: String::new(),
+                    keyid: String::new(),
                 })
                 .unwrap()
         })
@@ -408,6 +414,8 @@ async fn signing_is_refused_while_locked() {
                     body: None,
                     covered: vec![],
                     nonce: None,
+                    key: String::new(),
+                    keyid: String::new(),
                 })
                 .unwrap_err()
         })
@@ -450,6 +458,8 @@ async fn two_concurrent_signers_do_not_interleave() {
                     body: None,
                     covered: vec![],
                     nonce: None,
+                    key: String::new(),
+                    keyid: String::new(),
                 })
                 .unwrap();
             (index, signed)

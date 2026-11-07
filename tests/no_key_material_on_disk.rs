@@ -176,6 +176,7 @@ impl Machine {
             algorithm: KeyAlgorithm::Ed25519,
             public_multibase,
             label: "disk".into(),
+            name: String::new(),
             passphrase: PASSPHRASE,
             device_secret: &device_secret,
             seed: &seed,
@@ -253,7 +254,8 @@ impl Machine {
                     body: Some(br#"{"hello":"disk"}"#.to_vec()),
                     covered: vec![],
                     nonce: None,
-
+                    key: String::new(),
+                    keyid: String::new(),
                 })
                 .unwrap()
         });

@@ -16,7 +16,9 @@ use crate::crypto::hygiene::LockedBytes;
 use crate::crypto::kdf;
 use crate::error::{KeydError, Result};
 use crate::keystore::hardware;
-use crate::keystore::record::{self, WrappedKey, RECORD_VERSION, RECORD_VERSION_HARDWARE};
+use crate::keystore::record::{
+    self, WrappedKey, RECORD_VERSION, RECORD_VERSION_HARDWARE, RECORD_VERSION_NAMED,
+};
 use crate::keystore::wrap::exact32;
 use crate::sign::{LockedSigningKey, Signer};
 
@@ -87,10 +89,16 @@ fn seed_of(wrapped: &WrappedKey, passphrase: &[u8], device_secret: &LockedBytes)
     let hs = match wrapped.version {
         RECORD_VERSION => None,
         RECORD_VERSION_HARDWARE => Some(hardware::open_hs(wrapped)?),
+        // v3:硬件可有可无。判据是信封上的 `hardware` 在不在 —— 它在 AAD 里,
+        // 所以这个判断本身已经被认证过。
+        RECORD_VERSION_NAMED => match wrapped.hardware {
+            Some(_) => Some(hardware::open_hs(wrapped)?),
+            None => None,
+        },
         other => {
             return Err(KeydError::Protocol(format!(
-                "unsupported envelope version {other} (this build speaks {RECORD_VERSION} and \
-                 {RECORD_VERSION_HARDWARE})"
+                "unsupported envelope version {other} (this build speaks {RECORD_VERSION}, \
+                 {RECORD_VERSION_HARDWARE} and {RECORD_VERSION_NAMED})"
             )))
         }
     };
@@ -104,6 +112,7 @@ pub(crate) fn rewrap_test_se(wrapped: &WrappedKey, passphrase: &[u8], device_sec
     crate::keystore::wrap::seal(crate::keystore::wrap::SealRequest {
         id: wrapped.id.clone(), algorithm: wrapped.algorithm,
         public_multibase: wrapped.public_multibase.clone(), label: wrapped.label.clone(),
+        name: wrapped.name.clone(),
         passphrase, device_secret, seed: &seed,
         argon: crate::crypto::kdf::Argon2Config { m_cost: 1024, t_cost: 1, p_cost: 1 },
         hardware: Some(crate::keystore::hardware::SealedHardware {
@@ -124,7 +133,7 @@ pub(crate) fn unlock_with_se_hs(
     wrapped.validate()?;
     let aad = wrapped.verify_aad()?;
     if !matches!(wrapped.hardware, Some(record::HardwareRoot::SecureEnclave { .. }))
-        || wrapped.version != RECORD_VERSION_HARDWARE
+        || !matches!(wrapped.version, RECORD_VERSION_HARDWARE | RECORD_VERSION_NAMED)
     {
         return Err(KeydError::Locked);
     }
@@ -205,6 +214,7 @@ mod tests {
         let wrapped = seal(SealRequest {
             id: old.id.clone(), algorithm: KeyAlgorithm::Ed25519,
             public_multibase: old.public_multibase.clone(), label: old.label.clone(),
+            name: old.name.clone(),
             passphrase: PASS, device_secret: &device(7), seed: &seed, argon: fast(),
             hardware: Some(crate::keystore::hardware::SealedHardware {
                 root: record::HardwareRoot::SecureEnclave { tag: "anp-keyd/se-bridge".into() },
@@ -251,6 +261,7 @@ mod tests {
             algorithm: KeyAlgorithm::Ed25519,
             public_multibase: multibase,
             label: "alice".into(),
+            name: String::new(),
             passphrase: PASS,
             device_secret: &device(7),
             seed: &seed,

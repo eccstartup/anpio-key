@@ -67,6 +67,11 @@ impl Roots {
 /// 一把已经解开、正躺在 `mlock` 页里的钥匙。
 struct Unlocked {
     key: LockedSigningKey,
+    /// 封装时用的名字(v3 命名信封),DID 绑定信封为空。
+    ///
+    /// `key.id()` 对命名信封是空的 —— 名字不在信封的 id 里,它是信封的
+    /// 另一个字段。但 `status` 要报的正是它,所以在这里留一份。
+    name: String,
     /// 什么时候解开的。只用来回答 `status`(给人类看"开了多久")。
     unlocked_at: Instant,
     /// 最后一次被用。空闲超时从这一刻起算。
@@ -115,10 +120,15 @@ impl Vault {
     pub fn list_keys(&self) -> Result<Vec<KeySummary>> {
         Ok(store::load_all(&self.layout)?
             .into_iter()
-            .map(|wrapped| KeySummary {
-                did: wrapped.id.did,
-                kid: wrapped.id.kid,
-                algorithm: wrapped.algorithm,
+            .map(|wrapped| {
+                let named = wrapped.is_named();
+                KeySummary {
+                    // 命名信封没有 DID。空 did + 指纹当 kid:调用方拿名字去磁盘上
+                    // 找信封,靠指纹和这里对上 —— 老的 `LIST_KEYS` 形状一个字不用改。
+                    did: if named { String::new() } else { wrapped.id.did },
+                    kid: if named { wrapped.id.thumbprint } else { wrapped.id.kid },
+                    algorithm: wrapped.algorithm,
+                }
             })
             .collect())
     }
@@ -129,7 +139,11 @@ impl Vault {
             .values()
             .map(|entry| UnlockedKey {
                 did: entry.key.id().did.clone(),
-                kid: entry.key.id().kid.clone(),
+                kid: if entry.name.is_empty() {
+                    entry.key.id().kid.clone()
+                } else {
+                    entry.key.id().thumbprint.clone()
+                },
                 unlocked_secs: now.saturating_duration_since(entry.unlocked_at).as_secs(),
             })
             .collect()
@@ -175,6 +189,19 @@ impl Vault {
         }
     }
 
+    /// 锁一把**按名字**解锁的钥匙。返回放掉了几把(0 或 1)。
+    ///
+    /// 单独一个入口,因为命名信封没有 `did#kid` 这个地址 —— 它的 resident
+    /// 是 `name:<名字>`。把它塞进 [`Vault::lock`] 的 did 分支只会让
+    /// `format!("{did}#{kid}")` 拼出一个永远对不上的字符串。
+    fn lock_named(&mut self, name: &str) -> usize {
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .expect("vault generation exhausted");
+        usize::from(self.unlocked.remove(&format!("name:{name}")).is_some())
+    }
+
     /// 借出钥匙用一下,并刷新它的空闲计时。
     ///
     /// 钥匙**不复制**给调用方:它没有 `Clone`,连所有权都拿不走,只能在
@@ -212,6 +239,7 @@ impl Vault {
 pub struct SigningGates {
     raw: bool,
     challenge: bool,
+    named: bool,
 }
 
 impl SigningGates {
@@ -219,7 +247,16 @@ impl SigningGates {
         Self {
             raw,
             challenge: raw || challenge,
+            named: false,
         }
+    }
+
+    /// 按**名字**寻址的签名路。默认关 —— 只有 `--allow-named-key-signing`
+    /// 才会把它打开,而且它和 `raw`/`challenge` 互不牵连:那两条签的是
+    /// 调用方给的字节,这一条签的是守护进程按名字找出来的钥匙。
+    pub fn with_named_key_signing(mut self, named: bool) -> Self {
+        self.named = named;
+        self
     }
 
     /// 原始签名那条路开着没有。
@@ -230,6 +267,11 @@ impl SigningGates {
     /// 挑战签名那条路开着没有。
     pub fn challenge(&self) -> bool {
         self.challenge
+    }
+
+    /// 命名签名那条路开着没有。
+    pub fn named(&self) -> bool {
+        self.named
     }
 }
 
@@ -467,9 +509,45 @@ impl DaemonState {
             }
             let now = Instant::now();
             vault.unlocked.insert(
-                wrapped.id.kid.clone(),
+                resident_of(&wrapped),
                 Unlocked {
                     key,
+                    name: wrapped.name.clone(),
+                    unlocked_at: now,
+                    last_used: now,
+                },
+            );
+            Ok(())
+        })
+    }
+
+    /// 按名字解锁一把钥匙。
+    ///
+    /// 形状和 [`DaemonState::unlock_using`] 逐字相同 —— 同样的
+    /// "先在锁外派生、再回锁里核对 generation 与信封字节" —— 只是地址从
+    /// `did#kid` 换成了名字。
+    pub fn unlock_named(&self, uid: u32, name: &str, passphrase: Zeroizing<String>) -> Result<()> {
+        let (generation, wrapped, device_secret) = self.with_vault(uid, |vault| {
+            let wrapped = store::load_named(&vault.layout, name)?;
+            let secret = device::load(&vault.layout)?;
+            Ok((vault.generation, wrapped, secret))
+        })?;
+        // Expensive derivation must not hold the vault mutex: LOCK can cancel it.
+        let key = crate::keystore::unwrap::unlock(&wrapped, passphrase.as_bytes(), &device_secret)?;
+        self.with_vault(uid, |vault| {
+            if vault.generation != generation {
+                return Err(KeydError::Locked);
+            }
+            let current = store::load_named(&vault.layout, name)?;
+            if serde_json::to_vec(&current)? != serde_json::to_vec(&wrapped)? {
+                return Err(KeydError::Locked);
+            }
+            let now = Instant::now();
+            vault.unlocked.insert(
+                resident_of(&wrapped),
+                Unlocked {
+                    key,
+                    name: wrapped.name.clone(),
                     unlocked_at: now,
                     last_used: now,
                 },
@@ -480,6 +558,11 @@ impl DaemonState {
 
     pub fn lock(&self, uid: u32, did: Option<&str>, kid: Option<&str>) -> Result<usize> {
         self.with_vault(uid, |vault| Ok(vault.lock(did, kid)))
+    }
+
+    /// 锁一把按名字解锁的钥匙。返回放掉了几把(0 或 1)。
+    pub fn lock_named(&self, uid: u32, name: &str) -> Result<usize> {
+        self.with_vault(uid, |vault| Ok(vault.lock_named(name)))
     }
 
     /// 把所有 uid 的钥匙全放掉。退出前用。
@@ -584,7 +667,60 @@ impl DaemonState {
         })
     }
 
-    /// Exact-key v2 profile. Called only by the protected transaction executor.
+    /// 按**名字**签一条 HTTP 请求。
+    ///
+    /// 这是整个命名路唯一需要那扇开关的地方,也是唯一一处 keyid 由调用方给。
+    /// 所以它做两件事:
+    ///
+    /// 1. **核对 keyid 和信封是同一把钥匙** —— 只比 `e1_` 那一段(名字信封
+    ///    没有 DID,keyid 的 DID 是调用方名义上的身份,守护进程不替它背书)。
+    /// 2. **合成一份只有一把钥匙的 DID 文档**交给上游。上游要文档来查
+    ///    `authentication` 授权和公钥,而这把钥匙本来就没有本地文档 —— 文档
+    ///    里的公钥和 keyid 都从信封和调用方参数来,调用方改不了签名基。
+    pub fn sign_structured_named(
+        &self,
+        uid: u32,
+        name: &str,
+        keyid: &str,
+        request: &rfc9421::SignRequest,
+    ) -> Result<rfc9421::Signed> {
+        if !self.gates.named {
+            return Err(KeydError::NamedSigningDisabled);
+        }
+
+        let layout = self.layout_for(uid)?;
+        let wrapped = store::load_named(&layout, name)?;
+
+        let (did, fragment) = keyid.split_once('#').ok_or_else(|| {
+            KeydError::Did(format!(
+                "the keyid {keyid:?} carries no fragment; a named key signs under an identifier \
+                 like `did:wba:host:agents:name#key-1`"
+            ))
+        })?;
+        if fragment.is_empty() {
+            return Err(KeydError::Did(format!(
+                "the keyid {keyid:?} has an empty fragment"
+            )));
+        }
+        if thumbprint_of(did)? != wrapped.id.thumbprint {
+            return Err(KeydError::Did(format!(
+                "the keyid {keyid:?} names a different key than {name}: its did does not carry \
+                 this envelope's thumbprint"
+            )));
+        }
+
+        let document = named_document(did, keyid, &wrapped.public_multibase);
+        let resident = resident_of(&wrapped);
+        let autolock = self.autolock;
+        let now = Instant::now();
+        self.with_vault(uid, |vault| {
+            vault.with_key(&resident, autolock, now, |key| {
+                rfc9421::sign_request_under(&document, key, keyid, request)
+            })
+        })
+    }
+
+
     pub(crate) fn sign_protected(
         &self,
         uid: u32,
@@ -731,6 +867,37 @@ impl DaemonState {
     }
 }
 
+/// 一把信封在 vault 里的地址。
+///
+/// DID 绑定信封用 `did#kid`(历史地址,不能动);命名信封没有 did/kid,
+/// 用 `name:<名字>`。多一个 `name:` 前缀是为了让它**不可能**和任何一个
+/// 真的 `did:wba:` kid 撞上 —— 地址撞上意味着锁一把钥匙却放掉了另一把。
+fn resident_of(wrapped: &crate::keystore::record::WrappedKey) -> String {
+    if wrapped.is_named() {
+        format!("name:{}", wrapped.name)
+    } else {
+        wrapped.id.kid.clone()
+    }
+}
+
+/// 一份只含这一把钥匙的 DID 文档,给上游的签名基准备用。
+///
+/// 没有 `@context`:上游只用 `id`、`verificationMethod` 和 `authentication`,
+/// 而多写字段只会让"这份文档是谁给的"更难看清。`controller` 跟着 did 走,
+/// 因为 keyid 的那一段就是调用方名义上的身份。
+fn named_document(did: &str, keyid: &str, public_multibase: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": did,
+        "verificationMethod": [{
+            "id": keyid,
+            "type": "Multikey",
+            "controller": did,
+            "publicKeyMultibase": public_multibase,
+        }],
+        "authentication": [keyid],
+    })
+}
+
 /// `did:wba:...:e1_<指纹>` → `e1_<指纹>`,也就是信封的文件名。
 ///
 /// 没有 `e1_` 段的 DID 是**目录 DID**,不是一把具体的钥匙 —— 它没有对应的
@@ -873,6 +1040,7 @@ mod tests {
             algorithm: old.algorithm,
             public_multibase: seed_to_public(&seed).1,
             label: old.label,
+            name: old.name.clone(),
             passphrase: PASSPHRASE.as_bytes(),
             device_secret: &device::load(&layout).unwrap(),
             seed: &seed,
@@ -1027,11 +1195,13 @@ mod tests {
         assert_ne!(
             Request::Lock {
                 kid: None,
-                did: None
+                did: None,
+                key: String::new(),
             },
             Request::Lock {
                 kid: None,
-                did: Some("d".to_string())
+                did: Some("d".to_string()),
+                key: String::new(),
             }
         );
     }
@@ -1238,9 +1408,161 @@ mod tests {
         ));
     }
 
+    /// 一把按名字寻址的钥匙:没有 DID,`LIST_KEYS`/`STATUS` 报空 did + 指纹。
+    fn named_fixture(gates: SigningGates, name: &str) -> (TempDir, DaemonState, String) {
+        let dir = TempDir::new();
+        let layout = KeydLayout::at(dir.path().to_path_buf());
+        layout.ensure().unwrap();
+        let wrapped = create::create_named(
+            &layout,
+            name,
+            "named",
+            PASSPHRASE.as_bytes(),
+            fast(),
+            HardwareChoice::None,
+        )
+        .unwrap();
+        let thumbprint = wrapped.id.thumbprint;
+        let state = DaemonState::new(
+            Roots::Single(layout),
+            PeerPolicy::default(),
+            Autolock::idle(Duration::from_secs(900)),
+            gates,
+        );
+        (dir, state, thumbprint)
+    }
+
     #[test]
-    fn a_did_without_a_key_segment_names_no_key() {
-        let err = thumbprint_of("did:wba:example.com:user:alice").unwrap_err();
+    fn a_named_key_unlocks_by_name_and_signs_under_the_keyid_it_was_given() {
+        let (_dir, state, thumbprint) = named_fixture(
+            SigningGates::new(false, false).with_named_key_signing(true),
+            "team/bot",
+        );
+
+        // 列得出来,而且没有 DID —— kid 那一格是信封的指纹。
+        let listed = state.list_keys(501).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].did, "");
+        assert_eq!(listed[0].kid, thumbprint);
+
+        state
+            .unlock_named(501, "team/bot", Zeroizing::new(PASSPHRASE.into()))
+            .unwrap();
+        let status = state.status(501).unwrap();
+        assert_eq!(status.len(), 1);
+        assert_eq!(status[0].did, "");
+        assert_eq!(status[0].kid, thumbprint);
+
+        // 指纹本身就带 `e1_` 段,是 DID 的最后一段。
+        let did = format!("did:wba:example.com:agents:bot:{thumbprint}");
+        let keyid = format!("{did}#key-1");
+        let signed = state
+            .sign_structured_named(
+                501,
+                "team/bot",
+                &keyid,
+                &rfc9421::SignRequest {
+                    method: "POST".into(),
+                    url: "https://example.com/api".into(),
+                    headers: BTreeMap::new(),
+                    body: Some(b"{}".to_vec()),
+                    covered: Vec::new(),
+                    nonce: None,
+                },
+            )
+            .unwrap();
+
+        // keyid 一路走到了签名基里,而且签名是有效的 —— 上游在
+        // `complete_http_signature_headers` 里拿合成文档的公钥验过了。
+        assert_eq!(
+            signed
+                .headers
+                .get("Signature-Input")
+                .and_then(|input| input.split_once("keyid=\""))
+                .and_then(|(_, rest)| rest.split_once('"'))
+                .map(|(kid, _)| kid),
+            Some(keyid.as_str())
+        );
+
+        // 锁也得按名字锁 —— did#kid 那个地址对命名信封永远对不上。
+        assert_eq!(state.lock_named(501, "team/bot").unwrap(), 1);
+        assert!(state.status(501).unwrap().is_empty());
+    }
+
+    #[test]
+    fn named_signing_is_off_unless_its_own_switch_is_on() {
+        let (_dir, state, _) = named_fixture(SigningGates::new(true, true), "bot");
+        state
+            .unlock_named(501, "bot", Zeroizing::new(PASSPHRASE.into()))
+            .unwrap();
+
+        // 开宽门(raw/challenge)不等于开命名门 —— 它们是三件不同的事。
+        let err = state
+            .sign_structured_named(
+                501,
+                "bot",
+                "did:wba:example.com:agents:bot#key-1",
+                &rfc9421::SignRequest {
+                    method: "GET".into(),
+                    url: "https://example.com/".into(),
+                    headers: BTreeMap::new(),
+                    body: None,
+                    covered: Vec::new(),
+                    nonce: None,
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(err, KeydError::NamedSigningDisabled), "{err}");
+    }
+
+    #[test]
+    fn a_keyid_that_names_a_different_key_is_refused() {
+        let (_dir, state, thumbprint) = named_fixture(
+            SigningGates::new(false, false).with_named_key_signing(true),
+            "bot",
+        );
+        state
+            .unlock_named(501, "bot", Zeroizing::new(PASSPHRASE.into()))
+            .unwrap();
+
+        let request = rfc9421::SignRequest {
+            method: "GET".into(),
+            url: "https://example.com/".into(),
+            headers: BTreeMap::new(),
+            body: None,
+            covered: Vec::new(),
+            nonce: None,
+        };
+
+        for keyid in [
+            // 指纹对不上 —— 形状是对的,但它不是这把钥匙。
+            "did:wba:example.com:agents:bot:e1_0000#key-1".to_string(),
+            // 没有 fragment。
+            format!("did:wba:example.com:agents:bot:{thumbprint}"),
+        ] {
+            let err = state
+                .sign_structured_named(501, "bot", &keyid, &request)
+                .unwrap_err();
+            assert!(matches!(err, KeydError::Did(_)), "{keyid}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_name_that_is_not_on_disk_is_key_not_found() {
+        let (_dir, state, _) = named_fixture(
+            SigningGates::new(false, false).with_named_key_signing(true),
+            "bot",
+        );
+        assert!(matches!(
+            state
+                .unlock_named(501, "backup", Zeroizing::new(PASSPHRASE.into()))
+                .unwrap_err(),
+            KeydError::KeyNotFound(_)
+        ));
+    }
+
+    #[test]
+    fn a_did_without_a_key_segment_names_no_key() {        let err = thumbprint_of("did:wba:example.com:user:alice").unwrap_err();
         assert!(matches!(err, KeydError::KeyNotFound(_)), "{err}");
         // 有 e1_ 段的就取最后那一段。
         assert_eq!(

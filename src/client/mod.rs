@@ -74,10 +74,24 @@ impl Client {
         match self.call(Request::Unlock {
             did: did.to_string(),
             kid: kid.map(str::to_string),
+            key: String::new(),
             passphrase: zeroize::Zeroizing::new(passphrase.to_string()),
         })? {
             Response::Ok => Ok(()),
             other => Err(unexpected("unlock", &other)),
+        }
+    }
+
+    /// 按**名字**解锁。
+    pub fn unlock_named(&mut self, name: &str, passphrase: &str) -> Result<()> {
+        match self.call(Request::Unlock {
+            did: String::new(),
+            kid: None,
+            key: name.to_string(),
+            passphrase: zeroize::Zeroizing::new(passphrase.to_string()),
+        })? {
+            Response::Ok => Ok(()),
+            other => Err(unexpected("unlock_named", &other)),
         }
     }
 
@@ -86,9 +100,22 @@ impl Client {
         match self.call(Request::Lock {
             did: did.map(str::to_string),
             kid: kid.map(str::to_string),
+            key: String::new(),
         })? {
             Response::Ok => Ok(()),
             other => Err(unexpected("lock", &other)),
+        }
+    }
+
+    /// 锁一把按名字解锁的钥匙。
+    pub fn lock_named(&mut self, name: &str) -> Result<()> {
+        match self.call(Request::Lock {
+            did: None,
+            kid: None,
+            key: name.to_string(),
+        })? {
+            Response::Ok => Ok(()),
+            other => Err(unexpected("lock_named", &other)),
         }
     }
 

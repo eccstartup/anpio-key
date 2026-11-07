@@ -8,13 +8,19 @@ use crate::crypto::aead::NONCE_LEN;
 use crate::error::{KeydError, Result};
 
 /// 一个密钥在 did:wba 世界里的完整坐标。
+///
+/// # v3 的空 `did` / `kid`
+///
+/// 一把由 `anpio-key key create` 铸出来、还没有归属任何身份的名字钥匙,
+/// 在这里是 `did == kid == ""` —— 它的坐标是信封顶层的 [`WrappedKey::name`]。
+/// DID 属于身份,建身份的是 `anpio-cli`;钥匙不应替它先想一个。
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct KeyId {
-    /// 形如 `did:wba:example.com:user:alice:e1_<指纹>`
+    /// 形如 `did:wba:example.com:user:alice:e1_<指纹>`;v3 的名字钥匙为空
     pub did: String,
-    /// 形如 `did:wba:example.com:user:alice:e1_<指纹>#key-1`
+    /// 形如 `did:wba:example.com:user:alice:e1_<指纹>#key-1`;v3 的名字钥匙为空
     pub kid: String,
-    /// `e1_` + 公钥 JWK 的 RFC 7638 指纹
+    /// `e1_` + 公钥 JWK 的 RFC 7638 指纹。**任何版本都不许为空**
     pub thumbprint: String,
 }
 
@@ -110,6 +116,13 @@ impl AeadParams {
 ///
 /// 两个字段都带 `skip_serializing_if`,`None` 时整个键都不出现 —— 所以 v1 的
 /// 规范化 JSON 逐字节不变(见 [`WrappedKey::aad_digest`] 的用例)。
+///
+/// # v3 的 `name` 与空 `did` / `kid`
+///
+/// 名字钥匙的坐标是 `name`,不是 DID,所以它也必须被认证:改掉文件名本身
+/// 不能改变"这把钥匙是谁"。v1/v2 的 `name` 恒为空,靠 `skip_serializing_if`
+/// 整个键不出现;v3 的**空 `did` / `kid` 显式编码成空串**——它们本来就是
+/// `&str`,不做任何特殊处理。
 #[derive(Debug, Serialize)]
 struct AadHeader<'a> {
     version: u8,
@@ -123,6 +136,8 @@ struct AadHeader<'a> {
     kdf_t_cost: u32,
     kdf_p_cost: u32,
     label: &'a str,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    name: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     hardware: Option<&'a HardwareRoot>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -140,6 +155,13 @@ pub struct WrappedKey {
     /// 人读的标签,仅供 `LIST_KEYS` 展示
     #[serde(default)]
     pub label: String,
+    /// 钥匙名,v3 起才有;DID 绑定信封为空。
+    ///
+    /// 名字**同时**是寻址方式与认证内容:磁盘上的相对路径必须与它逐字一致
+    /// (见 `store::load_all`),AAD 也绑住它 —— 所以把 `keys/bot.json` 改名
+    /// 成 `keys/backup.json` 不会让守护进程把同一把钥匙当成另一把。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
     pub kdf: KdfParams,
     pub aead: AeadParams,
     /// base64(被 KEK 包住的 DEK)
@@ -206,7 +228,26 @@ pub const RECORD_VERSION: u8 = 1;
 /// 那些信封是他仅有的一份。
 pub const RECORD_VERSION_HARDWARE: u8 = 2;
 
+/// v3:按名字寻址的钥匙。
+///
+/// 和 v2 的区别只有两条,而且都是"放行"不是"改格式":
+///
+/// - 信封顶层可以带 `name`,DID 寻址的那两个字段可以空着;
+/// - 硬件根变成可选 —— 名字钥匙也可以跑在软件根上。
+///
+/// 新写入**一律** v3。v1/v2 继续可读、可解、可签,一个字节都不变。
+pub const RECORD_VERSION_NAMED: u8 = 3;
+
 impl WrappedKey {
+    /// 这把信封是按什么找的。
+    ///
+    /// 只有两种,而且互斥:要么 `name` 非空、DID 那两格空着;要么反过来。
+    /// 两样都写等于同一把钥匙有两个坐标 —— 目录扫描和 DID 解析会各走一条,
+    /// 出问题时没人说得清是哪一份。
+    pub fn is_named(&self) -> bool {
+        !self.name.is_empty()
+    }
+
     /// 安全等级:从磁盘读回来的记录先过这一关,再谈密码学。
     pub fn validate(&self) -> Result<()> {
         match self.version {
@@ -218,6 +259,13 @@ impl WrappedKey {
                     return Err(KeydError::Protocol(
                         "a version-1 envelope carries hardware fields; version 1 has nowhere to \
                          authenticate them"
+                            .into(),
+                    ));
+                }
+                if !self.name.is_empty() {
+                    return Err(KeydError::Protocol(
+                        "a version-1 envelope carries a key name; version 1 has nowhere to \
+                         authenticate it"
                             .into(),
                     ));
                 }
@@ -233,16 +281,55 @@ impl WrappedKey {
                             .into(),
                     ));
                 }
+                if !self.name.is_empty() {
+                    return Err(KeydError::Protocol(
+                        "a version-2 envelope carries a key name; version 2 has nowhere to \
+                         authenticate it"
+                            .into(),
+                    ));
+                }
+            }
+            RECORD_VERSION_NAMED => {
+                // 硬件在 v3 里可有可无,但**两样必须同生共死**:一个 "Some" 的
+                // `hardware` 指向一根根,却没有被封进去的熵,或者反过来,都是
+                // v2 那条规则要消灭的中间态。
+                if self.hardware.is_some() != self.hs_ciphertext.is_some() {
+                    return Err(KeydError::Protocol(
+                        "a version-3 envelope must carry `hardware` and `hs_ciphertext` together"
+                            .into(),
+                    ));
+                }
             }
             other => {
                 return Err(KeydError::Protocol(format!(
-                    "unsupported envelope version {other} (this build speaks {RECORD_VERSION} and \
-                     {RECORD_VERSION_HARDWARE})"
+                    "unsupported envelope version {other} (this build speaks {RECORD_VERSION}, \
+                     {RECORD_VERSION_HARDWARE} and {RECORD_VERSION_NAMED})"
                 )));
             }
         }
-        if self.id.thumbprint.is_empty() || self.id.did.is_empty() || self.id.kid.is_empty() {
+        if self.id.thumbprint.is_empty() {
             return Err(KeydError::Protocol("envelope has an incomplete KeyId".into()));
+        }
+        let did_bound = !self.id.did.is_empty() && !self.id.kid.is_empty();
+        let did_partial = self.id.did.is_empty() != self.id.kid.is_empty();
+        if did_partial {
+            return Err(KeydError::Protocol(
+                "envelope has exactly one of `did` and `kid`; they are written together or not at \
+                 all"
+                    .into(),
+            ));
+        }
+        if did_bound == self.is_named() {
+            return Err(KeydError::Protocol(
+                "an envelope must be addressed either by `name` or by `did`+`kid`, not by both \
+                 and not by neither"
+                    .into(),
+            ));
+        }
+        if !did_bound && self.version != RECORD_VERSION_NAMED {
+            return Err(KeydError::Protocol(
+                "only a version-3 envelope may lack `did` and `kid`".into(),
+            ));
         }
         Ok(())
     }
@@ -264,6 +351,7 @@ impl WrappedKey {
             kdf_t_cost: self.kdf.t_cost,
             kdf_p_cost: self.kdf.p_cost,
             label: &self.label,
+            name: &self.name,
             hardware: self.hardware.as_ref(),
             hs_ciphertext: self.hs_ciphertext.as_deref(),
         };
@@ -326,6 +414,7 @@ mod tests {
             algorithm: KeyAlgorithm::Ed25519,
             public_multibase: "z6Mkexample".into(),
             label: "alice".into(),
+            name: String::new(),
             kdf: KdfParams {
                 alg: "argon2id".into(),
                 salt: encode_b64(&[1u8; 32]),
@@ -352,6 +441,16 @@ mod tests {
         k.version = RECORD_VERSION_HARDWARE;
         k.hardware = Some(HardwareRoot::SecureEnclave { tag: "anpio-key:e1_abc".into() });
         k.hs_ciphertext = Some(encode_b64(&[0x77u8; 80]));
+        k
+    }
+
+    /// v3 的名字钥匙:没有 DID,坐标就是 `name`。
+    fn sample_named() -> WrappedKey {
+        let mut k = sample();
+        k.version = RECORD_VERSION_NAMED;
+        k.name = "team/bot".into();
+        k.id.did = String::new();
+        k.id.kid = String::new();
         k
     }
 
@@ -615,14 +714,117 @@ mod tests {
         assert!(k.verify_aad().is_ok());
     }
 
-    /// 认不出来的版本号要报出**两个**它能说的版本,而不是只说 v1。
+    /// 认不出来的版本号要报出**这个构建会说的全部版本**,而不是只说 v1。
     #[test]
-    fn an_unknown_version_names_both_versions_this_build_speaks() {
+    fn an_unknown_version_names_every_version_this_build_speaks() {
         let mut k = sample();
         k.version = 9;
         let message = k.validate().unwrap_err().to_string();
         assert!(message.contains("9"), "{message}");
-        assert!(message.contains("1") && message.contains("2"), "{message}");
+        assert!(
+            message.contains('1') && message.contains('2') && message.contains('3'),
+            "{message}"
+        );
+    }
+
+    // —— v3:按名字寻址 ——
+
+    #[test]
+    fn a_third_version_envelope_addresses_by_name_alone() {
+        let k = sample_named();
+        assert!(k.validate().is_ok());
+        assert!(k.is_named());
+    }
+
+    /// DID 绑定的信封也可以是 v3(新写入一律 v3),名字留空。
+    #[test]
+    fn a_third_version_envelope_may_still_address_by_did() {
+        let mut k = sample();
+        k.version = RECORD_VERSION_NAMED;
+        assert!(k.validate().is_ok());
+        assert!(!k.is_named());
+    }
+
+    /// 两种坐标必须恰好有一种:都有、都没有、或者只有一半,都不行。
+    #[test]
+    fn an_envelope_has_exactly_one_address() {
+        let mut both = sample_named();
+        both.id.did = "did:wba:example.com:user:alice:e1_abc".into();
+        both.id.kid = "did:wba:example.com:user:alice:e1_abc#key-1".into();
+        assert!(matches!(both.validate(), Err(KeydError::Protocol(_))));
+
+        let mut neither = sample_named();
+        neither.name = String::new();
+        assert!(matches!(neither.validate(), Err(KeydError::Protocol(_))));
+
+        let mut half = sample();
+        half.version = RECORD_VERSION_NAMED;
+        half.id.kid = String::new();
+        assert!(matches!(half.validate(), Err(KeydError::Protocol(_))));
+    }
+
+    /// 只有 v3 能没有 DID。v1/v2 缺了它就没法寻址,也就没法校验绑定。
+    #[test]
+    fn only_a_third_version_envelope_may_lack_a_did() {
+        let mut k = sample_named();
+        k.version = RECORD_VERSION;
+        assert!(matches!(k.validate(), Err(KeydError::Protocol(_))));
+
+        let mut k = sample_named();
+        k.version = RECORD_VERSION_HARDWARE;
+        assert!(matches!(k.validate(), Err(KeydError::Protocol(_))));
+    }
+
+    /// 名字进了 AAD:把 `keys/bot.json` 改叫别的,密文就解不开。
+    #[test]
+    fn renaming_a_named_envelope_breaks_the_aad() {
+        let mut k = sample_named();
+        k.aead.aad_digest = encode_b64(&k.aad_digest().unwrap());
+        assert!(k.verify_aad().is_ok());
+
+        k.name = "team/other".into();
+        assert!(matches!(k.verify_aad(), Err(KeydError::AadMismatch)));
+    }
+
+    /// v3 的硬件根可有可无,但必须两样同生共死。
+    #[test]
+    fn a_third_version_envelope_may_be_software_only() {
+        let mut k = sample_named();
+        assert!(k.validate().is_ok());
+
+        k.hardware = Some(HardwareRoot::Tpm { handle: 0x8100_0000 });
+        assert!(matches!(k.validate(), Err(KeydError::Protocol(_))), "hardware without entropy");
+
+        let mut k = sample_named();
+        k.hs_ciphertext = Some(String::new());
+        assert!(matches!(k.validate(), Err(KeydError::Protocol(_))), "entropy without a root");
+
+        let mut k = sample_named();
+        k.hardware = Some(HardwareRoot::Tpm { handle: 0x8100_0000 });
+        k.hs_ciphertext = Some(String::new());
+        assert!(k.validate().is_ok());
+    }
+
+    /// v1/v2 不许带名字:那两个版本的 AAD 没地方认证它。
+    #[test]
+    fn older_versions_may_not_carry_a_key_name() {
+        let mut k = sample();
+        k.name = "bot".into();
+        assert!(matches!(k.validate(), Err(KeydError::Protocol(_))));
+
+        let mut k = sample_bound();
+        k.name = "bot".into();
+        assert!(matches!(k.validate(), Err(KeydError::Protocol(_))));
+    }
+
+    /// 名字不能从磁盘上凭空出现或消失:空名字的 v3 信封里根本没有这个键。
+    #[test]
+    fn a_nameless_envelope_writes_no_name_key() {
+        let json = serde_json::to_string(&sample()).unwrap();
+        assert!(!json.contains("\"name\""), "{json}");
+
+        let json = serde_json::to_string(&sample_named()).unwrap();
+        assert!(json.contains("\"name\":\"team/bot\""), "{json}");
     }
 
     /// v1 序列化出来的 JSON 里**不该出现** `hardware` / `hs_ciphertext`

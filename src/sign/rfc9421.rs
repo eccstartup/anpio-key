@@ -168,11 +168,36 @@ pub fn sign_request(
     sign_request_with_window(document, key, req, None)
 }
 
+/// 按一把**有名字**的钥匙签,keyid 由调用方给出。
+///
+/// 和 [`sign_request`] 的唯一区别是 keyid 从哪来:那把钥匙没有 DID 绑定,
+/// 信封里也没有 kid,所以 kid 是调用方(守护进程)按身份当场配上去的。
+/// 签名基里写进去的仍然是文档里那个 verificationMethod —— 文档由守护进程
+/// 按这把钥匙的公钥合成,调用方改不了。
+pub fn sign_request_under(
+    document: &Value,
+    key: &LockedSigningKey,
+    keyid: &str,
+    req: &SignRequest,
+) -> Result<Signed> {
+    sign_request_keyed(document, key, keyid, req, None)
+}
+
 /// Internal profile entry point: only the trusted executor supplies timestamps.
 /// A grant deadline must be converted to a non-extending wall deadline by it.
 pub(crate) fn sign_request_with_window(
     document: &Value,
     key: &LockedSigningKey,
+    req: &SignRequest,
+    window: Option<(i64, i64)>,
+) -> Result<Signed> {
+    sign_request_keyed(document, key, &key.id().kid, req, window)
+}
+
+fn sign_request_keyed(
+    document: &Value,
+    key: &LockedSigningKey,
+    keyid: &str,
     req: &SignRequest,
     window: Option<(i64, i64)>,
 ) -> Result<Signed> {
@@ -208,7 +233,7 @@ pub(crate) fn sign_request_with_window(
         Some(&headers),
         req.body.as_deref(),
         anp::authentication::HttpSignatureOptions {
-            keyid: Some(key.id().kid.clone()),
+            keyid: Some(keyid.to_string()),
             // 调用方给的 nonce 原样交上去;没给就是 `None`,上游自己随机一个
             // (今天的行为不变)。它不是"签什么内容"的一部分,是"这是哪一次
             // 签名"的一部分 —— 所以它是**被签的**,调用方改它最多让自己那条

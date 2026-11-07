@@ -579,6 +579,8 @@ mod tests {
                     body: Some(b"{}".to_vec()),
                     covered: Vec::new(),
                     nonce: None,
+                    key: String::new(),
+                    keyid: String::new(),
                 });
 
                 // 解锁。口令就是从这个 socket 上传过去的 —— 这是 v1 的
@@ -594,6 +596,8 @@ mod tests {
                     body: Some(b"{}".to_vec()),
                     covered: Vec::new(),
                     nonce: None,
+                    key: String::new(),
+                    keyid: String::new(),
                 });
 
                 (listed, locked, unlocked, signed)

@@ -18,8 +18,7 @@ use crate::crypto::kdf::{self, Argon2Config};
 use crate::error::{KeydError, Result};
 use crate::keystore::hardware::SealedHardware;
 use crate::keystore::record::{
-    self, AeadParams, KeyAlgorithm, KeyId, KdfParams, WrappedKey, RECORD_VERSION,
-    RECORD_VERSION_HARDWARE,
+    self, AeadParams, KeyAlgorithm, KeyId, KdfParams, WrappedKey, RECORD_VERSION_NAMED,
 };
 
 /// 封装一个信封所需的全部输入。
@@ -28,16 +27,19 @@ use crate::keystore::record::{
 /// 位置传参意味着一个手滑就能把 seed 当口令使,而编译器不会有意见。
 #[derive(Debug)]
 pub struct SealRequest<'a> {
+    /// DID 寻址的信封填 `did`/`kid`;名字钥匙留空,只填 [`Self::name`]。
     pub id: KeyId,
     pub algorithm: KeyAlgorithm,
     /// `z6Mk...` multibase
     pub public_multibase: String,
     pub label: String,
+    /// 名字钥匙的坐标;DID 寻址时为空串。
+    pub name: String,
     pub passphrase: &'a [u8],
     pub device_secret: &'a LockedBytes,
     pub seed: &'a LockedBytes,
     pub argon: Argon2Config,
-    /// 硬件那一趟的结果。`None` = 不绑硬件,写 v1。
+    /// 硬件那一趟的结果。`None` = 不绑硬件。
     ///
     /// **由调用方先跑**([`crate::keystore::hardware::seal_new`]),而不是在这里
     /// 收一个 `HardwareChoice`:封装需要的是那 32 字节 HS 本身,而拿到它的过程
@@ -53,6 +55,7 @@ pub fn seal(req: SealRequest<'_>) -> Result<WrappedKey> {
         algorithm,
         public_multibase,
         label,
+        name,
         passphrase,
         device_secret,
         seed,
@@ -65,25 +68,26 @@ pub fn seal(req: SealRequest<'_>) -> Result<WrappedKey> {
     let mut nonce = [0u8; NONCE_LEN];
     rand::rngs::OsRng.fill_bytes(&mut nonce);
 
-    // 版本由"有没有硬件那一趟"决定,**没有第三个来源**。这样就不可能出现
-    // 一个 v2 的信封配一条没跑的硬件路径。
-    let (version, root, hs_ciphertext) = match &hardware {
+    // 新写入一律 v3。硬件根在 v3 里可有可无,所以"有没有跑硬件那一趟"
+    // 决定的是那三个字段在不在,**不再决定版本号** —— 两个来源合成一个
+    // 版本号,是 v2 时代最容易写岔的地方。
+    let (root, hs_ciphertext) = match &hardware {
         Some(sealed) => (
-            RECORD_VERSION_HARDWARE,
             Some(sealed.root.clone()),
             Some(record::encode_b64(&sealed.ciphertext)),
         ),
-        None => (RECORD_VERSION, None, None),
+        None => (None, None),
     };
 
     // 先搭出信封骨架 —— 它的头字段就是 AAD 的全部输入。
     // 走和 `unlock` **同一个** `aad_digest()`,所以两边不可能算岔。
     let mut wrapped = WrappedKey {
-        version,
+        version: RECORD_VERSION_NAMED,
         id,
         algorithm,
         public_multibase,
         label,
+        name,
         kdf: KdfParams {
             alg: "argon2id".into(),
             salt: record::encode_b64(&salt),
@@ -208,6 +212,7 @@ mod tests {
             algorithm: KeyAlgorithm::Ed25519,
             public_multibase: multibase,
             label: "alice".into(),
+            name: String::new(),
             passphrase: b"correct horse battery staple",
             device_secret: &device(),
             seed: &seed,
@@ -233,6 +238,7 @@ mod tests {
             algorithm: KeyAlgorithm::Ed25519,
             public_multibase: multibase,
             label: "alice".into(),
+            name: String::new(),
             passphrase: b"pw",
             device_secret: &device(),
             seed: &seed,
@@ -243,5 +249,54 @@ mod tests {
 
         assert!(w.verify_aad().is_ok());
         assert!(!w.aead.aad_digest.is_empty());
+    }
+
+    /// 新写入一律 v3,不管有没有硬件根 —— 旧版本只读不写。
+    #[test]
+    fn every_new_envelope_is_version_three() {
+        let seed = LockedBytes::fill(|d| *d = [1u8; 32]).unwrap();
+        let (_, multibase) = seed_to_public(&seed);
+        let w = seal(SealRequest {
+            id: id(),
+            algorithm: KeyAlgorithm::Ed25519,
+            public_multibase: multibase,
+            label: String::new(),
+            name: String::new(),
+            passphrase: b"pw",
+            device_secret: &device(),
+            seed: &seed,
+            argon: fast(),
+            hardware: None,
+        })
+        .unwrap();
+        assert_eq!(w.version, RECORD_VERSION_NAMED);
+    }
+
+    /// 名字钥匙封出来的信封,坐标只有 `name`,没有 DID。
+    #[test]
+    fn a_named_seal_carries_its_name_and_no_did() {
+        let seed = LockedBytes::fill(|d| *d = [7u8; 32]).unwrap();
+        let (_, multibase) = seed_to_public(&seed);
+        let w = seal(SealRequest {
+            id: KeyId {
+                did: String::new(),
+                kid: String::new(),
+                thumbprint: "e1_x".into(),
+            },
+            algorithm: KeyAlgorithm::Ed25519,
+            public_multibase: multibase,
+            label: String::new(),
+            name: "team/bot".into(),
+            passphrase: b"pw",
+            device_secret: &device(),
+            seed: &seed,
+            argon: fast(),
+            hardware: None,
+        })
+        .unwrap();
+
+        assert_eq!(w.name, "team/bot");
+        assert!(w.id.did.is_empty() && w.id.kid.is_empty());
+        assert!(w.verify_aad().is_ok());
     }
 }

@@ -41,14 +41,28 @@ fn dispatch(state: &DaemonState, peer: &PeerIdentity, request: Request) -> Resul
         Request::ListKeys => Ok(Response::ListKeys(state.list_keys(peer.uid)?)),
         Request::Status => Ok(Response::Status(state.status(peer.uid)?)),
 
-        Request::Unlock { did, kid, passphrase } => {
+        Request::Unlock { did, kid, key, passphrase } => {
+            // `key` 非空就是按名字解锁:名字是这台机器上唯一的地址,did 不参与。
+            if !key.is_empty() {
+                state.unlock_named(peer.uid, &key, passphrase)?;
+                state.record(peer.uid, &Event::NamedUnlocked { uid: peer.uid, key })?;
+                return Ok(Response::Ok);
+            }
             // 口令从 socket 上传过来，用完就在 daemon 侧擦掉。
             state.unlock(peer.uid, &did, kid.as_deref(), passphrase)?;
             state.record(peer.uid, &Event::Unlocked { uid: peer.uid, did })?;
             Ok(Response::Ok)
         }
 
-        Request::Lock { did, kid } => {
+        Request::Lock { did, kid, key } => {
+            if !key.is_empty() {
+                let dropped = state.lock_named(peer.uid, &key)?;
+                state.record(
+                    peer.uid,
+                    &Event::NamedLocked { uid: peer.uid, key, dropped },
+                )?;
+                return Ok(Response::Ok);
+            }
             let dropped = state.lock(peer.uid, did.as_deref(), kid.as_deref())?;
             state.record(
                 peer.uid,
@@ -85,6 +99,8 @@ fn sign_request(
             body,
             covered,
             nonce,
+            key,
+            keyid,
         } => {
             let signing = rfc9421::SignRequest {
                 method,
@@ -95,6 +111,35 @@ fn sign_request(
                 covered,
                 nonce,
             };
+
+            if !key.is_empty() {
+                let signed =
+                    state.sign_structured_named(peer.uid, &key, &keyid, &signing)?;
+                let event = Event::NamedSigned {
+                    uid: peer.uid,
+                    key,
+                    // 记的是**真正写进签名基**的那一个,从我们自己刚生成的
+                    // `Signature-Input` 里读回来。
+                    keyid: signed
+                        .headers
+                        .get("Signature-Input")
+                        .and_then(|input| kid_from_signature_input(input))
+                        .unwrap_or_default(),
+                    covered: signed.covered.clone(),
+                    signature_base_digest: crate::audit::log::digest_hex(
+                        &signed.signature_base_digest,
+                    ),
+                };
+                state.record(peer.uid, &event)?;
+                return Ok(Response::Signature(encode_signed_headers(&signed.headers)));
+            }
+            if !keyid.is_empty() {
+                return Err(KeydError::Protocol(
+                    "a keyid was sent without a key name; a structured signature names either a \
+                     DID or a key"
+                        .into(),
+                ));
+            }
 
             let signed = state.sign_structured(peer.uid, &did, kid.as_deref(), &signing)?;
 
@@ -271,6 +316,7 @@ mod tests {
                 Request::Unlock {
                     did: self.did.clone(),
                     kid: None,
+                    key: String::new(),
                     passphrase: zeroize::Zeroizing::new(PASSPHRASE.to_string()),
                 },
             )
@@ -288,6 +334,8 @@ mod tests {
                 body: Some(b"{}".to_vec()),
                 covered: Vec::new(),
                 nonce: None,
+                key: String::new(),
+                keyid: String::new(),
             })
         }
 
@@ -302,6 +350,173 @@ mod tests {
             }
             out
         }
+    }
+
+    /// 一把**按名字寻址**的钥匙:没有 DID,签名要调用方把 keyid 一起带来。
+    struct NamedFixture {
+        _dir: TempDir,
+        state: DaemonState,
+        name: String,
+        keyid: String,
+    }
+
+    impl NamedFixture {
+        fn new(gates: SigningGates) -> Self {
+            let dir = TempDir::new();
+            let layout = KeydLayout::at(dir.path().to_path_buf());
+            layout.ensure().unwrap();
+            let name = "team/bot";
+            let wrapped = create::create_named(
+                &layout,
+                name,
+                "bot",
+                PASSPHRASE.as_bytes(),
+                fast(),
+                HardwareChoice::None,
+            )
+            .unwrap();
+            let keyid = format!(
+                "did:wba:example.com:agents:bot:{}#key-1",
+                wrapped.id.thumbprint
+            );
+
+            Self {
+                state: DaemonState::new(
+                    Roots::Single(layout),
+                    Default::default(),
+                    Autolock::idle(Duration::from_secs(900)),
+                    gates,
+                ),
+                name: name.to_string(),
+                keyid,
+                _dir: dir,
+            }
+        }
+
+        fn peer(&self) -> PeerIdentity {
+            PeerIdentity { uid: 501, gid: 20, pid: Some(1234) }
+        }
+
+        fn unlock(&self) -> Response {
+            handle(
+                &self.state,
+                &self.peer(),
+                Request::Unlock {
+                    did: String::new(),
+                    kid: None,
+                    key: self.name.clone(),
+                    passphrase: zeroize::Zeroizing::new(PASSPHRASE.to_string()),
+                },
+            )
+        }
+
+        fn lock(&self) -> Response {
+            handle(
+                &self.state,
+                &self.peer(),
+                Request::Lock { did: None, kid: None, key: self.name.clone() },
+            )
+        }
+
+        fn structured(&self) -> Request {
+            Request::Sign(SignRequest::Structured {
+                did: String::new(),
+                kid: None,
+                method: "POST".into(),
+                target_uri: "https://example.com/api".into(),
+                headers: BTreeMap::from([(
+                    "content-type".to_string(),
+                    "application/json".to_string(),
+                )]),
+                body: Some(b"{}".to_vec()),
+                covered: Vec::new(),
+                nonce: None,
+                key: self.name.clone(),
+                keyid: self.keyid.clone(),
+            })
+        }
+
+        fn audit_text(&self) -> String {
+            let dir = self.state.layout_for(501).unwrap().audit_dir();
+            let mut out = String::new();
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.extension().is_some_and(|e| e == "jsonl") {
+                    out.push_str(&std::fs::read_to_string(&path).unwrap());
+                }
+            }
+            out
+        }
+    }
+
+    /// 命名钥匙走的是**名字**那一格:解锁、签名、上锁都不碰 did/kid,
+    /// 每一步各留一条自己的审计。
+    #[test]
+    fn a_named_key_unlocks_signs_and_locks_through_the_name_fields() {
+        let f = NamedFixture::new(SigningGates::new(false, false).with_named_key_signing(true));
+
+        assert_eq!(f.unlock(), Response::Ok);
+        let text = f.audit_text();
+        assert!(text.contains("NAMED_UNLOCKED"), "{text}");
+        assert!(text.contains("team/bot"), "{text}");
+
+        let Response::Signature(bytes) = handle(&f.state, &f.peer(), f.structured()) else {
+            panic!("expected a signature");
+        };
+        let headers = String::from_utf8(bytes).unwrap();
+        assert!(headers.contains("Signature-Input: "), "{headers}");
+        // keyid 一路走到了签名参数里 —— 没有它,验签的人不知道该找哪把公钥。
+        assert!(headers.contains(&f.keyid), "{headers}");
+
+        let text = f.audit_text();
+        assert!(text.contains("NAMED_SIGNED"), "{text}");
+        assert!(text.contains(&f.keyid), "{text}");
+        assert!(text.contains("signature_base_digest"), "{text}");
+        // 签名基本身仍然不进去。
+        assert!(!text.contains("@target-uri\": https://"), "the base leaked: {text}");
+
+        assert_eq!(f.lock(), Response::Ok);
+        assert!(f.audit_text().contains("NAMED_LOCKED"));
+
+        // 锁上之后再签就是锁着 —— 和 DID 那条路一样。
+        let Response::Error { code, .. } = handle(&f.state, &f.peer(), f.structured()) else {
+            panic!("expected a refusal");
+        };
+        assert_eq!(code, crate::daemon::wire::ErrorCode::Locked);
+    }
+
+    /// 命名签名这条路**默认关着**,而且拒绝时说得出是哪个开关。
+    #[test]
+    fn named_signing_is_refused_while_the_switch_is_off_and_says_why() {
+        let f = NamedFixture::new(SigningGates::new(true, true));
+
+        // 解锁本身不受签名开关影响 —— 开关管的是"能不能签",不是"能不能进内存"。
+        assert_eq!(f.unlock(), Response::Ok);
+
+        let Response::Error { code, message } = handle(&f.state, &f.peer(), f.structured()) else {
+            panic!("expected a refusal");
+        };
+        assert_eq!(code, crate::daemon::wire::ErrorCode::NamedSigningDisabled);
+        assert!(message.contains("--allow-named-key-signing"), "{message}");
+    }
+
+    /// 只给 keyid、不给钥匙名,是**协议错** —— 守护进程没法凭一个 DID 猜到
+    /// 你想用哪把本地钥匙。
+    #[test]
+    fn a_keyid_without_a_key_name_is_a_protocol_error() {
+        let f = NamedFixture::new(SigningGates::new(false, false).with_named_key_signing(true));
+        assert_eq!(f.unlock(), Response::Ok);
+
+        let mut request = f.structured();
+        let Request::Sign(SignRequest::Structured { key, .. }) = &mut request else {
+            unreachable!()
+        };
+        key.clear();
+
+        let Response::Error { code, .. } = handle(&f.state, &f.peer(), request) else {
+            panic!("expected a refusal");
+        };
+        assert_eq!(code, crate::daemon::wire::ErrorCode::Protocol);
     }
 
     #[test]
@@ -402,7 +617,7 @@ mod tests {
         let f = Fixture::new(SigningGates::new(false, false));
         f.unlock();
         assert_eq!(
-            handle(&f.state, &f.peer(), Request::Lock { did: Some(f.did.clone()), kid: None }),
+            handle(&f.state, &f.peer(), Request::Lock { did: Some(f.did.clone()), kid: None, key: String::new() }),
             Response::Ok
         );
 
@@ -566,6 +781,7 @@ mod tests {
             Request::Unlock {
                 kid: None,
                 did: f.did.clone(),
+                key: String::new(),
                 passphrase: zeroize::Zeroizing::new("wrong".into()),
             },
         ) else {
@@ -585,6 +801,7 @@ mod tests {
             Request::Unlock {
                 kid: None,
                 did: "did:wba:example.com:user:bob:e1_zzz".into(),
+                key: String::new(),
                 passphrase: zeroize::Zeroizing::new(PASSPHRASE.into()),
             },
         ) else {
@@ -619,6 +836,8 @@ mod tests {
             body,
             covered: vec!["x-not-sent".into()],
             nonce: None,
+            key: String::new(),
+            keyid: String::new(),
         });
 
         let Response::Error { code, .. } = handle(&f.state, &f.peer(), request) else {
@@ -698,6 +917,8 @@ mod tests {
             body,
             covered: Vec::new(),
             nonce: Some("caller-chosen-42".into()),
+            key: String::new(),
+            keyid: String::new(),
         });
 
         let Response::Signature(bytes) = handle(&f.state, &f.peer(), request) else {

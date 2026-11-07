@@ -77,11 +77,25 @@ pub enum Event {
         uid: u32,
         did: String,
     },
+    /// 按**名字**解锁了一把钥匙。
+    ///
+    /// 和 [`Event::Unlocked`] 分开记,因为命名信封没有 did —— 把名字塞进
+    /// `did` 字段会让"这个 DID 什么时候被解锁过"这句话在事后读起来是假的。
+    NamedUnlocked {
+        uid: u32,
+        key: String,
+    },
     /// `did` 为空 = 全锁。
     Locked {
         uid: u32,
         did: Option<String>,
         /// 实际放掉了几把。
+        dropped: usize,
+    },
+    /// 按名字锁了一把钥匙。
+    NamedLocked {
+        uid: u32,
+        key: String,
         dropped: usize,
     },
     Signed {
@@ -91,6 +105,18 @@ pub enum Event {
         /// **实际**被覆盖的分量，从签名基里解析回来的那一份。
         covered: Vec<String>,
         /// 签名基的 SHA-256，hex。不是签名基本身 —— 见模块头。
+        signature_base_digest: String,
+    },
+    /// 按**名字**签了一条请求。
+    ///
+    /// 单独一条而不是给 [`Event::Signed`] 加字段:这条路默认关着,打开之后
+    /// 每一次都要能在日志里一眼找出来 —— 而"用哪把名字、以哪个 keyid 签的"
+    /// 是这条记录存在的全部理由。
+    NamedSigned {
+        uid: u32,
+        key: String,
+        keyid: String,
+        covered: Vec<String>,
         signature_base_digest: String,
     },
     /// 原始签名。这条路径默认关着，开了之后每次都要留痕。
@@ -239,6 +265,43 @@ pub enum Event {
     /// 那份文档是它。
     Published {
         did: String,
+        document_digest: String,
+    },
+    /// 铸了一把**按名字寻址**的钥匙。
+    ///
+    /// 和 [`Event::Keygen`] 分开记,理由和 [`Event::NamedUnlocked`] 一样:
+    /// 命名钥匙没有 DID,把它塞进 `did` 字段会让"这个 DID 什么时候铸过
+    /// 钥匙"这句话在事后变成假的。
+    NamedKeyCreated {
+        key: String,
+        thumbprint: String,
+        /// `none` / `secure-enclave` / `tpm` / `software`,来自**落地的那份信封**。
+        hardware: String,
+    },
+    /// 按名字轮换:同一个名字换了新钥匙,旧的信封被替换。
+    ///
+    /// 旧指纹一定要记 —— 轮换之后磁盘上只剩新的那一把,事后要问"某次签名
+    /// 是哪一代"就只剩这一行线索。
+    NamedKeyRotated {
+        key: String,
+        retired_thumbprint: String,
+        thumbprint: String,
+        hardware: String,
+    },
+    /// 命名钥匙的 24 个词显示过一次。**词不进来**,理由同
+    /// [`Event::MnemonicShown`]。
+    NamedMnemonicShown {
+        key: String,
+        scheme: String,
+    },
+    /// 用命名钥匙签了一份文档的 proof(建身份的第 4 步)。
+    ///
+    /// 这是**管理员动作**,不是 Agent 的签名路:它没有 grant、不经守护进程,
+    /// 也不写请求头。记下来是因为它改的是身份本身 —— 事后问"这份文档是谁
+    /// 在什么时候签的"只有这一行能答。
+    NamedDocumentSigned {
+        key: String,
+        keyid: String,
         document_digest: String,
     },
 }

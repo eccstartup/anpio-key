@@ -111,6 +111,15 @@ pub enum ErrorCode {
     /// 加一个码是**加**,不是改:老客户端收到认不出来的码会报 "0x… is not an
     /// error code this client knows",同时拿得到 `message` —— 那是安全的降级。
     ChallengeDisabled = 0x000C,
+    /// 按**名字**寻址的那条签名路开着没有。
+    ///
+    /// 又是一道单独的门:它和 `raw`、`challenge` 都不一样 —— 那两条签的是
+    /// 调用方自己给的字节,这一条签的是守护进程按名字找出来的钥匙。默认关,
+    /// 打开要一个专属开关,因为它让一条新路径第一次能把"钥匙"和"身份"分开。
+    ///
+    /// 加一个码是**加**,不是改:老客户端收到认不出来的码会报 "0x… is not an
+    /// error code this client knows",同时拿得到 `message` —— 安全的降级。
+    NamedSigningDisabled = 0x000D,
     /// 守护进程自己出了问题。**消息文本要对调用方无信息量。**
     Internal = 0x00FF,
 }
@@ -135,6 +144,7 @@ impl std::fmt::Display for ErrorCode {
             ErrorCode::Did => "did",
             ErrorCode::HardwareUnavailable => "hardware root unavailable",
             ErrorCode::ChallengeDisabled => "challenge signing disabled",
+            ErrorCode::NamedSigningDisabled => "named key signing disabled",
             ErrorCode::Internal => "internal",
         })
     }
@@ -160,6 +170,7 @@ impl ErrorCode {
             0x000A => Did,
             0x000B => HardwareUnavailable,
             0x000C => ChallengeDisabled,
+            0x000D => NamedSigningDisabled,
             0x00FF => Internal,
             _ => return None,
         })
@@ -179,6 +190,7 @@ impl KeydError {
             PeerCredentialUnavailable(_) | Permission(_) => ErrorCode::Permission,
             RawDisabled => ErrorCode::RawDisabled,
             ChallengeDisabled => ErrorCode::ChallengeDisabled,
+            NamedSigningDisabled => ErrorCode::NamedSigningDisabled,
             CoveredSetRejected(_) => ErrorCode::CoveredSetRejected,
             Protocol(_) => ErrorCode::Protocol,
             Did(_) => ErrorCode::Did,
@@ -254,6 +266,21 @@ pub enum SignRequest {
         /// 空串按"没给"处理,和这个协议里其它可选字符串(`LOCK` 的 `did`、
         /// 这里的 `kid`)是同一个约定。
         nonce: Option<String>,
+        /// 按**名字**寻址的那把钥匙(`k-7f3a2c91`、`team/bot`)。给了它,
+        /// `did` 就不再用来找信封 —— 名字是这台机器上唯一的地址。
+        ///
+        /// 和不命名的钥匙同一条规矩:名下的那份信封必须**已经解锁**。
+        /// 名字这种寻址是新加的一条路,所以它默认关(`--allow-named-key-signing`),
+        /// 且每签一次都要留一条独立审计。
+        key: String,
+        /// 这把钥匙名义上的完整 keyid(`did:wba:…#key-1`)。DID 是调用方的,
+        /// 守护进程只核对其中 `e1_` 那一段与信封的指纹一致。
+        ///
+        /// **尾随字段。** 老客户端不发这两个字段,解码端见到 nonce 之后
+        /// 就结束 —— 所以新守护进程照旧认识老请求;新客户端多发的那两段
+        /// 老守护进程读不懂(它会在 nonce 之后 `expect_end` 时拒掉),
+        /// 那是"发不出去",不是"发出去一个被悄悄改了意思的请求"。
+        keyid: String,
     },
     /// 受限路径:原始字节。默认关,`--allow-raw-signing` 才开,且必留审计。
     Raw { did: String, kid: Option<String>, payload: Vec<u8> },
@@ -290,7 +317,7 @@ impl std::fmt::Debug for Request {
             Self::Sign(sign) => f.debug_tuple("Sign").field(sign).finish(),
             Self::ListKeys => f.write_str("ListKeys"),
             Self::Status => f.write_str("Status"),
-            Self::Lock { did, kid } => f.debug_struct("Lock").field("did", did).field("kid", kid).finish(),
+            Self::Lock { did, kid, .. } => f.debug_struct("Lock").field("did", did).field("kid", kid).finish(),
             Self::GetDocument { did } => f.debug_struct("GetDocument").field("did", did).finish(),
         }
     }
@@ -302,10 +329,15 @@ pub enum Request {
     ListKeys,
     Sign(SignRequest),
     /// 解锁一把钥匙。`passphrase` 是**明文**,只在内存里活到用完为止。
-    Unlock { did: String, kid: Option<String>, passphrase: Zeroizing<String> },
+    ///
+    /// `key` 非空 = 按名字解锁(`k-7f3a2c91`、`team/bot`)。这是尾随字段:
+    /// 普通解锁不写它,老守护进程照旧认得。
+    Unlock { did: String, kid: Option<String>, key: String, passphrase: Zeroizing<String> },
     /// 锁上。**两级**:`did` 为空表示全锁;只给 `did` 表示把这个 DID 底下
     /// 解锁着的全放掉;再给 `kid` 就是精确到一把。
-    Lock { did: Option<String>, kid: Option<String> },
+    ///
+    /// `key` 非空 = 只锁这一把按名字寻址的钥匙。
+    Lock { did: Option<String>, kid: Option<String>, key: String },
     Status,
     /// 读一份**本机发布过的** DID 文档。只读,不签任何东西。
     ///
@@ -452,16 +484,22 @@ fn decode_request(payload: &[u8]) -> Result<Request> {
             let did = c.string16()?;
             let kid = c.opt_string16()?;
             let passphrase = Zeroizing::new(c.string16()?);
+            let key = if c.is_at_end() { String::new() } else { c.string16()? };
             c.expect_end("UNLOCK")?;
-            Ok(Request::Unlock { did, kid, passphrase })
+            Ok(Request::Unlock { did, kid, key, passphrase })
         }
         LOCK => {
             let mut c = Cursor::new(body);
             let did = c.string16()?;
             let kid = c.opt_string16()?;
+            let key = if c.is_at_end() { String::new() } else { c.string16()? };
             c.expect_end("LOCK")?;
             // 空字符串 = 全部锁上。
-            Ok(Request::Lock { did: if did.is_empty() { None } else { Some(did) }, kid })
+            Ok(Request::Lock {
+                did: if did.is_empty() { None } else { Some(did) },
+                kid,
+                key,
+            })
         }
         STATUS => {
             expect_empty(body, "STATUS")?;
@@ -513,6 +551,14 @@ fn decode_sign(body: &[u8]) -> Result<SignRequest> {
 
             // 空串 = "没给"。见 [`SignRequest::Structured::nonce`]。
             let nonce = c.opt_string16()?;
+
+            // 尾随的按名字寻址字段。老客户端在 nonce 之后就结束了 ——
+            // 见到这里还有字节才去读,于是新旧两种请求都认得。
+            let (key, keyid) = if c.is_at_end() {
+                (String::new(), String::new())
+            } else {
+                (c.string16()?, c.string16()?)
+            };
             c.expect_end("SIGN(Structured)")?;
 
             Ok(SignRequest::Structured {
@@ -524,6 +570,8 @@ fn decode_sign(body: &[u8]) -> Result<SignRequest> {
                 body,
                 covered,
                 nonce,
+                key,
+                keyid,
             })
         }
         0x02 => {
@@ -639,6 +687,8 @@ fn encode_request(request: &Request) -> Result<Vec<u8>> {
                     body: request_body,
                     covered,
                     nonce,
+                    key,
+                    keyid,
                 } => {
                     body.push(0x01);
                     body.string16(did)?;
@@ -658,6 +708,13 @@ fn encode_request(request: &Request) -> Result<Vec<u8>> {
                         body.string16(component)?;
                     }
                     body.string16(nonce.as_deref().unwrap_or(""))?;
+                    // 只在真按名字签时才写这两段。老守护进程在 nonce 之后
+                    // 就 `expect_end`,多发一个空串也会被它当成尾随字节拒掉 ——
+                    // 而一次普通签名的请求没有理由因为升级客户端就发不出去。
+                    if !key.is_empty() || !keyid.is_empty() {
+                        body.string16(key)?;
+                        body.string16(keyid)?;
+                    }
                 }
                 SignRequest::Raw { did, kid, payload } => {
                     body.push(0x02);
@@ -674,15 +731,21 @@ fn encode_request(request: &Request) -> Result<Vec<u8>> {
             }
             SIGN
         }
-        Request::Unlock { did, kid, passphrase } => {
+        Request::Unlock { did, kid, key, passphrase } => {
             body.string16(did)?;
             body.string16(kid.as_deref().unwrap_or(""))?;
             body.string16(passphrase)?;
+            if !key.is_empty() {
+                body.string16(key)?;
+            }
             UNLOCK
         }
-        Request::Lock { did, kid } => {
+        Request::Lock { did, kid, key } => {
             body.string16(did.as_deref().unwrap_or(""))?;
             body.string16(kid.as_deref().unwrap_or(""))?;
+            if !key.is_empty() {
+                body.string16(key)?;
+            }
             LOCK
         }
         Request::GetDocument { did } => {
@@ -857,6 +920,12 @@ impl<'a> Cursor<'a> {
         }
         Ok(())
     }
+
+    /// 尾部还有没有字节。只用来分辨"老请求到这里就结束了"和"新请求后面
+    /// 还带着可选字段" —— 单独一个字段读不到一半就断,仍然由 `take` 报错。
+    fn is_at_end(&self) -> bool {
+        self.at == self.bytes.len()
+    }
 }
 
 /// 顺序写一个 body。每一个带长度的字段都在写入时检查**值域**:编码不出去
@@ -998,6 +1067,8 @@ mod tests {
             body: Some(b"{\"hello\":1}".to_vec()),
             covered: vec!["content-type".into()],
             nonce: None,
+            key: String::new(),
+            keyid: String::new(),
         }
     }
 
@@ -1005,6 +1076,7 @@ mod tests {
     fn unlock_debug_redacts_secret_and_malformed_tail_is_rejected() {
         let request = Request::Unlock {
             did: "did:wba:example.com:test".into(), kid: None,
+            key: String::new(),
             passphrase: Zeroizing::new("temporary-secret-never-log".into()),
         };
         assert!(!format!("{request:?}").contains("temporary-secret-never-log"));
@@ -1102,6 +1174,8 @@ mod tests {
                 body: None,
                 covered: Vec::new(),
                 nonce: nonce.map(str::to_string),
+                key: String::new(),
+                keyid: String::new(),
             }
         };
 
@@ -1122,9 +1196,34 @@ mod tests {
         );
     }
 
+    /// 命名签名的两个字段是**尾随的**,只在真的用到时才写。
+    ///
+    /// 这条不只是"能穿过去":一次普通签名请求一个字节都不许多 —— 老守护
+    /// 进程在 nonce 之后 `expect_end`,多发一个空串它就会当成尾随字节拒掉。
     #[test]
-    fn every_request_survives_a_round_trip() {
-        let requests = [
+    fn named_signing_fields_are_trailing_and_survive_the_wire() {
+        let mut named = structured();
+        let SignRequest::Structured { key, keyid, .. } = &mut named else {
+            unreachable!()
+        };
+        *key = "team/bot".into();
+        *keyid = "did:wba:example.com:agents:bot:e1_abc#key-1".into();
+
+        assert_eq!(
+            round_trip_request(&Request::Sign(named.clone())),
+            Request::Sign(named.clone())
+        );
+
+        let plain = encode_request(&Request::Sign(structured())).unwrap();
+        let with_name = encode_request(&Request::Sign(named)).unwrap();
+        assert!(
+            with_name.len() > plain.len(),
+            "a named signature has to carry the two fields it needs"
+        );
+    }
+
+    #[test]
+    fn every_request_survives_a_round_trip() {        let requests = [
             Request::ListKeys,
             Request::Status,
             Request::Sign(structured()),
@@ -1141,10 +1240,19 @@ mod tests {
             Request::Unlock {
                 did: "did:wba:x".into(),
                 kid: None,
+                key: String::new(),
                 passphrase: Zeroizing::new("hunter2".into()),
             },
-            Request::Lock { did: Some("did:wba:x".into()), kid: None },
-            Request::Lock { did: None, kid: None },
+            Request::Lock { did: Some("did:wba:x".into()), kid: None, key: String::new() },
+            Request::Lock { did: None, kid: None, key: String::new() },
+            // 命名路的地址就是名字,`did` 和 `kid` 都空着。
+            Request::Unlock {
+                did: String::new(),
+                kid: None,
+                key: "team/bot".into(),
+                passphrase: Zeroizing::new("hunter2".into()),
+            },
+            Request::Lock { did: None, kid: None, key: "team/bot".into() },
             Request::GetDocument { did: "did:wba:x".into() },
         ];
 
@@ -1219,6 +1327,8 @@ mod tests {
             body: None,
             covered: Vec::new(),
             nonce: None,
+            key: String::new(),
+            keyid: String::new(),
         };
         let empty = match absent.clone() {
             SignRequest::Structured { did, kid, method, target_uri, headers, covered, .. } => {
@@ -1231,6 +1341,8 @@ mod tests {
                     body: Some(Vec::new()),
                     covered,
                     nonce: None,
+                    key: String::new(),
+                    keyid: String::new(),
                 }
             }
             _ => unreachable!(),

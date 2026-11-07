@@ -57,6 +57,16 @@ pub enum KeydError {
     ChallengeDisabled,
     #[error("caller asked for a covered component the daemon will not sign: {0}")]
     CoveredSetRejected(String),
+    /// 按名字寻址的那条签名路开着没有。
+    ///
+    /// 单开一道门而不是并进 `RawDisabled`:那条路的调用方签的是**自己给的
+    /// 字节**,这一条签的是守护进程**按名字找出来的钥匙**。把两者并在一起,
+    /// 一个只想用命名路的调用方会收到"raw signing disabled",而那句话对它
+    /// 此刻的处境是错的。
+    #[error(
+        "named key signing is disabled (start the daemon with --development --allow-named-key-signing)"
+    )]
+    NamedSigningDisabled,
 
     // —— 调用方式 ——
     /// 工具拒绝照做,而理由和 wire 无关:参数这么配起来不行、磁盘上的状态

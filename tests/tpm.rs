@@ -186,14 +186,14 @@ fn chip() -> std::sync::MutexGuard<'static, ()> {
 /// 从外面能看见那个崩溃的形状。
 #[test]
 #[ignore = "needs a TPM 2.0 (or swtpm) and a matching TPM2TOOLS_TCTI; run with `-- --ignored`"]
-fn a_tpm_envelope_is_version_two_and_opens() {
+fn a_tpm_envelope_is_version_three_and_opens() {
     let _chip = chip();
 
     let sealed = Sealed::new("opens");
     let _cleanup = Evict(sealed.handle);
 
     let envelope: Value = serde_json::from_slice(&sealed.bytes).unwrap();
-    assert_eq!(envelope["version"], 2, "binding to hardware is what version 2 means: {envelope}");
+    assert_eq!(envelope["version"], 3, "new envelopes are version 3: {envelope}");
     assert_eq!(
         envelope["id"]["did"], sealed.did,
         "the envelope has to be the one that was just created, for that identity: {envelope}"

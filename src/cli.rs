@@ -85,8 +85,10 @@ fn help_template() -> String {
          \x20 inspect-vault       Inspect legacy inventory; --verify tests recovery via tty.\n\
          \x20 data                Send a protected v2 request from --file through trusted config.\n\
          \x20 admin               Use the independent Linux management channel.\n\
+         \x20 grant               Create a grant: one key, one target, a time limit, a use count.\n\
          \x20 init-protected-state  Initialize a NEW service database explicitly.\n\
          \x20 stop                Stop the daemon `serve` left running in the background.\n\
+         \x20 key                 Mint and manage keys addressed by name — no DID, no host.\n\
          \n\
          For agents — over the socket, no passphrase:\n\
          \x20 sign                Sign one RFC 9421 request, print the signature headers to stdout.\n\
@@ -99,9 +101,6 @@ fn help_template() -> String {
          \x20 unlock              Unlock a key.\n\
          \n\
          Identity and documents — in your own terminal:\n\
-         \x20 spec                Write a document spec file (a template to edit).\n\
-         \x20 keygen              Mint an identity from 24 new words: four keys, and a signed did.json.\n\
-         \x20 publish             Rebuild the document from a spec, self-sign it, write did.json.\n\
          \x20 verify-doc          Check that a document really belongs to the DID it claims.\n\
          \x20 probe               Check whether this machine can keep the tool's promises.\n\
          \n\
@@ -189,6 +188,18 @@ pub enum Command {
     /// Stop the daemon that `serve` left running in the background.
     Stop,
 
+    /// Mint and manage keys addressed by name.
+    ///
+    /// A named key has no DID and no document: the name is an address on this
+    /// machine and nothing else. Identity — host, path, DID, registration —
+    /// belongs to `anpio-cli`, which asks for the name and public key here.
+    Key(KeyArgs),
+    /// Create a grant on the protected management plane.
+    ///
+    /// A grant is the security decision "which key may sign which target, how
+    /// often, until when" — it is deliberately separate from minting a key.
+    Grant(GrantArgs),
+
     /// Sign one RFC 9421 request, print the signature headers to stdout.
     Sign(SignArgs),
     /// List the keys on this machine.
@@ -214,10 +225,20 @@ pub enum Command {
     // 几条规则(域名不能是 IP、路径段必须 URL 安全)在这里当场查,而不是等到
     // 钥匙都生成出来了才在别处报错。
     /// Write a **document spec file** — start from a template, edit it from there.
+    ///
+    /// Compatibility alias: new work mints keys with `anpio-key key create` and
+    /// builds identities in `anpio-cli did create`.
+    #[command(hide = true)]
     Spec(SpecArgs),
     /// Generate a new did:wba key, write the envelope into `keys/`.
+    ///
+    /// Compatibility alias: new work mints keys with `anpio-key key create`.
+    #[command(hide = true)]
     Keygen(KeygenArgs),
     /// Build the document from the spec, self-sign a proof, write did.json.
+    ///
+    /// Compatibility alias: the identity flow lives in `anpio-cli did create`.
+    #[command(hide = true)]
     Publish(PublishArgs),
     /// Check that a document really belongs to the DID it claims.
     VerifyDoc(VerifyDocArgs),
@@ -411,6 +432,14 @@ pub struct ServeArgs {
     #[arg(long = "allow-uid", value_name = "UID")]
     pub allow_uids: Vec<u32>,
 
+    /// Enable signing with keys addressed by name, in development mode only.
+    ///
+    /// This is a path of its own: it signs with keys that have no DID, using a
+    /// keyid supplied by the caller. Off by default, and every signature leaves
+    /// its own audit record.
+    #[arg(long, requires = "development", conflicts_with = "system")]
+    pub allow_named_key_signing: bool,
+
     /// Allowed executable identities, `cdhash:<hex>` or `sha256:<hex>`
     /// (repeatable).
     ///
@@ -430,6 +459,174 @@ impl ServeArgs {
         }
         Ok(PeerPolicy { allowed_uids: self.allow_uids.clone(), allowed_binaries })
     }
+}
+
+#[derive(Args, Debug)]
+pub struct KeyArgs {
+    #[command(subcommand)]
+    pub operation: KeyCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum KeyCommand {
+    /// Mint a key addressed by name (default name `k-xxxxxxxx`).
+    ///
+    /// Shows 24 words once, asks you to confirm you wrote them down, reads the
+    /// passphrase twice, and only then writes the envelope.
+    Create(KeyCreateArgs),
+    /// List keys with their name, fingerprint, and whether they are unlocked.
+    List(KeyListArgs),
+    /// Unlock a key by name (reads the passphrase from the terminal).
+    Unlock(KeyNameArgs),
+    /// Replace a key's envelope with a newly minted key under the same name.
+    Rotate(KeyRotateArgs),
+    /// Sign one JSON document's proof with a named key — an **administrator**
+    /// action, in your own terminal.
+    ///
+    /// Not an agent path: it signs a document, not a request, and it takes no
+    /// grant. `anpio-cli did create` calls it once, for the DID document's proof.
+    SignDocument(KeySignDocumentArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct KeyCreateArgs {
+    /// The name to file this key under. `/` makes subdirectories
+    /// (`team/bot` → `keys/team/bot.json`). Each segment allows letters,
+    /// digits, `.`, `_` and `-`.
+    ///
+    /// Without it a name like `k-7f3a2c91` is generated and checked for
+    /// collisions.
+    #[arg(long, value_name = "NAME")]
+    pub name: Option<String>,
+
+    /// A human-readable label. It goes into the AAD, so changing it means
+    /// re-wrapping — it is not a comment.
+    #[arg(long, default_value = "named", value_name = "LABEL")]
+    pub label: String,
+
+    /// Print one JSON object instead of the human summary.
+    #[arg(long)]
+    pub json: bool,
+
+    #[command(flatten)]
+    pub hardware: HardwareArgs,
+}
+
+#[derive(Args, Debug)]
+pub struct KeyListArgs {
+    /// Print one JSON array of objects instead of a table.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Socket path (derived from the directory layout by default). Only used
+    /// to learn which keys are unlocked.
+    #[arg(long, value_name = "PATH")]
+    pub socket: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+pub struct KeyNameArgs {
+    /// The key name (`k-7f3a2c91`, `team/bot`).
+    #[arg(long, value_name = "NAME")]
+    pub name: String,
+
+    /// Socket path (derived from the directory layout by default).
+    #[arg(long, value_name = "PATH")]
+    pub socket: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+pub struct KeyRotateArgs {
+    /// The key name to rotate in place.
+    #[arg(long, value_name = "NAME")]
+    pub name: String,
+
+    /// A human-readable label for the new envelope.
+    #[arg(long, default_value = "named", value_name = "LABEL")]
+    pub label: String,
+
+    #[command(flatten)]
+    pub hardware: HardwareArgs,
+}
+
+#[derive(Args, Debug)]
+pub struct KeySignDocumentArgs {
+    /// The key name to sign with.
+    #[arg(long, value_name = "NAME")]
+    pub name: String,
+
+    /// The verification method the proof names, e.g.
+    /// `did:wba:awiki.me:user:bot:e1_…#key-1`.
+    #[arg(long, value_name = "KEYID")]
+    pub keyid: String,
+
+    /// The unsigned document (JSON).
+    #[arg(long, value_name = "FILE")]
+    pub document: PathBuf,
+
+    /// Where to write the signed document. Without it, stdout.
+    #[arg(long, value_name = "FILE")]
+    pub out: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+pub struct GrantArgs {
+    #[command(subcommand)]
+    pub operation: GrantCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum GrantCommand {
+    /// Create a request grant for one key and one target.
+    ///
+    /// Prints the full summary, asks once, then prepares and commits it on the
+    /// protected management plane. Nothing is written until you answer yes.
+    Create(GrantCreateArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct GrantCreateArgs {
+    /// The protected service configuration.
+    #[arg(long, default_value = crate::security::config::DEFAULT_CONFIG)]
+    pub config: PathBuf,
+
+    /// The local key name. Its `e1_` fingerprint must be the DID's last segment.
+    #[arg(long, value_name = "NAME")]
+    pub key: String,
+
+    /// The DID this key signs for. The grant is bound to `<did>#key-1`.
+    #[arg(long, value_name = "DID")]
+    pub did: String,
+
+    /// The request target the grant allows, e.g.
+    /// `https://awiki.me/user-service/v1/did-auth/rpc`.
+    #[arg(long, value_name = "URL")]
+    pub target: String,
+
+    /// The HTTP method the grant allows.
+    #[arg(long, default_value = "POST")]
+    pub method: String,
+
+    /// How long the grant lives: `30m`, `24h`, `7d`, or plain seconds.
+    #[arg(long, default_value = "24h", value_name = "DURATION")]
+    pub ttl: String,
+
+    /// How many signatures the grant allows.
+    #[arg(long, default_value_t = 100, value_name = "N")]
+    pub uses: u32,
+
+    /// Pick the principal explicitly when more than one is enabled.
+    #[arg(long, value_name = "ID")]
+    pub principal: Option<String>,
+
+    /// Pick the policy explicitly. Without it the catalog must offer exactly
+    /// one `http-authentication` policy for this target and method.
+    #[arg(long, requires = "policy_version", value_name = "ID")]
+    pub policy: Option<String>,
+
+    /// The policy version, required with `--policy`.
+    #[arg(long, requires = "policy", value_name = "N")]
+    pub policy_version: Option<u32>,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -595,15 +792,28 @@ pub struct DocumentArgs {
 
 #[derive(Args, Debug)]
 pub struct SignArgs {
-    /// The DID to sign as.
-    #[arg(long, value_name = "DID")]
-    pub did: String,
+    /// The DID to sign as. Give this or `--key`.
+    #[arg(long, value_name = "DID", required_unless_present = "key")]
+    pub did: Option<String>,
 
     /// Which key to sign with, by fragment (`key-2`, `recovery-1`, ...).
     ///
     /// Without it, the default key under `--did` (the binding key).
-    #[arg(long, value_name = "FRAGMENT")]
+    #[arg(long, value_name = "FRAGMENT", conflicts_with = "key")]
     pub kid: Option<String>,
+
+    /// Sign with a key addressed by **name** instead of a DID.
+    ///
+    /// Needs the daemon running with `--development --allow-named-key-signing`.
+    /// `--keyid` must then say which identifier the signature carries; the
+    /// daemon checks that its `e1_` segment is this envelope's fingerprint.
+    #[arg(long, value_name = "NAME")]
+    pub key: Option<String>,
+
+    /// The full keyid a named-key signature is made under
+    /// (`did:wba:…:e1_…#key-1`).
+    #[arg(long, value_name = "KEYID", requires = "key")]
+    pub keyid: Option<String>,
 
     /// The HTTP method.
     #[arg(long, default_value = "GET")]
@@ -660,7 +870,7 @@ pub struct SignArgs {
     #[arg(
         long,
         value_name = "PATH",
-        conflicts_with_all = ["url", "headers", "body", "cover", "nonce", "challenge"]
+        conflicts_with_all = ["url", "headers", "body", "cover", "nonce", "challenge", "key"]
     )]
     pub raw: Option<PathBuf>,
 
@@ -677,7 +887,7 @@ pub struct SignArgs {
     #[arg(
         long,
         value_name = "PATH",
-        conflicts_with_all = ["url", "headers", "body", "cover", "nonce", "raw"]
+        conflicts_with_all = ["url", "headers", "body", "cover", "nonce", "raw", "key"]
     )]
     pub challenge: Option<PathBuf>,
 
@@ -908,7 +1118,12 @@ pub fn run(cli: Cli) -> Result<()> {
         }
         Command::Serve(args) => serve(root, args),
         Command::Stop => stop(root),
-        Command::Keygen(args) => keygen(root, args),
+        Command::Key(args) => key_command(root, args),
+        Command::Grant(args) => grant(root, args),
+        Command::Keygen(args) => {
+            compatibility_hint("keygen", "anpio-key key create");
+            keygen(root, args)
+        }
         Command::BuildInfo => {
             println!("{}", serde_json::json!({"version":env!("CARGO_PKG_VERSION"),"release":!cfg!(debug_assertions),"hardware_software":cfg!(feature="hardware-software"),"hardware_se":cfg!(feature="hardware-se"),"hardware_tpm":cfg!(feature="hardware-tpm"),"seed_export":cfg!(feature="seed-export"),"mcp":cfg!(feature="mcp"),"protected_supported":crate::security::protected_build_supported()}));
             Ok(())
@@ -920,8 +1135,14 @@ pub fn run(cli: Cli) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&crate::security::migration::inspect(&path, verify)?)?);
             Ok(())
         }
-        Command::Spec(args) => write_spec(root, args),
-        Command::Publish(args) => publish(root, args),
+        Command::Spec(args) => {
+            compatibility_hint("spec", "anpio-cli did create");
+            write_spec(root, args)
+        }
+        Command::Publish(args) => {
+            compatibility_hint("publish", "anpio-cli did create");
+            publish(root, args)
+        }
         Command::VerifyDoc(args) => verify_doc(root, args),
         Command::List => list(root),
         Command::Status => status(root),
@@ -1262,12 +1483,18 @@ fn serve_here(layout: &KeydLayout, args: ServeArgs, sock_path: PathBuf) -> Resul
     if (args.allow_raw_signing || args.allow_challenge_signing) && (!args.development || args.system) {
         return Err(KeydError::Misuse("raw/challenge signing requires --development and cannot use --system".into()));
     }
+    if args.allow_named_key_signing && (!args.development || args.system) {
+        return Err(KeydError::Misuse("named-key signing requires --development and cannot use --system".into()));
+    }
     layout.ensure()?;
     let _maintenance = crate::security::paths::legacy_lease(layout.root())?;
     crate::daemon::service::install_logging()?;
     tracing::warn!("legacy development mode: no grant enforcement or same-UID Agent isolation");
     if args.allow_raw_signing || args.allow_challenge_signing {
         tracing::warn!("arbitrary-byte signing enabled: challenge length does not prevent DID document proof signing");
+    }
+    if args.allow_named_key_signing {
+        tracing::warn!("named-key signing enabled: signatures carry a caller-supplied keyid and each one is audited");
     }
 
     let policy = args.policy()?;
@@ -1297,7 +1524,8 @@ fn serve_here(layout: &KeydLayout, args: ServeArgs, sock_path: PathBuf) -> Resul
         roots,
         policy,
         autolock_from_secs(args.idle),
-        SigningGates::new(args.allow_raw_signing, args.allow_challenge_signing),
+        SigningGates::new(args.allow_raw_signing, args.allow_challenge_signing)
+            .with_named_key_signing(args.allow_named_key_signing),
     ));
     let config = ServerConfig { sock_path: sock_path.clone(), policy: state.policy().clone() };
 
@@ -1570,6 +1798,557 @@ fn keygen(root: Option<&Path>, args: KeygenArgs) -> Result<()> {
     println!("    {}", did_url_path(&did)?);
     println!();
     println!("note: this tool cannot host anything — put that file at the URL above yourself.");
+    Ok(())
+}
+
+// ————————————————————————————————————————————————————————————————————————
+// key / grant
+// ————————————————————————————————————————————————————————————————————————
+
+/// 兼容别名被执行时提示新入口。走 stderr —— stdout 里的字节是要原样搬运的。
+fn compatibility_hint(old: &str, new: &str) {
+    eprintln!("note: `{old}` is a compatibility alias; use `{new}` instead.");
+}
+
+fn hardware_label(wrapped: &crate::keystore::record::WrappedKey) -> String {
+    wrapped
+        .hardware
+        .as_ref()
+        .map_or("none", HardwareRoot::kind)
+        .to_string()
+}
+
+/// 名字先查,再问口令 —— 名字不合法或已经占了的时候,不该让人先敲两遍口令。
+fn checked_key_name(layout: &KeydLayout, name: &str) -> Result<String> {
+    layout.key_name_path(name)?;
+    if store::named_exists(layout, name) {
+        return Err(KeydError::KeyExists(format!(
+            "a key named {name} is already on this machine; pick another name or rotate it"
+        )));
+    }
+    Ok(name.to_string())
+}
+
+fn fresh_key_name(layout: &KeydLayout) -> String {
+    loop {
+        let name = crate::keystore::create::random_name();
+        if !store::named_exists(layout, &name) {
+            return name;
+        }
+    }
+}
+
+fn key_command(root: Option<&Path>, args: KeyArgs) -> Result<()> {
+    match args.operation {
+        KeyCommand::Create(args) => key_create(root, args),
+        KeyCommand::List(args) => key_list(root, args),
+        KeyCommand::Unlock(args) => key_unlock(root, args),
+        KeyCommand::Rotate(args) => key_rotate(root, args),
+        KeyCommand::SignDocument(args) => key_sign_document(root, args),
+    }
+}
+
+fn key_create(root: Option<&Path>, args: KeyCreateArgs) -> Result<()> {
+    let layout = layout(root)?;
+    layout.ensure()?;
+    let name = match &args.name {
+        Some(name) => checked_key_name(&layout, name)?,
+        None => fresh_key_name(&layout),
+    };
+
+    let tty = tty::open()?;
+    let passphrase =
+        tty::read_secret_twice(&tty, "New passphrase for this key: ", "Repeat it: ")?;
+
+    // 和 `keygen` 同一条顺序:词先落纸,再落盘。人说了"没抄"就什么都不铸。
+    let seed = crate::crypto::hygiene::LockedBytes::generate()?;
+    let words = crate::crypto::mnemonic::to_words(&seed)?;
+    show_words(&tty, &words)?;
+    if !tty::confirm(&tty, "Have you written these 24 words down?")? {
+        return Err(KeydError::Misuse(
+            "the words were not written down, so nothing was minted: they are the only backup \
+             this key will ever have"
+                .into(),
+        ));
+    }
+
+    let device_secret = device::load_or_create(&layout)?;
+    let wrapped = crate::keystore::create::generate_named_from_seed(
+        &name,
+        &args.label,
+        passphrase.as_bytes(),
+        &device_secret,
+        Argon2Config::default(),
+        args.hardware.choice,
+        &seed,
+    )?;
+    store::save_named(&layout, &wrapped)?;
+
+    // 先落账,再告诉人它成了 —— 和 `keygen` 的顺序一样。
+    let mut audit = AuditLog::open(&layout.audit_dir())?;
+    audit.append(&Event::NamedKeyCreated {
+        key: name.clone(),
+        thumbprint: wrapped.id.thumbprint.clone(),
+        hardware: hardware_label(&wrapped),
+    })?;
+    audit.append(&Event::NamedMnemonicShown {
+        key: name.clone(),
+        scheme: crate::crypto::derive::DERIVATION_V2.to_string(),
+    })?;
+
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "name": name,
+                "thumbprint": wrapped.id.thumbprint,
+                "public_multibase": wrapped.public_multibase,
+                "algorithm": "ed25519",
+            }))?
+        );
+    } else {
+        println!("{name}");
+        println!("    fingerprint: {}", wrapped.id.thumbprint);
+        println!("    public key:  {}", wrapped.public_multibase);
+        println!("    envelope:    {}", layout.key_name_path(&name)?.display());
+    }
+    Ok(())
+}
+
+fn key_list(root: Option<&Path>, args: KeyListArgs) -> Result<()> {
+    let layout = layout(root)?;
+    let envelopes = if layout.keys_dir().exists() {
+        store::load_all(&layout)?
+    } else {
+        Vec::new()
+    };
+
+    // 解锁状态只有守护进程知道。它没在跑的时候说"不知道",不拿"locked"顶替。
+    let (unlocked, why) = match connect(root, args.socket.as_deref()) {
+        Ok(mut client) => (
+            client
+                .status()?
+                .into_iter()
+                .map(|key| key.kid)
+                .collect::<std::collections::BTreeSet<_>>(),
+            None,
+        ),
+        Err(error) => (std::collections::BTreeSet::new(), Some(error.to_string())),
+    };
+
+    let rows: Vec<_> = envelopes
+        .iter()
+        .map(|wrapped| {
+            let state = if why.is_some() {
+                "unknown"
+            } else if unlocked.contains(&wrapped.id.thumbprint) {
+                "unlocked"
+            } else {
+                "locked"
+            };
+            serde_json::json!({
+                "name": wrapped.name,
+                "did": wrapped.id.did,
+                "kid": wrapped.id.kid,
+                "thumbprint": wrapped.id.thumbprint,
+                "algorithm": algorithm_label(wrapped.algorithm),
+                "state": state,
+            })
+        })
+        .collect();
+
+    if let Some(why) = why {
+        eprintln!("note: the daemon is not answering ({why}); unlock state is unknown");
+    }
+
+    if args.json {
+        println!("{}", serde_json::to_string(&rows)?);
+        return Ok(());
+    }
+    if rows.is_empty() {
+        println!("no keys on this machine");
+        return Ok(());
+    }
+    for row in rows {
+        let name = row["name"].as_str().unwrap_or("");
+        let name = if name.is_empty() { "-" } else { name };
+        println!(
+            "{name}\t{}\t{}\t{}",
+            row["thumbprint"].as_str().unwrap_or(""),
+            row["state"].as_str().unwrap_or(""),
+            row["kid"].as_str().unwrap_or("")
+        );
+    }
+    Ok(())
+}
+
+fn key_unlock(root: Option<&Path>, args: KeyNameArgs) -> Result<()> {
+    let tty = tty::open()?;
+    let passphrase =
+        tty::read_secret(&tty, &format!("Passphrase for key {}: ", args.name))?;
+    let mut client = connect(root, args.socket.as_deref())?;
+    client.unlock_named(&args.name, &passphrase)?;
+    println!("unlocked {}", args.name);
+    Ok(())
+}
+
+fn key_rotate(root: Option<&Path>, args: KeyRotateArgs) -> Result<()> {
+    let layout = layout(root)?;
+    layout.ensure()?;
+    let retired = store::load_named(&layout, &args.name)?;
+
+    let tty = tty::open()?;
+    println!("rotating {name} ({thumbprint})", name = args.name, thumbprint = retired.id.thumbprint);
+    println!("the old envelope is replaced and the old key cannot be recovered.");
+    if !tty::confirm(&tty, "Rotate this key?")? {
+        return Err(KeydError::Misuse(
+            "rotation was not confirmed, so the existing key is untouched".into(),
+        ));
+    }
+
+    let passphrase =
+        tty::read_secret_twice(&tty, "New passphrase for this key: ", "Repeat it: ")?;
+    let seed = crate::crypto::hygiene::LockedBytes::generate()?;
+    let words = crate::crypto::mnemonic::to_words(&seed)?;
+    show_words(&tty, &words)?;
+    if !tty::confirm(&tty, "Have you written these 24 words down?")? {
+        return Err(KeydError::Misuse(
+            "the words were not written down, so nothing was rotated: the old key is still there"
+                .into(),
+        ));
+    }
+
+    let device_secret = device::load(&layout)?;
+    let wrapped = crate::keystore::create::generate_named_from_seed(
+        &args.name,
+        &args.label,
+        passphrase.as_bytes(),
+        &device_secret,
+        Argon2Config::default(),
+        args.hardware.choice,
+        &seed,
+    )?;
+    // `write_named` 是**覆盖**写:轮换的意思就是同一个名字下换一把。`save_named`
+    // 会拒绝,用错它的话这里会以 `KeyExists` 失败,而看起来像"名字被占了"。
+    store::write_named(&layout, &wrapped)?;
+
+    let mut audit = AuditLog::open(&layout.audit_dir())?;
+    audit.append(&Event::NamedKeyRotated {
+        key: args.name.clone(),
+        retired_thumbprint: retired.id.thumbprint.clone(),
+        thumbprint: wrapped.id.thumbprint.clone(),
+        hardware: hardware_label(&wrapped),
+    })?;
+    audit.append(&Event::NamedMnemonicShown {
+        key: args.name.clone(),
+        scheme: crate::crypto::derive::DERIVATION_V2.to_string(),
+    })?;
+
+    println!("{name}\t{old} -> {new}", name = args.name, old = retired.id.thumbprint, new = wrapped.id.thumbprint);
+    Ok(())
+}
+
+fn key_sign_document(root: Option<&Path>, args: KeySignDocumentArgs) -> Result<()> {
+    let layout = layout(root)?;
+    let wrapped = store::load_named(&layout, &args.name)?;
+
+    // 和守护进程那条命名签名路同一条规矩:keyid 的 DID 段必须带着这把信封的
+    // 指纹。这里先查,是为了不签出一份自相矛盾的文档 —— 事后验签才发现要比
+    // 现在失败贵得多。
+    let (did, fragment) = args.keyid.split_once('#').ok_or_else(|| {
+        KeydError::Did(format!(
+            "the keyid {:?} carries no fragment; give something like \
+             `did:wba:host:agents:name:e1_…#key-1`",
+            args.keyid
+        ))
+    })?;
+    if fragment.is_empty() {
+        return Err(KeydError::Did(format!(
+            "the keyid {:?} has an empty fragment",
+            args.keyid
+        )));
+    }
+    if thumbprint_of(did)? != wrapped.id.thumbprint {
+        return Err(KeydError::Did(format!(
+            "the keyid {:?} names a different key than {}: its did does not carry this \
+             envelope's thumbprint {}",
+            args.keyid, args.name, wrapped.id.thumbprint
+        )));
+    }
+
+    let bytes = read_flag_file(&args.document, "--document")?;
+    let unsigned: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
+        KeydError::Protocol(format!(
+            "{} is not a JSON document: {error}",
+            args.document.display()
+        ))
+    })?;
+    // 文档的 `id` 和 keyid 的 DID 必须说的是同一件事。拿一个 DID 去签另一个
+    // 身份的文档,是这里最贵的一种错。
+    if let Some(subject) = unsigned.get("id").and_then(serde_json::Value::as_str) {
+        if subject != did {
+            return Err(KeydError::Did(format!(
+                "the document's id is {subject}, but --keyid names {did}"
+            )));
+        }
+    }
+
+    let tty = tty::open()?;
+    let passphrase =
+        tty::read_secret(&tty, &format!("Passphrase for key {}: ", args.name))?;
+    let device_secret = device::load(&layout)?;
+    let key = crate::keystore::unwrap::unlock(&wrapped, passphrase.as_bytes(), &device_secret)?;
+    let signed = document::sign_document(&unsigned, &key, &args.keyid)?;
+    drop(key);
+
+    let mut audit = AuditLog::open(&layout.audit_dir())?;
+    audit.append(&Event::NamedDocumentSigned {
+        key: args.name.clone(),
+        keyid: args.keyid.clone(),
+        document_digest: lifecycle::document_digest(&signed)?,
+    })?;
+
+    let rendered = serde_json::to_vec_pretty(&signed)?;
+    match &args.out {
+        Some(path) => {
+            std::fs::write(path, &rendered)?;
+            println!("wrote {}", path.display());
+        }
+        None => std::io::stdout().write_all(&rendered)?,
+    }
+    Ok(())
+}
+
+fn grant(root: Option<&Path>, args: GrantArgs) -> Result<()> {
+    match args.operation {
+        GrantCommand::Create(args) => grant_create(root, args),
+    }
+}
+
+/// `30m` / `24h` / `7d` / 纯秒数 → 秒。单位和数字之间不许有空格,也不认
+/// `1h30m` —— 一个只会被读错、不会被读对的小语法。
+fn parse_duration(text: &str) -> Result<u64> {
+    let (digits, factor) = if let Some(digits) = text.strip_suffix('s') {
+        (digits, 1)
+    } else if let Some(digits) = text.strip_suffix('m') {
+        (digits, 60)
+    } else if let Some(digits) = text.strip_suffix('h') {
+        (digits, 3600)
+    } else if let Some(digits) = text.strip_suffix('d') {
+        (digits, 86_400)
+    } else {
+        (text, 1)
+    };
+    let count: u64 = digits.parse().map_err(|_| {
+        KeydError::Misuse(format!(
+            "`{text}` is not a duration; use `30m`, `24h`, `7d`, or plain seconds"
+        ))
+    })?;
+    let seconds = count.checked_mul(factor).ok_or_else(|| {
+        KeydError::Misuse(format!("`{text}` is longer than this tool can represent"))
+    })?;
+    if seconds == 0 {
+        return Err(KeydError::Misuse("a grant must live for longer than zero seconds".into()));
+    }
+    Ok(seconds)
+}
+
+fn origin_of(target: &str) -> Result<String> {
+    let (scheme, rest) = target.split_once("://").ok_or_else(|| {
+        KeydError::Misuse(format!(
+            "--target {target:?} needs a scheme, e.g. https://awiki.me/user-service/v1/…"
+        ))
+    })?;
+    let host = rest.split('/').next().unwrap_or(rest);
+    if scheme.is_empty() || host.is_empty() {
+        return Err(KeydError::Misuse(format!("--target {target:?} has no origin")));
+    }
+    Ok(format!("{scheme}://{host}"))
+}
+
+/// 一条已发布的策略是否覆盖 `origin` 上的 `method`。v1 的字段平铺, v2 收在
+/// `content` 里;两份都读,因为目录里可能两代都在。
+fn policy_covers(content: &serde_json::Value, origin: &str, method: &str) -> bool {
+    let (purpose, body) = match content.get("schema_version").and_then(serde_json::Value::as_u64) {
+        Some(1) => (content.get("purpose"), content),
+        Some(2) => (
+            content.get("purpose"),
+            content.get("content").unwrap_or(&serde_json::Value::Null),
+        ),
+        _ => return false,
+    };
+    purpose.and_then(serde_json::Value::as_str) == Some("http-authentication")
+        && body.get("origin").and_then(serde_json::Value::as_str) == Some(origin)
+        && body
+            .get("methods")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|methods| methods.iter().any(|m| m.as_str() == Some(method)))
+}
+
+fn grant_create(root: Option<&Path>, args: GrantCreateArgs) -> Result<()> {
+    use crate::security::client::Client as AdminClient;
+
+    // 本地那把钥匙和它的 DID 先对一遍:`e1_` 段必须是信封的指纹,否则这份
+    // grant 会绑到一把根本不是这儿那把钥匙的 key 上。
+    let layout = layout(root)?;
+    let wrapped = store::load_named(&layout, &args.key)?;
+    let from_did = thumbprint_of(&args.did)?;
+    if from_did != wrapped.id.thumbprint {
+        return Err(KeydError::Did(format!(
+            "the DID {} carries {from_did}, but the key {} is {}",
+            args.did, args.key, wrapped.id.thumbprint
+        )));
+    }
+    let enrolled_kid = format!("{}#key-1", args.did);
+
+    let catalog = AdminClient::connect(&args.config, true)?
+        .catalog()?
+        .catalog
+        .ok_or_else(|| KeydError::Protocol("the management plane returned no catalog".into()))?;
+    let key = catalog
+        .keys
+        .iter()
+        .find(|key| key.kid == enrolled_kid && key.state == "active")
+        .ok_or_else(|| {
+            let known: Vec<&str> = catalog.keys.iter().map(|key| key.kid.as_str()).collect();
+            KeydError::Misuse(format!(
+                "the protected catalog has no active key {enrolled_kid}; enrolled kids: {}",
+                if known.is_empty() { "(none)".to_string() } else { known.join(", ") }
+            ))
+        })?;
+
+    let principals = AdminClient::connect(&args.config, true)?
+        .principals()?
+        .principals
+        .unwrap_or_default();
+    let principal_id = match &args.principal {
+        Some(id) => {
+            if !principals
+                .iter()
+                .any(|principal| principal.principal_id == *id && principal.enabled)
+            {
+                return Err(KeydError::Misuse(format!(
+                    "principal {id} is not enabled in this protected state"
+                )));
+            }
+            id.clone()
+        }
+        None => {
+            let enabled: Vec<_> = principals.iter().filter(|p| p.enabled).collect();
+            match enabled.as_slice() {
+                [only] => only.principal_id.clone(),
+                [] => {
+                    return Err(KeydError::Misuse(
+                        "no principal is enabled; enrol one with `anpio-key admin \
+                         prepare-register-principal --uid <uid>` first"
+                            .into(),
+                    ))
+                }
+                many => {
+                    let ids: Vec<&str> =
+                        many.iter().map(|p| p.principal_id.as_str()).collect();
+                    return Err(KeydError::Misuse(format!(
+                        "{} principals are enabled ({}); pass --principal",
+                        many.len(),
+                        ids.join(", ")
+                    )));
+                }
+            }
+        }
+    };
+
+    let target_origin = origin_of(&args.target)?;
+    let (policy_id, policy_version) = match (&args.policy, args.policy_version) {
+        (Some(id), Some(version)) => (id.clone(), version),
+        (None, _) => {
+            let matching: Vec<(String, u32)> = catalog
+                .policies
+                .iter()
+                .filter_map(|policy| {
+                    let content: serde_json::Value =
+                        serde_json::from_str(policy.get("content")?.as_str()?).ok()?;
+                    if !policy_covers(&content, &target_origin, &args.method) {
+                        return None;
+                    }
+                    Some((
+                        policy.get("policy_id")?.as_str()?.to_string(),
+                        policy.get("version")?.as_u64()? as u32,
+                    ))
+                })
+                .collect();
+            let ids: std::collections::BTreeSet<&str> =
+                matching.iter().map(|(id, _)| id.as_str()).collect();
+            match ids.len() {
+                1 => matching
+                    .iter()
+                    .max_by_key(|(_, version)| *version)
+                    .cloned()
+                    .expect("one policy id means at least one row"),
+                0 => {
+                    return Err(KeydError::Misuse(format!(
+                        "no published `http-authentication` policy covers {} on {target_origin}; \
+                         publish one with `anpio-key admin prepare` or pass --policy",
+                        args.method
+                    )))
+                }
+                _ => {
+                    return Err(KeydError::Misuse(format!(
+                        "{} policies cover {} on {target_origin} ({}); pass --policy and \
+                         --policy-version",
+                        ids.len(),
+                        args.method,
+                        ids.into_iter().collect::<Vec<_>>().join(", ")
+                    )))
+                }
+            }
+        }
+        (Some(_), None) => unreachable!("clap requires --policy-version with --policy"),
+    };
+
+    let ttl = parse_duration(&args.ttl)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| KeydError::Misuse("wall clock predates epoch".into()))?
+        .as_secs() as i64;
+    let expiry = now + ttl as i64;
+
+    let expires = time::OffsetDateTime::from_unix_timestamp(expiry)
+        .map_err(|_| KeydError::Misuse("the expiry does not fit a timestamp".into()))?
+        .format(&time::format_description::well_known::Rfc3339)
+        .map_err(|error| KeydError::Misuse(format!("cannot format the expiry: {error}")))?;
+
+    println!("grant — not created yet");
+    println!("    principal: {principal_id}");
+    println!("    key:       {enrolled_kid}");
+    println!("    catalog:   key_id {}", key.key_id);
+    println!("    policy:    {policy_id} v{policy_version}");
+    println!("    target:    {} {target_origin}", args.method);
+    println!("    expires:   {expires} (in {})", args.ttl);
+    println!("    uses:      {}", args.uses);
+    println!();
+
+    let tty = tty::open()?;
+    if !tty::confirm(&tty, "Create this grant on the protected management plane?")? {
+        return Err(KeydError::Misuse("the grant was not created".into()));
+    }
+
+    let change = crate::persistence::Change::Grant {
+        change: crate::persistence::grants::GrantChange::Create {
+            principal_id,
+            key_id: key.key_id.clone(),
+            policy_id,
+            policy_version,
+            expiry,
+            max_uses: args.uses,
+        },
+    };
+    let prepared = AdminClient::connect(&args.config, true)?
+        .prepare(change)?
+        .prepared
+        .ok_or_else(|| KeydError::Protocol("the management plane returned no prepared change".into()))?;
+    let reply = AdminClient::connect(&args.config, true)?
+        .commit(prepared.operation_id, prepared.digest)?;
+    println!("{}", serde_json::to_string(&reply)?);
     Ok(())
 }
 
@@ -1853,16 +2632,24 @@ fn read_flag_file(path: &Path, flag: &str) -> Result<Vec<u8>> {
 fn sign(root: Option<&Path>, args: SignArgs) -> Result<()> {
     let mut client = connect(root, args.socket.as_deref())?;
 
+    // 原始签名和挑战签名都只认 DID —— 它们和 `--key` 互斥,所以 clap 保证了
+    // 走到这两个分支时 `--did` 一定在。
+    let did_for_bytes = || {
+        args.did
+            .clone()
+            .ok_or_else(|| KeydError::Protocol("this signing path needs --did".into()))
+    };
+
     if let Some(path) = &args.raw {
         let payload = read_flag_file(path, "--raw")?;
-        let signature = client.sign_raw(&args.did, args.kid.as_deref(), payload)?;
+        let signature = client.sign_raw(&did_for_bytes()?, args.kid.as_deref(), payload)?;
         println!("{}", base64(&signature));
         return Ok(());
     }
 
     if let Some(path) = &args.challenge {
         let challenge = read_flag_file(path, "--challenge")?;
-        let signature = client.sign_challenge(&args.did, args.kid.as_deref(), challenge)?;
+        let signature = client.sign_challenge(&did_for_bytes()?, args.kid.as_deref(), challenge)?;
         println!("{}", base64(&signature));
         return Ok(());
     }
@@ -1880,7 +2667,7 @@ fn sign(root: Option<&Path>, args: SignArgs) -> Result<()> {
     })?;
 
     let signed = client.sign(SignRequest::Structured {
-        did: args.did.clone(),
+        did: args.did.clone().unwrap_or_default(),
         kid: args.kid.clone(),
         method: args.method.clone(),
         target_uri,
@@ -1888,6 +2675,8 @@ fn sign(root: Option<&Path>, args: SignArgs) -> Result<()> {
         body,
         covered: args.cover.clone(),
         nonce: args.nonce.clone(),
+        key: args.key.clone().unwrap_or_default(),
+        keyid: args.keyid.clone().unwrap_or_default(),
     })?;
 
     // **原样搬运。** 这份字节要挂到真实请求上去,改动其中任何一个字符
@@ -1985,6 +2774,9 @@ mod tests {
 
         let names: Vec<&str> = command
             .get_subcommands()
+            // 兼容别名(`spec` / `keygen` / `publish`)已经不进主界面了:
+            // 它们还认得,但 `--help` 里再列一遍等于把人往旧路上引。
+            .filter(|sub| !sub.is_hide_set())
             .map(|sub| sub.get_name())
             // clap 自己补的那条 `help` 不算 —— 清单里列它没有信息量。
             .filter(|name| *name != "help")
@@ -2194,6 +2986,7 @@ mod tests {
             allow_raw_signing: false,
             allow_challenge_signing: false,
             allow_uids: vec![],
+            allow_named_key_signing: false,
             allow_binaries: vec!["not-a-pin".into()],
         }
         .policy()
@@ -2205,5 +2998,67 @@ mod tests {
     fn the_host_comes_out_of_a_resolution_url() {
         assert_eq!(host_of("https://example.com:3000/user/alice/did.json"), "example.com:3000");
         assert_eq!(host_of("https://example.com/.well-known/did.json"), "example.com");
+    }
+
+    /// 命名签名是**另一条路**,所以它有自己的开关,而且和 raw/challenge 一样
+    /// 只有 `--development` 下才开。
+    #[test]
+    fn named_key_signing_requires_development_and_rejects_system() {
+        assert!(parse(&["serve", "--allow-named-key-signing"]).is_err());
+        assert!(parse(&["serve", "--development", "--allow-named-key-signing"]).is_ok());
+        assert!(parse(&["serve", "--development", "--system", "--allow-named-key-signing"]).is_err());
+    }
+
+    /// `--key` 和 `--did` 是二选一;`--keyid` 离了 `--key` 没有意义。
+    #[test]
+    fn signing_by_name_takes_a_key_and_a_keyid_instead_of_a_did() {
+        assert!(parse(&["sign", "--key", "k-1", "--keyid", "did:wba:h:a:e1_x#key-1", "--url", "https://h/x"]).is_ok());
+        assert!(parse(&["sign", "--url", "https://h/x"]).is_err(), "a sign needs --did or --key");
+        assert!(parse(&["sign", "--keyid", "did:wba:h:a:e1_x#key-1", "--url", "https://h/x"]).is_err());
+        assert!(parse(&["sign", "--key", "k-1", "--kid", "key-2", "--url", "https://h/x"]).is_err());
+        assert!(parse(&["sign", "--key", "k-1", "--raw", "/tmp/x"]).is_err(), "raw signing is by DID");
+    }
+
+    #[test]
+    fn a_duration_is_a_number_and_one_unit() {
+        assert_eq!(parse_duration("30m").unwrap(), 1800);
+        assert_eq!(parse_duration("24h").unwrap(), 86_400);
+        assert_eq!(parse_duration("7d").unwrap(), 7 * 86_400);
+        assert_eq!(parse_duration("90").unwrap(), 90);
+        for bad in ["", "0", "0h", "1h30m", "h", "-1h", "1 h", "1y", "1秒"] {
+            assert!(parse_duration(bad).is_err(), "{bad:?} should be refused");
+        }
+    }
+
+    #[test]
+    fn a_target_origin_is_scheme_and_host_only() {
+        assert_eq!(origin_of("https://awiki.me/a/b?c=d").unwrap(), "https://awiki.me");
+        assert_eq!(origin_of("https://awiki.me:8443/x").unwrap(), "https://awiki.me:8443");
+        assert!(origin_of("awiki.me/x").is_err());
+        assert!(origin_of("https:///x").is_err());
+    }
+
+    /// 策略匹配只认 `http-authentication`,而且 v1(字段平铺)和 v2
+    /// (`content` 里收着)两份都得读得出来。
+    #[test]
+    fn a_policy_covers_an_origin_and_a_method_in_both_schema_versions() {
+        let v2 = serde_json::json!({
+            "schema_version": 2,
+            "purpose": "http-authentication",
+            "content": {"origin": "https://awiki.me", "methods": ["POST"]},
+        });
+        let v1 = serde_json::json!({
+            "schema_version": 1,
+            "purpose": "http-authentication",
+            "origin": "https://awiki.me",
+            "methods": ["GET"],
+        });
+        assert!(policy_covers(&v2, "https://awiki.me", "POST"));
+        assert!(!policy_covers(&v2, "https://awiki.me", "GET"));
+        assert!(!policy_covers(&v2, "https://evil.example", "POST"));
+        assert!(policy_covers(&v1, "https://awiki.me", "GET"));
+        assert!(!policy_covers(&v1, "https://awiki.me", "POST"));
+        let other = serde_json::json!({"schema_version": 2, "purpose": "ecdh", "content": {}});
+        assert!(!policy_covers(&other, "https://awiki.me", "POST"));
     }
 }

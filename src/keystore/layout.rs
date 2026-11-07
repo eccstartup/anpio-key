@@ -3,7 +3,8 @@
 //! ```text
 //! ~/.anpio-key/                       0700
 //!   device.secret                    0600  32 字节随机 —— 第一把钥匙
-//!   keys/<thumbprint>.json           0600  信封(磁盘上唯一存的东西)
+//!   keys/<thumbprint>.json           0600  DID 绑定信封
+//!   keys/<name>.json                 0600  名字钥匙;名字里的 `/` 是子目录
 //!   dids/<did-safe>.json             0644  可公开的 did:wba 文档
 //!   audit/2026-10.jsonl              0600  append-only
 //!   run/keyd.sock                    0600
@@ -86,6 +87,56 @@ impl KeydLayout {
         Ok(self.keys_dir().join(format!("{thumbprint}.json")))
     }
 
+    /// 名字钥匙的信封路径。`team/bot` → `keys/team/bot.json`。
+    ///
+    /// 名字是外部输入(用户起名、CLI 传进来),所以每一段都过白名单:
+    /// 空段、`.`、`..`、绝对路径一律拒绝。**不做"清洗成安全字符"** ——
+    /// `my/bot` 被悄悄改成 `my_bot` 之后,人下次按原来的名字找不到钥匙,
+    /// 而两份不同的名字还会撞进同一个文件。拒绝比改写诚实。
+    ///
+    /// 还有一个不显眼但不能少的检查:**路径上已有的任何一段都不许是符号
+    /// 链接**。`keys/` 是 0700,但同属主的一次失误就够把 `keys/team` 指到
+    /// 别处;`write_atomic` 只保证"临时文件→rename"是原子的,不保证
+    /// rename 的落点还在 `keys/` 下面。
+    pub fn key_name_path(&self, name: &str) -> Result<PathBuf> {
+        // 和 `key_path` 抢文件名:单段、长得像 `e1_…` 的名字会让两种寻址
+        // 落进同一个文件。名字是用户给的,让它换个名字比事后分辨容易。
+        if is_safe_thumbprint(name) {
+            return Err(KeydError::Protocol(format!(
+                "the key name {name:?} looks like a thumbprint; pick a name that does not start \
+                 with e1_ or x1_"
+            )));
+        }
+        for segment in name.split('/') {
+            if !is_safe_name_segment(segment) {
+                return Err(KeydError::Protocol(format!(
+                    "refusing unsafe key name {name:?}: each `/`-separated segment must be \
+                     non-empty, not `.` or `..`, and use only letters, digits, `.`, `_` and `-`"
+                )));
+            }
+        }
+
+        let segments: Vec<&str> = name.split('/').collect();
+        let mut path = self.keys_dir();
+        for (index, segment) in segments.iter().enumerate() {
+            if index + 1 == segments.len() {
+                path.push(format!("{segment}.json"));
+            } else {
+                path.push(segment);
+            }
+            match fs::symlink_metadata(&path) {
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    return Err(KeydError::Protocol(format!(
+                        "refusing to address a key through the symlink {}",
+                        path.display()
+                    )));
+                }
+                _ => {}
+            }
+        }
+        Ok(path)
+    }
+
     pub fn dids_dir(&self) -> PathBuf {
         self.root.join("dids")
     }
@@ -158,18 +209,34 @@ impl KeydLayout {
         self.log_dir().join("serve.log")
     }
 
-    /// 扫出磁盘上所有信封。损坏的文件不跳过 —— 静默忽略一个读不懂的
-    /// 密钥文件,等于让用户以为自己的钥匙不见了。
+    /// 扫出磁盘上所有信封(含名字钥匙的子目录)。损坏的文件不跳过 ——
+    /// 静默忽略一个读不懂的密钥文件,等于让用户以为自己的钥匙不见了。
+    ///
+    /// **不跟随符号链接。** `keys/` 下面出现一个链接只可能是有人动过手,
+    /// 跳过它等于把一把钥匙从列表里悄悄拿掉 —— 所以这里直接报错。
     pub fn list_key_paths(&self) -> Result<Vec<PathBuf>> {
         let dir = self.keys_dir();
         if !dir.exists() {
             return Ok(Vec::new());
         }
         let mut out = Vec::new();
-        for entry in fs::read_dir(&dir)? {
-            let path = entry?.path();
-            if path.extension().is_some_and(|e| e == "json") {
-                out.push(path);
+        let mut pending = vec![dir];
+        while let Some(current) = pending.pop() {
+            for entry in fs::read_dir(&current)? {
+                let entry = entry?;
+                let file_type = entry.file_type()?;
+                let path = entry.path();
+                if file_type.is_symlink() {
+                    return Err(KeydError::Protocol(format!(
+                        "{} is a symlink; the key directory must not point anywhere else",
+                        path.display()
+                    )));
+                }
+                if file_type.is_dir() {
+                    pending.push(path);
+                } else if path.extension().is_some_and(|e| e == "json") {
+                    out.push(path);
+                }
             }
         }
         out.sort();
@@ -236,6 +303,17 @@ fn is_safe_thumbprint(t: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
+/// 钥匙名的一段。`.` 和 `..` 被**按名字**挡住,不是靠"清洗掉点号"。
+fn is_safe_name_segment(segment: &str) -> bool {
+    !segment.is_empty()
+        && segment != "."
+        && segment != ".."
+        && segment.len() <= 255
+        && segment
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+}
+
 /// 把 DID 变成安全文件名。`:` 是 DID 里最常见的字符,单独处理;
 /// 其余不在白名单的一律换成 `_`。
 pub fn did_safe(did: &str) -> String {
@@ -273,6 +351,69 @@ mod tests {
         assert!(layout.key_path("e1_../../etc/passwd").is_err());
         assert!(layout.key_path("not-a-thumbprint").is_err());
         assert!(layout.key_path("e1_okBASE58").is_ok());
+    }
+
+    #[test]
+    fn a_key_name_becomes_a_relative_path_under_keys() {
+        let layout = KeydLayout::at(PathBuf::from("/tmp/does-not-matter"));
+        assert_eq!(
+            layout.key_name_path("bot").unwrap(),
+            layout.keys_dir().join("bot.json")
+        );
+        assert_eq!(
+            layout.key_name_path("team/bot").unwrap(),
+            layout.keys_dir().join("team").join("bot.json")
+        );
+        // 名字里的点号是名字的一部分,不是扩展名。
+        assert_eq!(
+            layout.key_name_path("bot.v2").unwrap(),
+            layout.keys_dir().join("bot.v2.json")
+        );
+    }
+
+    #[test]
+    fn a_key_name_cannot_escape_or_shadow_a_thumbprint() {
+        let layout = KeydLayout::at(PathBuf::from("/tmp/does-not-matter"));
+        for bad in ["", "/abs", "../x", "a/../../b", "a//b", "a/", "./b", "a/..", "e1_abc", "x1_abc", "a b"] {
+            assert!(
+                layout.key_name_path(bad).is_err(),
+                "{bad:?} must not become a key path"
+            );
+        }
+        assert!(layout.key_name_path("a/b-c.d_e").is_ok());
+    }
+
+    #[test]
+    fn a_key_name_may_not_go_through_a_symlink() {
+        let dir = std::env::temp_dir().join(format!("keyd-name-link-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let layout = KeydLayout::at(dir.clone());
+        layout.ensure().unwrap();
+        std::os::unix::fs::symlink(std::env::temp_dir(), layout.keys_dir().join("team")).unwrap();
+
+        assert!(
+            layout.key_name_path("team/bot").is_err(),
+            "a pre-existing symlink would move the key outside the root"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn listing_keys_walks_named_subdirectories() {
+        let dir = std::env::temp_dir().join(format!("keyd-name-list-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let layout = KeydLayout::at(dir.clone());
+        layout.ensure().unwrap();
+
+        write_atomic(&layout.key_name_path("team/bot").unwrap(), b"{}", SECRET_FILE_MODE).unwrap();
+        write_atomic(&layout.key_path("e1_top").unwrap(), b"{}", SECRET_FILE_MODE).unwrap();
+
+        let listed = layout.list_key_paths().unwrap();
+        assert_eq!(listed.len(), 2, "{listed:?}");
+        assert!(listed.contains(&layout.key_name_path("team/bot").unwrap()));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

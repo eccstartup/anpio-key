@@ -166,6 +166,8 @@ impl Keyd {
             body: args.body.map(String::into_bytes),
             covered: args.covered,
             nonce: args.nonce,
+            key: String::new(),
+            keyid: String::new(),
         };
 
         let signed = self

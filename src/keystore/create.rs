@@ -99,6 +99,7 @@ pub fn generate_from_seed(
         algorithm: KeyAlgorithm::Ed25519,
         public_multibase,
         label: label.to_string(),
+        name: String::new(),
         passphrase,
         device_secret,
         seed,
@@ -127,6 +128,90 @@ pub fn create(
     let created = generate(spec, label, passphrase, &device_secret, argon, hardware)?;
     store::save_new(layout, &created.wrapped)?;
     Ok(created)
+}
+
+/// 一个默认的钥匙名,形如 `k-7f3a2c91`。
+///
+/// 八个十六进制字符来自 32 位随机数 —— 一把钥匙一个名字,不需要人能记住它;
+/// 人能起名字时用 `--name` 自己起。撞名由 [`create_named`] 用 `KeyExists`
+/// 撞回来,调用方换一个再试。
+pub fn random_name() -> String {
+    let mut bytes = [0u8; 4];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut bytes);
+    format!(
+        "k-{:02x}{:02x}{:02x}{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3]
+    )
+}
+
+/// 铸一把**按名字寻址**的钥匙。
+///
+/// 和 [`generate`] 的区别只有坐标:DID 那两格空着,`name` 填上。指纹照样
+/// 算、照样进 AAD、照样是公钥的 `e1_` 段 —— 名字换不来任何密码学上的特权,
+/// 它只是"这把钥匙放在哪、叫什么"。
+pub fn generate_named(
+    name: &str,
+    label: &str,
+    passphrase: &[u8],
+    device_secret: &LockedBytes,
+    argon: Argon2Config,
+    hardware: HardwareChoice,
+) -> Result<WrappedKey> {
+    let seed = LockedBytes::generate()?;
+    generate_named_from_seed(name, label, passphrase, device_secret, argon, hardware, &seed)
+}
+
+/// 同上,seed 由调用方给 —— 轮换和导入都走这条,保证封装参数一套代码。
+pub fn generate_named_from_seed(
+    name: &str,
+    label: &str,
+    passphrase: &[u8],
+    device_secret: &LockedBytes,
+    argon: Argon2Config,
+    hardware: HardwareChoice,
+    seed: &LockedBytes,
+) -> Result<WrappedKey> {
+    let (verifying, public_multibase) = wrap::seed_to_public(seed);
+    let thumbprint = e1_segment(&verifying)?;
+
+    let hardware = hardware::seal_new(hardware, &thumbprint)?;
+
+    wrap::seal(wrap::SealRequest {
+        id: KeyId {
+            did: String::new(),
+            kid: String::new(),
+            thumbprint,
+        },
+        algorithm: KeyAlgorithm::Ed25519,
+        public_multibase,
+        label: label.to_string(),
+        name: name.to_string(),
+        passphrase,
+        device_secret,
+        seed,
+        argon,
+        hardware,
+    })
+}
+
+/// 铸一把命名钥匙并落盘。
+///
+/// 名字是否合法、是否已经被占用,由 [`crate::keystore::layout`] 与
+/// [`crate::keystore::store`] 判 —— 这里不重复一遍规则,因为两份规则迟早
+/// 会漂,而漂的那一份正好会是被绕过的那一份。
+pub fn create_named(
+    layout: &KeydLayout,
+    name: &str,
+    label: &str,
+    passphrase: &[u8],
+    argon: Argon2Config,
+    hardware: HardwareChoice,
+) -> Result<WrappedKey> {
+    layout.ensure()?;
+    let device_secret = device::load_or_create(layout)?;
+    let wrapped = generate_named(name, label, passphrase, &device_secret, argon, hardware)?;
+    store::save_named(layout, &wrapped)?;
+    Ok(wrapped)
 }
 
 /// 给一个**已经存在**的 DID 造一把新钥匙 —— 热密钥或者恢复密钥。
@@ -201,6 +286,7 @@ pub fn generate_extra_from_seed(
         algorithm: KeyAlgorithm::Ed25519,
         public_multibase,
         label: label.to_string(),
+        name: String::new(),
         passphrase,
         device_secret,
         seed,
@@ -298,6 +384,7 @@ pub fn generate_agreement_from_seed(
         algorithm: KeyAlgorithm::X25519,
         public_multibase,
         label: label.to_string(),
+        name: String::new(),
         passphrase,
         device_secret,
         seed,
