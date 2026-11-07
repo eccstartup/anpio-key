@@ -241,6 +241,13 @@ pub(crate) fn exercise_local_se_bridge(
     boundary.database.into_inner().unwrap()
 }
 
+/// Whether a failed `prepare` means the persistence or audit layer itself is
+/// broken. Only then may the plane stop serving; a change that fails validation
+/// is the request's own fault and must leave signing available.
+fn prepare_requires_emergency(error: &KeydError) -> bool {
+    matches!(error, KeydError::Protocol(code) if code == "PERSISTENCE_UNAVAILABLE")
+}
+
 impl Boundary {
     pub fn new(config: ServiceConfig, database: Database) -> Result<Self> {
         config.validate()?;
@@ -1262,11 +1269,15 @@ impl Boundary {
                         reply.prepared = Some(prepared);
                         reply
                     }
-                    Err(KeydError::Misuse(_)) => Reply::code("ADMIN_OPERATION_INVALID"),
-                    Err(_) => {
+                    // Only a failure to record the prepared operation or its
+                    // audit event says the plane can no longer be trusted.
+                    // A stale key id, a bad document or an expired approval is
+                    // this request's own fault: refuse it and keep signing.
+                    Err(error) if prepare_requires_emergency(&error) => {
                         self.emergency();
                         Reply::code("AUDIT_UNAVAILABLE")
                     }
+                    Err(_) => Reply::code("ADMIN_OPERATION_INVALID"),
                 }
             }
             AdminRequest::Commit {
@@ -1442,12 +1453,18 @@ impl Boundary {
                 let Some(state) = self.vaults.get(&vault_id) else {
                     return Reply::code("KEY_NOT_FOUND");
                 };
-                let verified = self.database.lock().map_err(|_| ()).and_then(|db| {
-                    db.check_key(&vault_id, &did, &kid).map_err(|_| ())?;
-                    db.mutation_epoch().map_err(|_| ())
-                });
-                let Ok(epoch) = verified else {
-                    return Reply::code("KEY_ROLE_FORBIDDEN");
+                let verified = self
+                    .database
+                    .lock()
+                    .map_err(|_| KeydError::Protocol("PERSISTENCE_UNAVAILABLE".into()))
+                    .and_then(|db| {
+                        db.check_key(&vault_id, &did, &kid)?;
+                        db.mutation_epoch()
+                    });
+                let epoch = match verified {
+                    Ok(epoch) => epoch,
+                    Err(KeydError::Misuse(code)) => return Reply::code(&code),
+                    Err(_) => return Reply::code("PERSISTENCE_UNAVAILABLE"),
                 };
                 // No disk path or default binding key may be selected by callers.
                 let prefix = format!("{did}#");
@@ -1729,4 +1746,24 @@ pub async fn serve(config: ServiceConfig, mut stop: watch::Receiver<bool>) -> Re
     let _ = exporter.await;
     boundary.lock_all();
     outcome
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_persistence_failure_stops_the_plane() {
+        assert!(prepare_requires_emergency(&KeydError::Protocol(
+            "PERSISTENCE_UNAVAILABLE".into()
+        )));
+        for error in [
+            KeydError::Misuse("ADMIN_OPERATION_INVALID".into()),
+            KeydError::KeyNotFound("key-1".into()),
+            KeydError::Locked,
+            KeydError::Protocol("SOMETHING_ELSE".into()),
+        ] {
+            assert!(!prepare_requires_emergency(&error), "{error}");
+        }
+    }
 }

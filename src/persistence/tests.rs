@@ -505,6 +505,31 @@ fn catalog_enrollment_never_infers_role_and_root_cannot_become_hot() {
     assert!(f.db.check_key(&vault, &did, &key.kid).is_err());
 }
 #[test]
+fn check_key_separates_a_missing_kid_from_a_forbidden_role() {
+    use catalog::*;
+    let mut f = Fixture::new();
+    let (vault, did, _) = vault_fixture(&mut f);
+    apply_change(
+        &mut f,
+        CatalogChange::EnrollVault {
+            vault_id: vault.clone(),
+        },
+    );
+    let key = f.db.catalog().unwrap().keys.remove(0);
+    assert!(matches!(
+        f.db.check_key(&vault, &did, &key.kid),
+        Err(KeydError::Misuse(c)) if c == "KEY_ROLE_FORBIDDEN"
+    ));
+    assert!(matches!(
+        f.db.check_key(&vault, &did, "root-1"),
+        Err(KeydError::Misuse(c)) if c == "KEY_NOT_FOUND"
+    ));
+    assert!(matches!(
+        f.db.check_key(&vault, &did, &format!("{did}#missing")),
+        Err(KeydError::Misuse(c)) if c == "KEY_NOT_FOUND"
+    ));
+}
+#[test]
 fn policy_versions_are_immutable_and_unknown_fields_are_rejected() {
     use catalog::*;
     let mut f = Fixture::new();
@@ -1092,6 +1117,139 @@ fn new_grant(f: &mut Fixture, key: &str, policy: &str) -> grants::Grant {
     f.db.grant_status(&f.config.principals[0].principal_id, &id, now())
         .unwrap()
 }
+#[test]
+fn retiring_a_documentless_identity_retires_keys_and_revokes_grants() {
+    let (mut f, key, policy) = grant_fixture();
+    let g = new_grant(&mut f, &key, &policy);
+    let listed = f.db.catalog().unwrap().keys;
+    let did = listed[0].did.clone();
+    let vault_id = listed[0].vault_id.clone();
+    let layout = crate::keystore::layout::KeydLayout::at(f.dir.join("vaults").join(&vault_id));
+
+    // An identity with an installed document is retired through
+    // deactivate/migrate, not by dropping its keys.
+    assert!(f
+        .db
+        .prepare(1002, Change::RetireIdentity { did: did.clone() }, now())
+        .is_err());
+
+    std::fs::remove_file(layout.did_path(&did)).unwrap();
+    let prepared = f
+        .db
+        .prepare(1002, Change::RetireIdentity { did: did.clone() }, now())
+        .unwrap();
+    f.db.commit(1002, &prepared.operation_id, &prepared.digest, now())
+        .unwrap();
+
+    assert!(f.db.catalog().unwrap().keys.iter().all(|k| k.state == "retired"));
+    let state: String = f
+        .db
+        .connection
+        .query_row("SELECT state FROM grants WHERE grant_id=?1", [&g.grant_id], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(state, "revoked");
+
+    // Nothing left to retire, and an unknown DID is refused the same way.
+    assert!(f
+        .db
+        .prepare(1002, Change::RetireIdentity { did: did.clone() }, now())
+        .is_err());
+    assert!(f
+        .db
+        .prepare(1002, Change::RetireIdentity { did: "did:wba:x:y:z:e1_nope".into() }, now())
+        .is_err());
+}
+
+#[test]
+fn refreshing_reissues_a_grant_lost_to_restart_without_duplicating_or_reviving() {
+    let (mut f, key, policy) = grant_fixture();
+    let principal = f.config.principals[0].principal_id.clone();
+    let g = new_grant(&mut f, &key, &policy);
+    let did: String = f
+        .db
+        .connection
+        .query_row("SELECT did FROM keys WHERE key_id=?1", [&key], |r| r.get(0))
+        .unwrap();
+
+    // A live grant is not lost: there is nothing to refresh.
+    assert!(f
+        .db
+        .prepare(
+            1002,
+            Change::RefreshGrants { principal_id: principal.clone(), did: did.clone() },
+            now()
+        )
+        .is_err());
+
+    f.db.connection
+        .execute(
+            "UPDATE grants SET state='revoked_restart' WHERE grant_id=?1",
+            [&g.grant_id],
+        )
+        .unwrap();
+    let prepared = f
+        .db
+        .prepare(
+            1002,
+            Change::RefreshGrants { principal_id: principal.clone(), did: did.clone() },
+            now(),
+        )
+        .unwrap();
+    let effects = prepared.effect["effects"].as_array().unwrap();
+    assert_eq!(effects.len(), 1);
+    let new_id = effects[0]["grant"]["grant_id"].as_str().unwrap().to_owned();
+    assert_ne!(new_id, g.grant_id);
+    f.db.commit(1002, &prepared.operation_id, &prepared.digest, now())
+        .unwrap();
+
+    // Same key, policy, lifetime and use limit as the grant that was lost.
+    let (state, max_uses, expiry): (String, u32, i64) = f
+        .db
+        .connection
+        .query_row(
+            "SELECT state,max_uses,expiry FROM grants WHERE grant_id=?1",
+            [&new_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!((state.as_str(), max_uses, expiry), ("active", 2, 1050));
+    f.db.grant_status(&principal, &new_id, now()).unwrap();
+
+    // The lost row is superseded, not left eligible: the replacement is the only
+    // authorization now, so a second refresh finds nothing to do.
+    let old_state: String = f
+        .db
+        .connection
+        .query_row("SELECT state FROM grants WHERE grant_id=?1", [&g.grant_id], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(old_state, "revoked");
+    assert!(f
+        .db
+        .prepare(
+            1002,
+            Change::RefreshGrants { principal_id: principal.clone(), did: did.clone() },
+            now()
+        )
+        .is_err());
+
+    // `grant revoke` is a decision, not an accident: never revived.
+    f.db.connection
+        .execute("UPDATE grants SET state='revoked' WHERE grant_id=?1", [&new_id])
+        .unwrap();
+    assert!(f
+        .db
+        .prepare(
+            1002,
+            Change::RefreshGrants { principal_id: principal.clone(), did: did.clone() },
+            now()
+        )
+        .is_err());
+}
+
 fn canonical() -> crate::security::http::CanonicalHttpRequest {
     crate::security::http::CanonicalHttpRequest::new(crate::security::http::HttpRequest {
         method: "GET".into(),

@@ -400,7 +400,11 @@ pub enum AdminCommand {
         vault_id: String,
         #[arg(long)]
         did: String,
-        #[arg(long)]
+        /// Full key id, `<did>#<fragment>`.
+        ///
+        /// The management plane addresses keys by full kid. The data-plane
+        /// `anpio-key unlock --kid` takes only the fragment — do not mix them up.
+        #[arg(long, value_name = "DID#FRAGMENT")]
         kid: String,
     },
 }
@@ -660,6 +664,35 @@ pub enum GrantCommand {
     /// Prints the full summary, asks once, then prepares and commits it on the
     /// protected management plane. Nothing is written until you answer yes.
     Create(GrantCreateArgs),
+    /// Re-issue the grants a restart or expiry took away.
+    ///
+    /// Each grant the principal held for the DID that is now
+    /// `revoked_restart`, `expired` or `exhausted` is issued again with the
+    /// same key, policy, lifetime and use limit, after one confirmation. A
+    /// deliberately revoked grant is never revived.
+    Refresh(GrantRefreshArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct GrantRefreshArgs {
+    /// The protected service configuration.
+    #[arg(long, default_value = crate::security::config::DEFAULT_CONFIG)]
+    pub config: PathBuf,
+
+    /// The agent account's uid (`id -u _anpagent`), not a principal id.
+    ///
+    /// The grants were issued to one principal; its uid is what an operator
+    /// knows after a restart.
+    #[arg(long, value_name = "UID")]
+    pub principal: u32,
+
+    /// The DID whose grants are refreshed.
+    #[arg(long, value_name = "DID")]
+    pub did: String,
+
+    /// One-line JSON on stdout, for `anpio-cli did refresh`.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args, Debug)]
@@ -1449,6 +1482,15 @@ pub fn run(cli: Cli) -> Result<()> {
                     AdminClient::connect(&args.config, true)?.se_session(vault_id, did, kid, secret)?
                 }
                 AdminCommand::Unlock { vault_id, did, kid, native_ui } => {
+                    // Refuse a fragment or foreign kid before any passphrase is
+                    // read: the server would only say "not found" after the
+                    // prompt, and the user has already typed the secret.
+                    if !full_kid_for(&did, &kid) {
+                        return Err(KeydError::Misuse(format!(
+                            "--kid must be the full key id `<did>#<fragment>` (got `{kid}`); \
+                             the data-plane `anpio-key unlock --kid` takes only the fragment"
+                        )));
+                    }
                     // Preflight before prompting; reconnect and authenticate again before sending.
                     if native_ui {
                         client.capabilities().map_err(|error| KeydError::Misuse(
@@ -2406,6 +2448,7 @@ fn key_bind_did(root: Option<&Path>, args: KeyBindDidArgs) -> Result<()> {
 fn grant(root: Option<&Path>, args: GrantArgs) -> Result<()> {
     match args.operation {
         GrantCommand::Create(args) => grant_create(root, args),
+        GrantCommand::Refresh(args) => grant_refresh(args),
     }
 }
 
@@ -2495,6 +2538,12 @@ fn role_name(role: &crate::persistence::catalog::KeyRole) -> &'static str {
         KeyRole::DeviceSigning => "device_signing",
         KeyRole::KeyAgreement => "key_agreement",
     }
+}
+
+fn full_kid_for(did: &str, kid: &str) -> bool {
+    kid.strip_prefix(did)
+        .and_then(|rest| rest.strip_prefix('#'))
+        .is_some_and(|fragment| !fragment.is_empty() && !fragment.contains('#'))
 }
 
 fn grant_create(root: Option<&Path>, args: GrantCreateArgs) -> Result<()> {
@@ -2753,6 +2802,214 @@ fn grant_create(root: Option<&Path>, args: GrantCreateArgs) -> Result<()> {
     println!("Write it into the DID client with: anpio-cli key grant {grant_id} --purpose {}",
         args.purpose.anpio_cli_name());
     Ok(())
+}
+
+/// 一次重启、一次到期或一次用完,都会把 grant 从可签名的那一列里拿走。这条
+/// 命令把它们原样重新签发:同一把 key、同一条 policy、同样的寿命和次数上限。
+///
+/// 已经被 `grant revoke` 明确吊销的不在此列 —— 那是人的决定,重启恢复不该把它
+/// 翻回来。
+fn grant_refresh(args: GrantRefreshArgs) -> Result<()> {
+    use crate::persistence::grants::Grant;
+    use crate::security::client::Client as AdminClient;
+
+    let principals = AdminClient::connect(&args.config, true)?
+        .principals()?
+        .principals
+        .unwrap_or_default();
+    let principal = principals
+        .iter()
+        .find(|principal| principal.uid == args.principal && principal.enabled)
+        .ok_or_else(|| {
+            KeydError::Misuse(format!(
+                "uid {} is not an enabled principal in this protected state",
+                args.principal
+            ))
+        })?;
+
+    let catalog = AdminClient::connect(&args.config, true)?
+        .catalog()?
+        .catalog
+        .ok_or_else(|| KeydError::Protocol("the management plane returned no catalog".into()))?;
+    if !catalog
+        .keys
+        .iter()
+        .any(|key| key.did == args.did && key.state == "active")
+    {
+        return Err(KeydError::Misuse(format!(
+            "the protected catalog has no active key for {}",
+            args.did
+        )));
+    }
+
+    let change = crate::persistence::Change::RefreshGrants {
+        principal_id: principal.principal_id.clone(),
+        did: args.did.clone(),
+    };
+    let prepared = AdminClient::connect(&args.config, true)?
+        .prepare(change)?
+        .prepared
+        .ok_or_else(|| {
+            KeydError::Protocol("the management plane returned no prepared change".into())
+        })?;
+
+    let effects = prepared
+        .effect
+        .get("effects")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| KeydError::Protocol("the prepared change carries no grants".into()))?;
+    let mut grants: Vec<(Grant, String, Option<String>, Option<String>, Option<String>)> = Vec::new();
+    for effect in effects {
+        let value = effect.get("grant").ok_or_else(|| {
+            KeydError::Protocol("the prepared change carries an effect that is not a grant".into())
+        })?;
+        let grant: Grant = serde_json::from_value(value.clone()).map_err(|_| {
+            KeydError::Protocol("the prepared change carries a malformed grant".into())
+        })?;
+        let kid = catalog
+            .keys
+            .iter()
+            .find(|key| key.key_id == grant.key_id)
+            .map(|key| key.kid.clone())
+            .unwrap_or_else(|| grant.key_id.clone());
+        let policy = catalog
+            .policies
+            .iter()
+            .find(|policy| {
+                policy.get("policy_id").and_then(serde_json::Value::as_str)
+                    == Some(grant.policy_id.as_str())
+                    && policy.get("version").and_then(serde_json::Value::as_u64)
+                        == Some(u64::from(grant.policy_version))
+            })
+            .and_then(|policy| policy.get("content"))
+            .and_then(serde_json::Value::as_str)
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok());
+        let purpose = policy
+            .as_ref()
+            .and_then(|content| content.get("purpose"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        let origin = policy.as_ref().and_then(policy_origin).map(str::to_owned);
+        let name = policy.as_ref().and_then(policy_grant_name);
+        grants.push((grant, kid, purpose, origin, name));
+    }
+    if grants.is_empty() {
+        return Err(KeydError::Protocol(
+            "the prepared change carries no grants".into(),
+        ));
+    }
+
+    if !args.json {
+        println!("refresh — nothing issued yet");
+        println!("    principal: {} (uid {})", principal.principal_id, args.principal);
+        println!("    did:       {}", args.did);
+        println!("    grants:    {}", grants.len());
+        for (grant, kid, purpose, origin, _) in &grants {
+            let purpose = purpose.as_deref().unwrap_or("unknown purpose");
+            let where_ = origin.as_ref().map(|o| format!(" on {o}")).unwrap_or_default();
+            println!("      {kid}");
+            println!(
+                "        {purpose}{where_}, {}, {}",
+                grant.kind,
+                format_unix(grant.expiry)
+            );
+            println!(
+                "        policy {} v{}, up to {} uses",
+                grant.policy_id, grant.policy_version, grant.max_uses
+            );
+        }
+        println!();
+    }
+
+    let tty = tty::open()?;
+    if !tty::confirm(&tty, "Re-issue these grants on the protected management plane?")? {
+        return Err(KeydError::Misuse("no grant was reissued".into()));
+    }
+
+    AdminClient::connect(&args.config, true)?
+        .commit(prepared.operation_id, prepared.digest)?;
+
+    if args.json {
+        let rows: Vec<serde_json::Value> = grants
+            .iter()
+            .map(|(grant, kid, purpose, origin, name)| {
+                serde_json::json!({
+                    "grant_id": grant.grant_id,
+                    "name": name,
+                    "kid": kid,
+                    "key_id": grant.key_id,
+                    "policy_id": grant.policy_id,
+                    "policy_version": grant.policy_version,
+                    "kind": grant.kind,
+                    "purpose": purpose,
+                    "origin": origin,
+                    "expiry": grant.expiry,
+                    "max_uses": grant.max_uses,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "did": args.did,
+                "principal_id": principal.principal_id,
+                "uid": args.principal,
+                "grants": rows,
+            }))?
+        );
+    } else {
+        println!("reissued {} grant(s) for {}", grants.len(), args.did);
+        for (grant, _, _, _, name) in &grants {
+            println!(
+                "  {} -> {}",
+                name.as_deref().unwrap_or("unknown purpose"),
+                grant.grant_id
+            );
+        }
+        println!();
+        println!("Write them into the DID client with: anpio-cli did refresh --uid {}",
+            args.principal);
+    }
+    Ok(())
+}
+
+fn format_unix(seconds: i64) -> String {
+    time::OffsetDateTime::from_unix_timestamp(seconds)
+        .ok()
+        .and_then(|at| {
+            at.format(&time::format_description::well_known::Rfc3339)
+                .ok()
+        })
+        .unwrap_or_else(|| seconds.to_string())
+}
+
+fn policy_origin(content: &serde_json::Value) -> Option<&str> {
+    match content.get("schema_version").and_then(serde_json::Value::as_u64) {
+        Some(1) => content.get("origin").and_then(serde_json::Value::as_str),
+        Some(2) => content
+            .get("content")?
+            .get("origin")
+            .and_then(serde_json::Value::as_str),
+        _ => None,
+    }
+}
+
+/// The name a grant is filed under in the DID client's identity record. This is
+/// the same naming `ProvisionIdentity` uses, so a refreshed grant lands under
+/// the key the signer already looks up.
+fn policy_grant_name(content: &serde_json::Value) -> Option<String> {
+    let name = match content.get("purpose")?.as_str()? {
+        "http-authentication" | "http_authentication" => "http",
+        "document-proof" | "document_proof" => "document_proof",
+        "purpose-signing" | "purpose_signing" => "purpose",
+        "ecdh" => "ecdh",
+        "origin-proof" | "origin_proof" => {
+            let kind = policy_origin(content)?.strip_prefix("anp://")?;
+            return Some(format!("origin_proof_{kind}"));
+        }
+        _ => return None,
+    };
+    Some(name.to_string())
 }
 
 /// 在终端上把 24 个词摊开,一次,并且说明它备份的是什么、不备份什么。
@@ -3143,6 +3400,15 @@ fn base64(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_admin_unlock_kid_must_be_the_full_key_id() {
+        let did = "did:wba:host:user:alice:e1_example";
+        assert!(full_kid_for(did, "did:wba:host:user:alice:e1_example#root-1"));
+        assert!(!full_kid_for(did, "root-1"));
+        assert!(!full_kid_for(did, "did:wba:host:user:alice:e1_example#"));
+        assert!(!full_kid_for(did, "did:wba:host:user:alice:e1_example#a#b"));
+        assert!(!full_kid_for(did, "did:wba:host:user:alice:e1_other#root-1"));
+    }
     use super::*;
     use clap::CommandFactory;
     use clap::Parser;

@@ -29,14 +29,15 @@ usage() {
   --status            只读显示安装状态、运行状态和已安装摘要
   --verify            对已安装服务跑只读验收，失败退出 3
   --upgrade           用当前构建替换已安装二进制，保留配置和状态
+                      可选 --cli-binary/--cli-sha256 同时刷新已安装的 anpio-cli
   --uninstall         停止服务并删除二进制和服务单元，保留配置、状态和账号
   -h, --help          显示本帮助
 
 接管已有命名钥匙身份（macOS 本机预览，安装后、空服务）:
   --adopt             把 anpio-cli 建的命名钥匙身份迁入受保护服务
   --identity FILE     anpio-cli 的 identity.json（绝对路径）
-  --cli-binary PATH   已构建的 anpio-cli（绝对路径）
-  --cli-sha256 HASH   anpio-cli 的 SHA-256
+  --cli-binary PATH   已构建的 anpio-cli（绝对路径；--upgrade 时可选）
+  --cli-sha256 HASH   anpio-cli 的 SHA-256（--upgrade 时与 --cli-binary 成对）
   --source-root DIR   命名钥匙库，默认管理员主目录下的 .anpio-key
   --target URL        Agent 要访问的完整 HTTPS URL，可重复（至少一个）
   --method METHOD     允许的方法，可重复，默认 POST
@@ -60,6 +61,8 @@ usage() {
   ./install.sh --status
   ./install.sh --verify
   ./install.sh --upgrade
+  sudo ./install.sh --upgrade --cli-binary /Users/me/anpio-cli/target/release/anpio-cli \
+    --cli-sha256 VERIFIED_SHA256
   ./install.sh --uninstall
   ./install.sh --agent-user agent-a --agent-user agent-b
   ./install.sh --tpm-device
@@ -197,12 +200,14 @@ case "$PLATFORM" in
     BINARY_PATH=/Library/ANPIOKey/bin/anpio-key
     UNIT_PATH=/Library/LaunchDaemons/org.anpio-key.local.plist
     SOCKET_PATH=/Library/ANPIOKey/admin/admin.sock
+    CLI_INSTALL_PATH=/Library/ANPIOKey/bin/anpio-cli
     ACCOUNTS=(_anpio _anpagent) ;;
   linux)
     CONFIG_PATH=/etc/anpio-key/service.json
     BINARY_PATH=/usr/local/libexec/anpio-key
     UNIT_PATH=/etc/systemd/system/anpio-key.service
     SOCKET_PATH=/run/anpio-key/admin/admin.sock
+    CLI_INSTALL_PATH=/usr/local/libexec/anpio-cli
     ACCOUNTS=() ;;
 esac
 
@@ -269,6 +274,35 @@ print_status() {
   esac
 }
 
+install_cli_if_requested() {
+  if [[ -z "$CLI_BINARY" ]]; then
+    if [[ -f "$CLI_INSTALL_PATH" ]]; then
+      echo "注意: 本次升级未刷新已安装的 anpio-cli（sha256 $(sha256_of "$CLI_INSTALL_PATH")）。" >&2
+      echo "      如果当前构建包含新的 CLI，请运行:" >&2
+      echo "      sudo ./install.sh --upgrade --cli-binary /ABS/anpio-cli --cli-sha256 HASH" >&2
+    fi
+    return 0
+  fi
+  local digest target_parent staged
+  digest="$(sha256_of "$CLI_BINARY")"
+  [[ "$digest" == "$CLI_SHA256" ]] || die "--cli-sha256 与 anpio-cli 的摘要不一致"
+  if [[ -f "$CLI_INSTALL_PATH" && "$(sha256_of "$CLI_INSTALL_PATH")" == "$digest" ]]; then
+    echo "==> 已安装的 anpio-cli 就是该构建（${digest}），跳过"
+    return 0
+  fi
+  target_parent="$(dirname "$CLI_INSTALL_PATH")"
+  mkdir -p "$target_parent"
+  staged="$(mktemp "$target_parent/.anpio-cli.XXXXXX")"
+  if ! cp "$CLI_BINARY" "$staged" \
+    || ! chown 0:0 "$staged" \
+    || ! chmod 0755 "$staged" \
+    || ! mv -f "$staged" "$CLI_INSTALL_PATH"; then
+    rm -f "$staged"
+    die "安装 anpio-cli 失败"
+  fi
+  echo "==> 安装 anpio-cli: $CLI_INSTALL_PATH（${digest}）"
+}
+
 upgrade_macos() {
   upgrade_args=(/usr/bin/python3 "$REPO_ROOT/deploy/macos/update-local.py" --binary "$BINARY" --sha256 "$SHA256")
   if [[ -e /Library/ANPIOKey/bin/anpio-key.previous ]]; then
@@ -331,7 +365,18 @@ if [[ "$COMMAND" == install || "$COMMAND" == upgrade || "$COMMAND" == adopt ]]; 
   fi
 fi
 
-if [[ "$COMMAND" == adopt ]]; then
+if [[ "$COMMAND" == upgrade ]]; then
+  if [[ -n "$CLI_BINARY$CLI_SHA256" ]]; then
+    [[ -n "$CLI_BINARY" && -n "$CLI_SHA256" ]] \
+      || die "--upgrade 刷新 anpio-cli 需要同时给 --cli-binary 和 --cli-sha256"
+    [[ "$CLI_BINARY" == /* ]] || die "--cli-binary 必须是绝对路径"
+    [[ "$CLI_SHA256" =~ ^[0-9a-fA-F]{64}$ ]] || die "--cli-sha256 必须是 64 位十六进制"
+    if ((DRY_RUN == 0)); then
+      [[ -f "$CLI_BINARY" ]] || die "找不到 --cli-binary: $CLI_BINARY"
+    fi
+    CLI_SHA256="$(printf '%s' "$CLI_SHA256" | tr 'A-F' 'a-f')"
+  fi
+elif [[ "$COMMAND" == adopt ]]; then
   [[ "$PLATFORM" == macos ]] || die "--adopt 只用于 macOS 本机预览"
   [[ -n "$IDENTITY" ]] || die "--adopt 需要 --identity"
   [[ -n "$CLI_BINARY" ]] || die "--adopt 需要 --cli-binary"
@@ -372,6 +417,8 @@ elif ((BOOTSTRAP)); then
   fi
 elif [[ -n "$DID_HOST$TARGET" || ${#METHODS[@]} -gt 0 ]]; then
   die "身份初始化选项需要同时带上 --bootstrap 或 --adopt"
+elif [[ -n "$CLI_BINARY$CLI_SHA256" ]]; then
+  die "--cli-binary/--cli-sha256 需要 --adopt 或 --upgrade"
 fi
 
 STATE="$(detect_state)"
@@ -508,7 +555,7 @@ if [[ -n "$SHA256" ]]; then
   [[ "$SHA256" =~ ^[0-9a-f]{64}$ ]] || die "SHA-256 格式不对: $SHA256"
 fi
 
-if [[ "$COMMAND" == upgrade && -n "$SHA256" && -f "$BINARY_PATH" ]]; then
+if [[ "$COMMAND" == upgrade && -z "$CLI_BINARY" && -n "$SHA256" && -f "$BINARY_PATH" ]]; then
   if [[ "$(sha256_of "$BINARY_PATH")" == "$SHA256" ]]; then
     echo "已安装的二进制就是该构建（${SHA256}）；跳过，服务未重启。"
     exit 0
@@ -524,6 +571,7 @@ if ((DRY_RUN)); then
 Agent:      ${AGENT_USERS[*]}
 程序:       $BINARY$( ((BUILD_PENDING)) && echo "（将构建）" )
 SHA-256:    ${SHA256:-（构建后计算）}
+CLI 刷新:   $( [[ -n "$CLI_BINARY" ]] && echo "$CLI_BINARY（$CLI_SHA256）" || echo "未请求（已安装的 anpio-cli 保持不动）" )
 TPM 设备:   ${TPM_DEVICE:-无}
 身份初始化: $( ((BOOTSTRAP)) && echo "是" || echo "否" )$(
   if ((BOOTSTRAP)); then
@@ -535,6 +583,7 @@ TPM 设备:   ${TPM_DEVICE:-无}
 将执行:
   - 构建 release（未给 --binary 时）
   - 安装 root 持有的程序、配置和 systemd/launchd 服务（升级时只替换二进制）
+  - 升级时若给了 --cli-binary，原子替换已安装的 anpio-cli
   - 启动服务并做只读检查
 $( ((BOOTSTRAP)) && printf '  - 生成新身份，离线迁入受保护状态，创建策略和 grant，并解锁\n  - 口令由你在这个终端输入\n' )
 
@@ -548,6 +597,8 @@ if ((EUID != 0)); then
   args=(--_root --admin-user "$ADMIN_USER" --binary "$BINARY")
   [[ -n "$SHA256" ]] && args+=(--sha256 "$SHA256")
   [[ "$COMMAND" == upgrade ]] && args+=(--upgrade)
+  [[ "$COMMAND" == upgrade && -n "$CLI_BINARY" ]] \
+    && args+=(--cli-binary "$CLI_BINARY" --cli-sha256 "$CLI_SHA256")
   for agent in "${AGENT_USERS[@]}"; do args+=(--agent-user "$agent"); done
   [[ -n "$TPM_DEVICE" ]] && args+=(--tpm-device "$TPM_DEVICE")
   if ((BOOTSTRAP)); then
@@ -561,11 +612,16 @@ fi
 # ---- root phase ----
 
 if [[ "$COMMAND" == upgrade ]]; then
-  case "$PLATFORM" in
-    macos) upgrade_macos ;;
-    linux) upgrade_linux ;;
-  esac
-  exit $?
+  if [[ -n "$SHA256" && -f "$BINARY_PATH" && "$(sha256_of "$BINARY_PATH")" == "$SHA256" ]]; then
+    echo "已安装的服务二进制就是该构建（${SHA256}）；跳过服务重启。"
+  else
+    case "$PLATFORM" in
+      macos) upgrade_macos ;;
+      linux) upgrade_linux ;;
+    esac
+  fi
+  install_cli_if_requested
+  exit 0
 fi
 
 [[ "$(id -u "$ADMIN_USER")" != "0" ]] || die "管理员不能是 root"

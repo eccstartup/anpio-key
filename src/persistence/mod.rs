@@ -98,6 +98,26 @@ pub enum Change {
     DisablePrincipal {
         principal_id: String,
     },
+    /// Retire every key of a DID that never got a document installed.
+    ///
+    /// This is the cleanup for a provisioning that committed in the protected
+    /// plane and then failed to publish or register. Keys move to `retired`
+    /// and their grants to `revoked`; policies stay because another identity
+    /// may reuse them. An identity that already has an installed document must
+    /// go through deactivate/migrate instead.
+    RetireIdentity {
+        did: String,
+    },
+    /// Re-issue the grants a restart, expiry or exhausted quota took away.
+    ///
+    /// Each distinct (key, policy, kind) the principal already held is issued
+    /// again with the same lifetime and use limit. A deliberately revoked
+    /// grant (`grant revoke`) is never revived: only `revoked_restart`,
+    /// `expired` and `exhausted` rows qualify.
+    RefreshGrants {
+        principal_id: String,
+        did: String,
+    },
     Catalog {
         change: catalog::CatalogChange,
     },
@@ -152,6 +172,18 @@ enum Resolved {
     },
     DisablePrincipal {
         principal_id: String,
+    },
+    RetireIdentity {
+        did: String,
+        vault_id: String,
+    },
+    RefreshGrants {
+        did: String,
+        effects: Vec<grants::Effect>,
+        /// The lost rows this refresh replaces. They become `revoked`, so a later
+        /// deliberate revocation of the replacement cannot be undone by re-reading
+        /// an old `revoked_restart` row.
+        superseded: Vec<String>,
     },
     Catalog {
         effect: Box<catalog::CatalogEffect>,
@@ -1058,6 +1090,143 @@ impl Database {
                 if !tx.query_row("SELECT EXISTS(SELECT 1 FROM principals WHERE principal_id=?1 AND state='enabled')", [&principal_id], |r| r.get::<_,bool>(0)).map_err(db_error)? { return Err(invalid()); }
                 Resolved::DisablePrincipal { principal_id }
             }
+            Change::RetireIdentity { did } => {
+                let rows: Vec<(String, String)> = {
+                    let mut statement = tx
+                        .prepare("SELECT vault_id,state FROM keys WHERE did=?1")
+                        .map_err(db_error)?;
+                    let rows = statement
+                        .query_map([&did], |r| Ok((r.get(0)?, r.get(1)?)))
+                        .map_err(db_error)?
+                        .collect::<std::result::Result<Vec<_>, _>>()
+                        .map_err(db_error)?;
+                    rows
+                };
+                let vaults: BTreeSet<&str> = rows.iter().map(|(v, _)| v.as_str()).collect();
+                // Unknown DID, keys spread across vaults, or nothing left to do.
+                if rows.is_empty()
+                    || vaults.len() != 1
+                    || rows.iter().all(|(_, state)| state == "retired")
+                {
+                    return Err(invalid());
+                }
+                let vault_id = vaults
+                    .into_iter()
+                    .next()
+                    .ok_or_else(invalid)?
+                    .to_string();
+                let layout =
+                    crate::keystore::layout::KeydLayout::at(root.join("vaults").join(&vault_id));
+                // A published identity is retired through deactivate/migrate;
+                // dropping its keys would silently orphan its document.
+                if layout.did_path(&did).exists() {
+                    return Err(invalid());
+                }
+                let pending: bool = tx
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM file_operations WHERE vault_id=?1 AND did=?2 AND state='pending')",
+                        params![vault_id, did],
+                        |r| r.get(0),
+                    )
+                    .map_err(db_error)?;
+                if pending {
+                    return Err(invalid());
+                }
+                Resolved::RetireIdentity { did, vault_id }
+            }
+            Change::RefreshGrants { principal_id, did } => {
+                if !tx.query_row("SELECT EXISTS(SELECT 1 FROM principals WHERE principal_id=?1 AND state='enabled')", [&principal_id], |r| r.get::<_,bool>(0)).map_err(db_error)? { return Err(invalid()); }
+                let rows: Vec<(String, String, String, u32, i64, i64, u32, String)> = {
+                    let mut statement = tx
+                        .prepare(
+                            "SELECT g.grant_id,g.key_id,g.policy_id,g.policy_version,g.created_at,g.expiry,g.max_uses,g.kind \
+                             FROM grants g JOIN keys k ON k.key_id=g.key_id \
+                             WHERE g.principal_id=?1 AND k.did=?2 \
+                               AND g.state IN ('revoked_restart','expired','exhausted') \
+                             ORDER BY g.created_at DESC, g.grant_id DESC",
+                        )
+                        .map_err(db_error)?;
+                    let rows = statement
+                        .query_map(params![principal_id, did], |r| {
+                            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?))
+                        })
+                        .map_err(db_error)?
+                        .collect::<std::result::Result<Vec<_>, _>>()
+                        .map_err(db_error)?;
+                    rows
+                };
+                let mut seen = BTreeSet::new();
+                let mut replaced = BTreeSet::new();
+                let mut effects = Vec::new();
+                let mut superseded = Vec::new();
+                for (grant_id, key_id, policy_id, policy_version, created_at, expiry, max_uses, kind) in rows {
+                    let tuple = (
+                        key_id.clone(),
+                        policy_id.clone(),
+                        policy_version,
+                        kind.clone(),
+                    );
+                    // One replacement per key/policy/kind: an identity that has
+                    // been refreshed before carries older rows for the same
+                    // authorization.
+                    if !seen.insert(tuple.clone()) {
+                        if replaced.contains(&tuple) {
+                            superseded.push(grant_id);
+                        }
+                        continue;
+                    }
+                    // Only reissue when the authorization has no live grant of
+                    // its own; a stale lost row must not pile up a duplicate.
+                    let live: bool = tx
+                        .query_row(
+                            "SELECT EXISTS(SELECT 1 FROM grants \
+                             WHERE principal_id=?1 AND key_id=?2 AND policy_id=?3 \
+                               AND policy_version=?4 AND kind=?5 AND state='active')",
+                            params![principal_id, key_id, policy_id, policy_version, kind],
+                            |r| r.get(0),
+                        )
+                        .map_err(db_error)?;
+                    if live {
+                        continue;
+                    }
+                    let Some(lifetime) = expiry.checked_sub(created_at).filter(|v| *v > 0) else {
+                        continue;
+                    };
+                    let new_expiry = now.wall.checked_add(lifetime).ok_or_else(invalid)?;
+                    let change = |kind: &str| {
+                        let (key_id, policy_id) = (key_id.clone(), policy_id.clone());
+                        if kind == "session" {
+                            grants::GrantChange::CreateSession {
+                                principal_id: principal_id.clone(),
+                                key_id,
+                                policy_id,
+                                policy_version,
+                                expiry: new_expiry,
+                                max_uses,
+                            }
+                        } else {
+                            grants::GrantChange::Create {
+                                principal_id: principal_id.clone(),
+                                key_id,
+                                policy_id,
+                                policy_version,
+                                expiry: new_expiry,
+                                max_uses,
+                            }
+                        }
+                    };
+                    effects.push(
+                        grants::resolve(&tx, &root, change(&kind), self.boot_epoch, now)
+                            .map_err(|_| invalid())?,
+                    );
+                    replaced.insert(tuple);
+                    superseded.push(grant_id);
+                }
+                if effects.is_empty() {
+                    return Err(invalid());
+                }
+                Resolved::RefreshGrants { did, effects, superseded }
+            }
         };
         let epoch: i64 = tx
             .query_row(
@@ -1603,6 +1772,71 @@ impl Database {
                     [&principal_id],
                 )
                 .map_err(db_error)?;
+            }
+            Resolved::RetireIdentity { did, vault_id } => {
+                // Re-check: installing a document between prepare and commit
+                // would make retiring the keys destroy a live identity.
+                let layout = crate::keystore::layout::KeydLayout::at(
+                    self.root.join("vaults").join(&vault_id),
+                );
+                if layout.did_path(&did).exists() {
+                    return Err(invalid());
+                }
+                let retired = tx
+                    .execute(
+                        "UPDATE keys SET state='retired' WHERE vault_id=?1 AND did=?2 AND state!='retired'",
+                        params![vault_id, did],
+                    )
+                    .map_err(db_error)?;
+                if retired == 0 {
+                    return Err(invalid());
+                }
+                let revoked = tx
+                    .execute(
+                        "UPDATE grants SET state='revoked' WHERE state='active' AND key_id IN \
+                         (SELECT key_id FROM keys WHERE vault_id=?1 AND did=?2)",
+                        params![vault_id, did],
+                    )
+                    .map_err(db_error)?;
+                result = Some(json!({
+                    "vault_id": vault_id,
+                    "did": did,
+                    "retired_keys": retired,
+                    "revoked_grants": revoked,
+                }));
+            }
+            Resolved::RefreshGrants { did, effects, superseded } => {
+                for grant_id in superseded {
+                    if tx
+                        .execute(
+                            "UPDATE grants SET state='revoked' WHERE grant_id=?1 \
+                             AND state IN ('revoked_restart','expired','exhausted')",
+                            [&grant_id],
+                        )
+                        .map_err(db_error)?
+                        != 1
+                    {
+                        return Err(invalid());
+                    }
+                }
+                let mut issued = Vec::new();
+                for effect in effects {
+                    let info = match &effect {
+                        grants::Effect::Create { grant, .. } => json!({
+                            "grant_id": grant.grant_id,
+                            "key_id": grant.key_id,
+                            "policy_id": grant.policy_id,
+                            "policy_version": grant.policy_version,
+                            "kind": grant.kind,
+                            "expiry": grant.expiry,
+                            "max_uses": grant.max_uses,
+                        }),
+                        grants::Effect::Revoke { .. } => return Err(invalid()),
+                    };
+                    grants::apply(&tx, &self.root, effect, self.boot_epoch, now)?;
+                    issued.push(info);
+                }
+                result = Some(json!({"did": did, "grants": issued}));
             }
         }
         let elapsed_ms = i64::try_from(started.elapsed().as_millis()).map_err(|_| invalid())?;

@@ -1143,6 +1143,25 @@ pub(super) fn check_key(
     kid: &str,
 ) -> Result<()> {
     active_vault(db, vault)?;
-    let id: Option<String> = db.query_row("SELECT key_id FROM keys WHERE vault_id=?1 AND did=?2 AND kid=?3 AND state='active' AND role!='unclassified'",params![vault,did,kid],|r|r.get(0)).optional().map_err(db_error)?;
-    validate_key(root, &get_key(db, &id.ok_or_else(invalid)?)?)
+    let found: Option<(String, String)> = db
+        .query_row(
+            "SELECT key_id,role FROM keys WHERE vault_id=?1 AND did=?2 AND kid=?3",
+            params![vault, did, kid],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(db_error)?;
+    // A fragment (`key-2`) and a kid of another DID both reach here as "no such
+    // row": report that, not a role refusal. Only a row that exists but is not
+    // usable is a role problem.
+    let Some((id, role)) = found else {
+        return Err(KeydError::Misuse("KEY_NOT_FOUND".into()));
+    };
+    let active: bool = db
+        .query_row("SELECT state='active' FROM keys WHERE key_id=?1", [&id], |r| r.get(0))
+        .map_err(db_error)?;
+    if !active || role == "unclassified" {
+        return Err(KeydError::Misuse("KEY_ROLE_FORBIDDEN".into()));
+    }
+    validate_key(root, &get_key(db, &id)?)
 }
