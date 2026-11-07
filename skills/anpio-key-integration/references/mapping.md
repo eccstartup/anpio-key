@@ -65,6 +65,9 @@ configuration 不带 `@context`。所以"把 base64url 换成 z、字节不变"�
 
 anpio-key 自己签文档（发布文档、`SIGN_DOCUMENT_PROOF`）走的是**规范那一条**
 （`src/did/proof.rs`）：拼 proofConfig，文档带 `@context` 就并进去，输出 `z`。
+**产出的 proof 对象里保留 `@context`**：上游 `anp` 验签会从文档里补回来，但
+awiki 宿主拿存的 proof options 原样验，删掉它等于签一份、发一份，直接
+`did_document_proof_invalid`。
 所以：
 
 - 走 daemon 的接入方，产物在 anp 1.0.6 的验签和 awiki-open-server 那边直接过；

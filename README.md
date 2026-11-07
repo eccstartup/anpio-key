@@ -63,7 +63,7 @@ Anpio Key 把私钥留在本机服务里，Agent 只拿到签名结果。管理�
 
 ## 五分钟试用
 
-这一步走开发模式，所有东西都在你的账号下运行，**不建立安全边界**。需要 Rust 1.88+。
+这一步走开发模式，所有东西都在你的账号下运行，**不建立安全边界**。需要 Rust 1.88+。它不是受保护安装的签名路：受保护服务只按 grant 签名，开发开关不开启任何服务端授权。
 
 ```bash
 cargo install --path .
@@ -130,13 +130,9 @@ git clone https://github.com/eccstartup/anpio-key.git && cd anpio-key
 anpio-cli did create --host awiki.me --handle mybot --email you@example.com
 ```
 
-要让本机的 `anpio-key` 保管钥匙，由管理员在自己的终端加 `--key anpio-key`：
+在装了受保护服务的机器上，这是受保护流程的第一步：身份先由 CLI 建出来，再交给接管命令把钥匙迁进服务（macOS 上是 `sudo ./install.sh --adopt`，见下文）。`--key anpio-key` 在这类机器上会**拒绝**：服务还不能为新建身份 provision 钥匙，已有身份才走接管。
 
-```bash
-anpio-cli did create --host awiki.me --handle mybot --email you@example.com --key anpio-key
-```
-
-授权是独立的一步，和受保护命名签名一起启用：`anpio-key grant create --key NAME --did DID --target URL` 打印摘要、确认一次，然后走 `prepare` / `commit`；`anpio-cli key grant <id> --agent <handle>` 把编号记进 store。它只给**已经登记在受保护 catalog 里**的钥匙签 grant（kid 是 `{did}#key-1`），而命名钥匙的登记还没做（见 [TODO](TODO.md)），所以现在跑它会明确报 catalog 里没有这把钥匙。在那之前，受保护部署里的授权签名仍走下面这条老路。
+授权是独立的一步。接管会自动建好两个 grant；手工重建时用完整 kid 指名钥匙、用 `--purpose` 区分用途：`anpio-key grant create --kid '<did>#<agent>/<profile>-sign' --target URL`（HTTP，Hot 角色）和 `anpio-key grant create --kid '<did>#key-1' --purpose document-proof`（文档 proof，Root 角色）。命令打印摘要、确认一次，然后走 `prepare` / `commit`；`anpio-cli key grant <id> --purpose http|document-proof` 把编号记进 store。`did create --key anpio-key` 铸出来的命名钥匙不进 catalog，也不能在受保护平面上签名（见 [TODO](TODO.md)）。受保护部署里要让服务拿到一把能签的钥匙，Linux 上仍走下面的 `--bootstrap` 老路。
 
 已有身份或钥匙的迁移按[本机使用指南](deploy/LOCAL-USE.md)：`keygen` 生成四把、`migrate-vault` 离线迁入、`EnrollVault` / `ConfirmRole` 登记、发布策略，再建 grant。这条老路仍然是一步式的：
 
@@ -161,7 +157,16 @@ anpio-cli did create --host awiki.me --handle mybot --email you@example.com --ke
 
 `--method` 可以重复，默认只允许 `GET`；`--body-bytes` 限制请求体大小，`--grant-days` 和 `--max-uses` 限制这张 grant 的有效期和签名次数。指定多个 Agent 账号时，`--bootstrap` 只为第一个账号创建 grant。
 
-macOS 用 `./install.sh` 安装本机预览，始终 `protected_supported=false`；装完同样用 `anpio-cli did create` 建身份。`--bootstrap` 在 macOS 上仍会铸一份一次性预览身份并完成首次解锁；真实身份或已有密钥按[本机使用指南](deploy/LOCAL-USE.md)手动迁入。重复运行不会改动已安装的实例；换二进制用 `--upgrade`，卸载用 `--uninstall`（保留 `service.json`、`state/` 和 `_anpio*` 账号）。
+macOS 用 `./install.sh` 安装本机预览，始终 `protected_supported=false`。装完后用接管把已有身份迁进服务：
+
+```bash
+sudo ./install.sh --adopt --identity ~/.anpio-cli/mybot/default/identity.json \
+  --cli-binary /path/to/anpio-cli \
+  --cli-sha256 "$(shasum -a 256 /path/to/anpio-cli | cut -d' ' -f1)" \
+  --target https://awiki.me/anp-im/rpc
+```
+
+`--adopt` 完成迁移、登记、角色确认、策略、两个 grant、解锁和 Agent 记录，DID 与已发布文档不变，可重跑，不删源 store，grant/unlock 都在最后一次重启之后；`--dry-run` 只打印计划。`--bootstrap` 在 macOS 上仍会铸一份一次性预览身份并完成首次解锁；真实密钥请走接管。重复运行不会改动已安装的实例；换二进制用 `--upgrade`，卸载用 `--uninstall`（保留 `service.json`、`state/` 和 `_anpio*` 账号）。
 
 手动校验发行包、更新和离线迁移见 [Linux 部署](deploy/linux/README.md)，TPM 见 [TPM 说明](deploy/linux/TPM.md)。
 

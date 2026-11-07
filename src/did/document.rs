@@ -211,6 +211,21 @@ pub fn sign_document(
     key: &LockedSigningKey,
     verification_method: &str,
 ) -> Result<Value> {
+    sign_document_with(document, key, verification_method, None, None)
+}
+
+/// 同上,并带上 `domain` 与 `challenge` 两个 proof option。
+///
+/// 注册 awiki 账号时宿主要求根文档的 proof 里有这两样:域名是不带端口的裸主机名,
+/// challenge 是 16 字节随机数的 32 位十六进制。它们**进签名基**,所以不能事后补 ——
+/// 只能在签的时候给。
+pub fn sign_document_with(
+    document: &Value,
+    key: &LockedSigningKey,
+    verification_method: &str,
+    domain: Option<&str>,
+    challenge: Option<&str>,
+) -> Result<Value> {
     let created = crate::did::proof::timestamp(time::OffsetDateTime::now_utc());
     let prepared = crate::did::proof::prepare(
         document,
@@ -219,8 +234,8 @@ pub fn sign_document(
             verification_method,
             purpose: "assertionMethod",
             created: &created,
-            domain: None,
-            challenge: None,
+            domain,
+            challenge,
         },
     )?;
 

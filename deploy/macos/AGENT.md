@@ -9,8 +9,10 @@ provider, arbitrary plugin set, remote business service, or real identity.
 
 For a fresh disposable preview, `./install.sh --bootstrap` now creates the
 identity, migrates it, publishes a policy, issues one grant and unlocks the hot
-key automatically. This document remains the procedure for the complete
-framework, existing-identity cutover and real keys.
+key automatically. For an existing identity, `./install.sh --adopt` performs the
+cutover below in one restartable run. This document remains the procedure for the
+complete framework and as the reference for what each cutover step must produce
+when a source needs manual review.
 
 ## Temporary acceptance, human terminal
 
@@ -56,6 +58,27 @@ instance/vault/DID/key and masked input locally. Never enter a real password in
 this fixture. No log is sufficient to replace visual confirmation.
 
 ## Existing identity: administrator cutover
+
+The automated path is:
+
+```sh
+sudo ./install.sh --adopt --identity /ABS/identity.json \
+  --cli-binary /ABS/anpio-cli --cli-sha256 CLI_SHA256 \
+  --target https://awiki.me/anp-im/rpc --target https://awiki.me/user-service/v1/did-auth/rpc
+```
+
+It freezes a copy, binds named keys to DID-bound envelopes (DID and document
+unchanged), verifies each passphrase on the human tty, migrates the vault, stops
+the service, enrols and confirms the roles, enables document-proof signing,
+publishes the policies, issues the HTTP and document-proof grants to the agent
+account and unlocks — grants and unlocks strictly after the final restart, since
+a restart revokes them. It writes an agent record under
+`/Library/ANPIOKey/agent/home` and never deletes the source. `--dry-run` prints
+the plan. Re-running resumes from `state.json`, including a crash between the
+stop and the restart.
+
+The rest of this section is the manual procedure and the reference for what each
+step must produce.
 
 First pass the temporary exercise. Inventory the identity's origin, remotely
 published active DID document and key roles. Use only a source containing the

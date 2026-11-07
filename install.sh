@@ -32,7 +32,20 @@ usage() {
   --uninstall         停止服务并删除二进制和服务单元，保留配置、状态和账号
   -h, --help          显示本帮助
 
-初始化身份和 grant（老路：受保护迁移用；macOS 只用于本机预览）:
+接管已有命名钥匙身份（macOS 本机预览，安装后、空服务）:
+  --adopt             把 anpio-cli 建的命名钥匙身份迁入受保护服务
+  --identity FILE     anpio-cli 的 identity.json（绝对路径）
+  --cli-binary PATH   已构建的 anpio-cli（绝对路径）
+  --cli-sha256 HASH   anpio-cli 的 SHA-256
+  --source-root DIR   命名钥匙库，默认管理员主目录下的 .anpio-key
+  --target URL        Agent 要访问的完整 HTTPS URL，可重复（至少一个）
+  --method METHOD     允许的方法，可重复，默认 POST
+  --body-bytes N      有请求体的方法允许的最大字节数，默认 1048576
+  --grant-days N      grant 有效天数，默认 30
+  --max-uses N        grant 最多签名次数，默认 100
+  --enable-ecdh       同时打开 ECDH 数据平面开关（不创建 ECDH grant）
+
+初始化新身份（老路：受保护迁移用；macOS 只用于本机预览）:
   --bootstrap         安装后创建新身份、迁入受保护状态并创建一张 grant
   --did-host HOST     DID 文档所在域名，例如 agents.example.com
   --did-path PATH     DID 路径，默认 agents/anpio-key
@@ -50,15 +63,16 @@ usage() {
   ./install.sh --uninstall
   ./install.sh --agent-user agent-a --agent-user agent-b
   ./install.sh --tpm-device
+  sudo ./install.sh --adopt --identity /Users/me/.anpio-cli/agent/default/identity.json \
+    --cli-binary /Users/me/anpio-cli/target/release/anpio-cli --cli-sha256 VERIFIED_SHA256 \
+    --target https://awiki.me/anp-im/rpc --target https://awiki.me/user-service/v1/did-auth/rpc
   ./install.sh --bootstrap --did-host agents.example.com \
     --target https://api.example.com/v1/status
   sudo ./install.sh --binary /root/anpio-key --sha256 VERIFIED_SHA256 --admin-user operator
 
-不带 --bootstrap 时只创建空服务。新身份用 `anpio-cli did create` 建；要让
-本机的 anpio-key 保管钥匙就由管理员在自己的终端加 `--key anpio-key`。受保护
-服务目前只认已迁入 vault、登记成 {did}#key-1 的 DID 绑定钥匙，命名钥匙的
-登记和受保护签名还没做（见 TODO.md），在那之前用 --bootstrap 这条老路。
-口令始终由你在这个终端输入，不经过 Agent。
+不带 --bootstrap / --adopt 时只创建空服务。全新身份用 `anpio-cli did create`
+创建后，用 `install.sh --adopt` 迁入系统服务：DID 与已发布文档不变，签名只走
+受保护平面。口令始终由你在这个终端输入，不经过 Agent。
 EOF
 }
 
@@ -76,10 +90,17 @@ COMMAND=install
 DID_HOST=""
 DID_PATH="agents/anpio-key"
 TARGET=""
+TARGETS=()
 METHODS=()
 BODY_BYTES=1048576
 GRANT_DAYS=1
+GRANT_DAYS_GIVEN=0
 MAX_USES=100
+IDENTITY=""
+SOURCE_ROOT=""
+CLI_BINARY=""
+CLI_SHA256=""
+ENABLE_ECDH=0
 
 while (($#)); do
   case "$1" in
@@ -103,9 +124,26 @@ while (($#)); do
     --did-path)
       [[ $# -ge 2 ]] || die "--did-path 需要一个路径"
       DID_PATH="$2"; shift 2 ;;
+    --adopt)
+      [[ "$COMMAND" == install ]] || die "只能选择一个动作"
+      COMMAND=adopt; shift ;;
+    --identity)
+      [[ $# -ge 2 ]] || die "--identity 需要一个文件"
+      IDENTITY="$2"; shift 2 ;;
+    --source-root)
+      [[ $# -ge 2 ]] || die "--source-root 需要一个目录"
+      SOURCE_ROOT="$2"; shift 2 ;;
+    --cli-binary)
+      [[ $# -ge 2 ]] || die "--cli-binary 需要一个路径"
+      CLI_BINARY="$2"; shift 2 ;;
+    --cli-sha256)
+      [[ $# -ge 2 ]] || die "--cli-sha256 需要一个值"
+      CLI_SHA256="$2"; shift 2 ;;
+    --enable-ecdh)
+      ENABLE_ECDH=1; shift ;;
     --target)
       [[ $# -ge 2 ]] || die "--target 需要一个 URL"
-      TARGET="$2"; shift 2 ;;
+      TARGET="$2"; TARGETS+=("$2"); shift 2 ;;
     --method)
       [[ $# -ge 2 ]] || die "--method 需要一个方法"
       METHODS+=("$2"); shift 2 ;;
@@ -114,7 +152,7 @@ while (($#)); do
       BODY_BYTES="$2"; shift 2 ;;
     --grant-days)
       [[ $# -ge 2 ]] || die "--grant-days 需要一个数字"
-      GRANT_DAYS="$2"; shift 2 ;;
+      GRANT_DAYS="$2"; GRANT_DAYS_GIVEN=1; shift 2 ;;
     --max-uses)
       [[ $# -ge 2 ]] || die "--max-uses 需要一个数字"
       MAX_USES="$2"; shift 2 ;;
@@ -280,7 +318,7 @@ if ((${#AGENT_USERS[@]} == 0)); then
   fi
 fi
 
-if [[ "$COMMAND" == install || "$COMMAND" == upgrade ]]; then
+if [[ "$COMMAND" == install || "$COMMAND" == upgrade || "$COMMAND" == adopt ]]; then
   [[ "$ADMIN_USER" != "root" ]] || die "管理员不能是 root；请用普通账号运行，或指定 --admin-user"
   for agent in "${AGENT_USERS[@]}"; do
     [[ "$agent" != "root" ]] || die "Agent 不能是 root"
@@ -293,7 +331,26 @@ if [[ "$COMMAND" == install || "$COMMAND" == upgrade ]]; then
   fi
 fi
 
-if ((BOOTSTRAP)); then
+if [[ "$COMMAND" == adopt ]]; then
+  [[ "$PLATFORM" == macos ]] || die "--adopt 只用于 macOS 本机预览"
+  [[ -n "$IDENTITY" ]] || die "--adopt 需要 --identity"
+  [[ -n "$CLI_BINARY" ]] || die "--adopt 需要 --cli-binary"
+  [[ -n "$CLI_SHA256" ]] || die "--adopt 需要 --cli-sha256"
+  ((${#TARGETS[@]})) || die "--adopt 至少需要一个 --target"
+  [[ "$IDENTITY" == /* ]] || die "--identity 必须是绝对路径"
+  [[ "$CLI_BINARY" == /* ]] || die "--cli-binary 必须是绝对路径"
+  [[ -z "$SOURCE_ROOT" || "$SOURCE_ROOT" == /* ]] || die "--source-root 必须是绝对路径"
+  [[ -z "$DID_HOST" && "$DID_PATH" == "agents/anpio-key" ]] || die "--adopt 不创建 DID 文档，不接受 --did-host/--did-path"
+  [[ -z "$BINARY$SHA256" ]] || die "--adopt 使用已安装的服务程序，不接受 --binary/--sha256"
+  [[ "$GRANT_DAYS" =~ ^[0-9]+$ ]] || die "--grant-days 必须是整数"
+  [[ "$MAX_USES" =~ ^[0-9]+$ ]] || die "--max-uses 必须是整数"
+  [[ "$BODY_BYTES" =~ ^[0-9]+$ ]] || die "--body-bytes 必须是整数"
+  [[ "$CLI_SHA256" =~ ^[0-9a-fA-F]{64}$ ]] || die "--cli-sha256 必须是 64 位十六进制"
+  if ((DRY_RUN == 0)); then
+    [[ -f "$IDENTITY" ]] || die "找不到 --identity: $IDENTITY"
+    [[ -f "$CLI_BINARY" ]] || die "找不到 --cli-binary: $CLI_BINARY"
+  fi
+elif ((BOOTSTRAP)); then
   [[ "$COMMAND" == install ]] || die "--bootstrap 只用于安装"
   [[ "$GRANT_DAYS" =~ ^[0-9]+$ ]] || die "--grant-days 必须是整数"
   [[ "$MAX_USES" =~ ^[0-9]+$ ]] || die "--max-uses 必须是整数"
@@ -314,7 +371,7 @@ if ((BOOTSTRAP)); then
     [[ "$TARGET" == https://* ]] || die "--target 必须以 https:// 开头"
   fi
 elif [[ -n "$DID_HOST$TARGET" || ${#METHODS[@]} -gt 0 ]]; then
-  die "身份初始化选项需要同时带上 --bootstrap"
+  die "身份初始化选项需要同时带上 --bootstrap 或 --adopt"
 fi
 
 STATE="$(detect_state)"
@@ -363,6 +420,39 @@ if [[ "$COMMAND" == verify ]]; then
     exec sudo -- "$SCRIPT_DIR/install.sh" --_root --verify --admin-user "$ADMIN_USER"
   fi
   verify_install
+  exit $?
+fi
+
+if [[ "$COMMAND" == adopt ]]; then
+  [[ "$STATE" == installed ]] \
+    || { echo "没有可接管的安装（状态: ${STATE}）；先运行 ./install.sh。" >&2; exit 2; }
+  adopt_args=(/usr/bin/python3 "$REPO_ROOT/deploy/macos/adopt-identity.py"
+    --config "$CONFIG_PATH" --binary "$BINARY_PATH" --plist "$UNIT_PATH"
+    --admin-user "$ADMIN_USER" --agent-user "${AGENT_USERS[0]}"
+    --identity "$IDENTITY" --cli-binary "$CLI_BINARY" --cli-sha256 "$CLI_SHA256"
+    --body-bytes "$BODY_BYTES" --max-uses "$MAX_USES")
+  [[ -n "$SOURCE_ROOT" ]] && adopt_args+=(--source-root "$SOURCE_ROOT")
+  ((GRANT_DAYS_GIVEN)) && adopt_args+=(--grant-days "$GRANT_DAYS")
+  ((ENABLE_ECDH)) && adopt_args+=(--enable-ecdh)
+  for target in "${TARGETS[@]}"; do adopt_args+=(--target "$target"); done
+  for method in "${METHODS[@]}"; do adopt_args+=(--method "$method"); done
+  if ((DRY_RUN)); then
+    "${adopt_args[@]}" --dry-run
+    exit $?
+  fi
+  if ((EUID != 0)); then
+    echo "==> 接管身份需要 root，接着会调用 sudo"
+    save=(--_root --adopt --admin-user "$ADMIN_USER"
+      --identity "$IDENTITY" --cli-binary "$CLI_BINARY" --cli-sha256 "$CLI_SHA256"
+      --body-bytes "$BODY_BYTES" --max-uses "$MAX_USES")
+    [[ -n "$SOURCE_ROOT" ]] && save+=(--source-root "$SOURCE_ROOT")
+    ((GRANT_DAYS_GIVEN)) && save+=(--grant-days "$GRANT_DAYS")
+    ((ENABLE_ECDH)) && save+=(--enable-ecdh)
+    for target in "${TARGETS[@]}"; do save+=(--target "$target"); done
+    for method in "${METHODS[@]}"; do save+=(--method "$method"); done
+    exec sudo -- "$SCRIPT_DIR/install.sh" "${save[@]}"
+  fi
+  "${adopt_args[@]}" --apply
   exit $?
 fi
 

@@ -53,19 +53,49 @@ the local preview. It creates no identity:
 ./install.sh
 ```
 
-Create an identity afterward with `anpio-cli did create --host HOST --handle NAME`
-(add `--key anpio-key` at the administrator's terminal to keep the key in this
-machine's `anpio-key` store). The protected surface currently accepts only DID-bound
-keys that have been migrated into the vault; named keys have no enrollment path
-yet (see [TODO.md](../../TODO.md)), so until that lands `--bootstrap` remains the
-way to give the preview service a key it can sign with.
+Provision the identity next. A protected install does not mint new keys, so an
+installed preview is given an identity that already exists:
+
+```sh
+sudo ./install.sh --adopt --identity ~/.anpio-cli/NAME/default/identity.json \
+  --cli-binary /path/to/anpio-cli \
+  --cli-sha256 "$(shasum -a 256 /path/to/anpio-cli | cut -d' ' -f1)" \
+  --target https://awiki.me/anp-im/rpc \
+  --target https://awiki.me/user-service/v1/did-auth/rpc
+```
+
+`--adopt` migrates the three DID-bound keys into the vault without changing the
+DID or its published document, confirms the root / hot / key-agreement roles,
+enables `sign_document_proof`, publishes the HTTP and document-proof policies,
+issues one grant per purpose to the agent account, unlocks the two keys, installs
+the CLI and writes an agent record under `/Library/ANPIOKey/agent/home`. Every
+passphrase is read by Anpio Key from the human terminal; nothing is taken from
+arguments or the environment. The run is restartable, and it never deletes the
+source store. `--dry-run` prints the plan and touches nothing. Grants and unlocks
+happen only after the last service restart, because a restart revokes them.
+
+New identities cannot be provisioned into the service yet (see
+[TODO.md](../../TODO.md)), so `anpio-cli did create --key anpio-key` refuses on a
+machine with the service installed and names this command. Named keys have no
+enrollment path: `--bootstrap` remains the legacy one-shot for a *disposable
+preview identity*, not for real keys.
 
 `--bootstrap --did-host HOST --target https://...` (or answer the terminal
-prompts) runs the legacy one-shot: it creates a disposable preview identity,
+prompts) runs that legacy one-shot: it creates a disposable preview identity,
 migrates it into protected state and issues one grant in the same run. This path
 always uses `_anpagent` and `--hardware none`; it still reports
 `protected_supported=false`. Passphrases are read by Anpio Key from the human
 terminal only. Use a disposable identity and a public password, never real keys.
+
+Only the agent account connects the sign socket, by design: the administrator
+(uid 501) is not in `_anpio_sign`. Run the CLI from the agent's home after a
+logout/login refresh of group membership:
+
+```sh
+sudo -u _anpagent env HOME=/Library/ANPIOKey/agent/home \
+  TMPDIR=/Library/ANPIOKey/agent/home/tmp \
+  /Library/ANPIOKey/bin/anpio-cli did show --agent NAME
+```
 
 The script asks for sudo only after the build. It creates `_anpio` / `_anpagent`,
 four groups, root-owned installation/configuration and a launchd job, starts the
@@ -74,11 +104,11 @@ machine it installs; on an installed machine `./install.sh` prints the state and
 exits 0 without building or prompting; partial installations are refused with
 exit 2. Do not repeat `launchctl bootstrap` after successful setup: the job is
 already loaded. Log out/in to refresh group membership. Initial state contains no
-user keys. `--bootstrap` only applies to a fresh empty installation; use the
-operator procedure in [AGENT.md](AGENT.md) to import an existing identity or real
-keys. Further Agents need their own independently provisioned non-admin UIDs,
-transport membership and explicit principal registration; this setup creates one
-Agent.
+user keys. `--bootstrap` only applies to a fresh empty installation; use
+`--adopt` (above) to bring in an existing identity or real keys, or the operator
+procedure in [AGENT.md](AGENT.md) when you need to do the steps by hand. Further
+Agents need their own independently provisioned non-admin UIDs, transport
+membership and explicit principal registration; this setup creates one Agent.
 
 Daily commands, all through the same entry point:
 
@@ -114,10 +144,11 @@ sudo /usr/bin/python3 deploy/macos/acceptance/test-install.py
 
 `OK` is necessary but does not prove real signing or a fully isolated Agent.
 Continue with temporary-key acceptance below. Do not manually copy into managed
-state or loosen ownership to make an Agent work. macOS fresh deployment does not
-promise the Linux offline vault-migration tool as a supported macOS workflow;
-the operator-run [Agent and migration procedure](AGENT.md) provides an offline
-cutover. Validate it with temporary identities before any real migration.
+state or loosen ownership to make an Agent work. `--adopt` is the supported
+cutover for an existing identity: it wraps the offline vault migration with
+preflight checks and journal recovery. [AGENT.md](AGENT.md) describes what each
+step must produce when a source needs manual review. Validate with temporary
+identities before any real migration.
 
 ## Temporary-key acceptance: existing installation stays unchanged
 

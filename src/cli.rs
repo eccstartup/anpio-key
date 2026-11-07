@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::audit::{AuditLog, Event};
 use crate::client::Client;
@@ -30,7 +30,7 @@ use crate::did::SpecFile;
 use crate::error::{KeydError, Result};
 use crate::keystore::layout::KeydLayout;
 use crate::keystore::record::HardwareRoot;
-use crate::keystore::{device, store};
+use crate::keystore::{bind, device, store};
 use crate::tty;
 
 /// 空闲多久自动上锁的默认值。15 分钟:够一次交互式调试,又短到不至于让
@@ -472,7 +472,9 @@ pub enum KeyCommand {
     /// Mint a key addressed by name (default name `k-xxxxxxxx`).
     ///
     /// Shows 24 words once, asks you to confirm you wrote them down, reads the
-    /// passphrase twice, and only then writes the envelope.
+    /// passphrase twice, and only then writes the envelope. The default curve
+    /// is Ed25519; `--algorithm x25519` mints a key-agreement key instead,
+    /// which can only be used for ECDH.
     Create(KeyCreateArgs),
     /// List keys with their name, fingerprint, and whether they are unlocked.
     List(KeyListArgs),
@@ -486,6 +488,14 @@ pub enum KeyCommand {
     /// Not an agent path: it signs a document, not a request, and it takes no
     /// grant. `anpio-cli did create` calls it once, for the DID document's proof.
     SignDocument(KeySignDocumentArgs),
+    /// Re-seal an identity's named keys as DID-bound envelopes — an
+    /// **administrator** action before adopting them into a protected service.
+    ///
+    /// The seeds, public keys and fingerprints do not change; only each
+    /// envelope's address (`did`/`kid`) does. The published document is copied
+    /// unchanged, and the source store is never modified. The kid of every key
+    /// comes from the document itself.
+    BindDid(KeyBindDidArgs),
 }
 
 #[derive(Args, Debug)]
@@ -503,6 +513,11 @@ pub struct KeyCreateArgs {
     /// re-wrapping — it is not a comment.
     #[arg(long, default_value = "named", value_name = "LABEL")]
     pub label: String,
+
+    /// The curve. `ed25519` signs; `x25519` is a key-agreement key that can
+    /// only be used for ECDH and cannot sign anything.
+    #[arg(long, default_value = "ed25519", value_parser = ["ed25519", "x25519"], value_name = "CURVE")]
+    pub algorithm: String,
 
     /// Print one JSON object instead of the human summary.
     #[arg(long)]
@@ -564,9 +579,45 @@ pub struct KeySignDocumentArgs {
     #[arg(long, value_name = "FILE")]
     pub document: PathBuf,
 
+    /// The bare hostname the proof claims, e.g. `awiki.me`. Signed, so it cannot
+    /// be added afterwards.
+    #[arg(long, value_name = "HOST")]
+    pub domain: Option<String>,
+
+    /// The challenge the proof answers, as 32 hex characters. Signed, so it cannot
+    /// be added afterwards.
+    #[arg(long, value_name = "HEX")]
+    pub challenge: Option<String>,
+
     /// Where to write the signed document. Without it, stdout.
     #[arg(long, value_name = "FILE")]
     pub out: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+pub struct KeyBindDidArgs {
+    /// The identity file written by `anpio-cli did create --key anpio-key`.
+    ///
+    /// Its `did`, `did_document` and `custody` block are all read; the document
+    /// must be the identity's own and its `deviceManifest` (or relationship
+    /// arrays) must name exactly one signing and one agreement key.
+    #[arg(long, value_name = "FILE")]
+    pub identity: PathBuf,
+
+    /// A new, empty directory for the DID-bound store.
+    ///
+    /// It must not be the source store or inside it. Nothing is written until
+    /// every key has been unlocked and verified.
+    #[arg(long, value_name = "DIR")]
+    pub out: PathBuf,
+
+    /// The source store root (default `~/.anpio-key`). Only read.
+    #[arg(long, value_name = "DIR")]
+    pub source_root: Option<PathBuf>,
+
+    /// Print one JSON object instead of the human summary.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args, Debug)]
@@ -590,18 +641,39 @@ pub struct GrantCreateArgs {
     #[arg(long, default_value = crate::security::config::DEFAULT_CONFIG)]
     pub config: PathBuf,
 
-    /// The local key name. Its `e1_` fingerprint must be the DID's last segment.
-    #[arg(long, value_name = "NAME")]
-    pub key: String,
+    /// The local key name. Only used to resolve the DID and to check its `e1_`
+    /// fingerprint against it; the protected catalog remains the authority.
+    ///
+    /// Prefer `--kid`, which does not need the local store at all.
+    #[arg(long, value_name = "NAME", conflicts_with = "kid")]
+    pub key: Option<String>,
 
-    /// The DID this key signs for. The grant is bound to `<did>#key-1`.
+    /// The exact enrolled kid, e.g.
+    /// `<did>#anpiotest1108/default-sign`.
+    ///
+    /// Required when `--key` is not given. The catalog decides whether this kid
+    /// may hold the grant: a Hot key for HTTP, a Root key for document proofs.
+    #[arg(long, value_name = "KID", required_unless_present = "key")]
+    pub kid: Option<String>,
+
+    /// The DID this grant is for. Derived from `--kid`, or required with
+    /// `--key`.
     #[arg(long, value_name = "DID")]
-    pub did: String,
+    pub did: Option<String>,
+
+    /// What the grant allows.
+    ///
+    /// `http-authentication` needs a Hot key and a `--target`.
+    /// `document-proof` needs a Root key (default `<did>#key-1`) and a policy
+    /// whose `proof_purposes` contains `assertionMethod`.
+    #[arg(long, value_enum, default_value_t = GrantPurpose::HttpAuthentication)]
+    pub purpose: GrantPurpose,
 
     /// The request target the grant allows, e.g.
-    /// `https://awiki.me/user-service/v1/did-auth/rpc`.
+    /// `https://awiki.me/user-service/v1/did-auth/rpc`. Required for
+    /// `http-authentication`.
     #[arg(long, value_name = "URL")]
-    pub target: String,
+    pub target: Option<String>,
 
     /// The HTTP method the grant allows.
     #[arg(long, default_value = "POST")]
@@ -620,13 +692,48 @@ pub struct GrantCreateArgs {
     pub principal: Option<String>,
 
     /// Pick the policy explicitly. Without it the catalog must offer exactly
-    /// one `http-authentication` policy for this target and method.
+    /// one policy for this purpose (and, for HTTP, for this target and method).
     #[arg(long, requires = "policy_version", value_name = "ID")]
     pub policy: Option<String>,
 
     /// The policy version, required with `--policy`.
     #[arg(long, requires = "policy", value_name = "N")]
     pub policy_version: Option<u32>,
+}
+
+/// The two grant shapes that have a data-plane operation today.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum GrantPurpose {
+    /// A Hot key signs HTTP requests (`SIGN_HTTP`).
+    #[value(name = "http-authentication")]
+    HttpAuthentication,
+    /// A Root key signs DID document proofs (`SIGN_DOCUMENT_PROOF`).
+    #[value(name = "document-proof")]
+    DocumentProof,
+}
+
+impl GrantPurpose {
+    fn policy_name(self) -> &'static str {
+        match self {
+            Self::HttpAuthentication => "http-authentication",
+            Self::DocumentProof => "document-proof",
+        }
+    }
+
+    fn role(self) -> crate::persistence::catalog::KeyRole {
+        match self {
+            Self::HttpAuthentication => crate::persistence::catalog::KeyRole::Hot,
+            Self::DocumentProof => crate::persistence::catalog::KeyRole::Root,
+        }
+    }
+
+    /// The value `anpio-cli key grant --purpose` accepts.
+    fn anpio_cli_name(self) -> &'static str {
+        match self {
+            Self::HttpAuthentication => "http",
+            Self::DocumentProof => "document-proof",
+        }
+    }
 }
 
 #[derive(Args, Debug, Clone)]
@@ -1845,6 +1952,7 @@ fn key_command(root: Option<&Path>, args: KeyArgs) -> Result<()> {
         KeyCommand::Unlock(args) => key_unlock(root, args),
         KeyCommand::Rotate(args) => key_rotate(root, args),
         KeyCommand::SignDocument(args) => key_sign_document(root, args),
+        KeyCommand::BindDid(args) => key_bind_did(root, args),
     }
 }
 
@@ -1873,15 +1981,33 @@ fn key_create(root: Option<&Path>, args: KeyCreateArgs) -> Result<()> {
     }
 
     let device_secret = device::load_or_create(&layout)?;
-    let wrapped = crate::keystore::create::generate_named_from_seed(
-        &name,
-        &args.label,
-        passphrase.as_bytes(),
-        &device_secret,
-        Argon2Config::default(),
-        args.hardware.choice,
-        &seed,
-    )?;
+    let wrapped = match args.algorithm.as_str() {
+        "ed25519" => crate::keystore::create::generate_named_from_seed(
+            &name,
+            &args.label,
+            passphrase.as_bytes(),
+            &device_secret,
+            Argon2Config::default(),
+            args.hardware.choice,
+            &seed,
+        )?,
+        "x25519" => crate::keystore::create::generate_named_agreement_from_seed(
+            &name,
+            &args.label,
+            passphrase.as_bytes(),
+            &device_secret,
+            Argon2Config::default(),
+            args.hardware.choice,
+            &seed,
+        )?,
+        other => {
+            // `value_parser` already limits the flag; this arm keeps the two
+            // lists from drifting apart if one of them is edited alone.
+            return Err(KeydError::Misuse(format!(
+                "unknown key algorithm {other}; use ed25519 or x25519"
+            )));
+        }
+    };
     store::save_named(&layout, &wrapped)?;
 
     // 先落账,再告诉人它成了 —— 和 `keygen` 的顺序一样。
@@ -1903,7 +2029,7 @@ fn key_create(root: Option<&Path>, args: KeyCreateArgs) -> Result<()> {
                 "name": name,
                 "thumbprint": wrapped.id.thumbprint,
                 "public_multibase": wrapped.public_multibase,
-                "algorithm": "ed25519",
+                "algorithm": algorithm_label(wrapped.algorithm),
             }))?
         );
     } else {
@@ -1951,6 +2077,7 @@ fn key_list(root: Option<&Path>, args: KeyListArgs) -> Result<()> {
                 "did": wrapped.id.did,
                 "kid": wrapped.id.kid,
                 "thumbprint": wrapped.id.thumbprint,
+                "public_multibase": wrapped.public_multibase,
                 "algorithm": algorithm_label(wrapped.algorithm),
                 "state": state,
             })
@@ -2019,15 +2146,37 @@ fn key_rotate(root: Option<&Path>, args: KeyRotateArgs) -> Result<()> {
     }
 
     let device_secret = device::load(&layout)?;
-    let wrapped = crate::keystore::create::generate_named_from_seed(
-        &args.name,
-        &args.label,
-        passphrase.as_bytes(),
-        &device_secret,
-        Argon2Config::default(),
-        args.hardware.choice,
-        &seed,
-    )?;
+    // Rotation keeps the curve: an X25519 agreement key replaced by an Ed25519
+    // one would leave a key in `keyAgreement` that can sign — a document-level
+    // error, not a rotation.
+    let wrapped = match retired.algorithm {
+        crate::keystore::KeyAlgorithm::Ed25519 => crate::keystore::create::generate_named_from_seed(
+            &args.name,
+            &args.label,
+            passphrase.as_bytes(),
+            &device_secret,
+            Argon2Config::default(),
+            args.hardware.choice,
+            &seed,
+        )?,
+        crate::keystore::KeyAlgorithm::X25519 => {
+            crate::keystore::create::generate_named_agreement_from_seed(
+                &args.name,
+                &args.label,
+                passphrase.as_bytes(),
+                &device_secret,
+                Argon2Config::default(),
+                args.hardware.choice,
+                &seed,
+            )?
+        }
+        other => {
+            return Err(KeydError::Misuse(format!(
+                "rotation is only defined for ed25519 and x25519 named keys, not {}",
+                algorithm_label(other)
+            )));
+        }
+    };
     // `write_named` 是**覆盖**写:轮换的意思就是同一个名字下换一把。`save_named`
     // 会拒绝,用错它的话这里会以 `KeyExists` 失败,而看起来像"名字被占了"。
     store::write_named(&layout, &wrapped)?;
@@ -2098,7 +2247,13 @@ fn key_sign_document(root: Option<&Path>, args: KeySignDocumentArgs) -> Result<(
         tty::read_secret(&tty, &format!("Passphrase for key {}: ", args.name))?;
     let device_secret = device::load(&layout)?;
     let key = crate::keystore::unwrap::unlock(&wrapped, passphrase.as_bytes(), &device_secret)?;
-    let signed = document::sign_document(&unsigned, &key, &args.keyid)?;
+    let signed = document::sign_document_with(
+        &unsigned,
+        &key,
+        &args.keyid,
+        args.domain.as_deref(),
+        args.challenge.as_deref(),
+    )?;
     drop(key);
 
     let mut audit = AuditLog::open(&layout.audit_dir())?;
@@ -2116,6 +2271,66 @@ fn key_sign_document(root: Option<&Path>, args: KeySignDocumentArgs) -> Result<(
         }
         None => std::io::stdout().write_all(&rendered)?,
     }
+    Ok(())
+}
+
+fn key_bind_did(root: Option<&Path>, args: KeyBindDidArgs) -> Result<()> {
+    let source = layout(args.source_root.as_deref().or(root))?;
+    let out = KeydLayout::at(args.out.clone());
+    let plan = bind::plan_identity(&args.identity)?;
+
+    // 每把钥匙单独一次口令。三人三把钥匙的口令可以不同，这里不假设它们相同。
+    let tty = tty::open()?;
+    let sealed = bind::bind_store(&source, &out, &args.identity, |binding| {
+        tty::read_secret(
+            &tty,
+            &format!(
+                "Passphrase for {} key {}: ",
+                binding.role.as_str().replace('_', " "),
+                binding.name
+            ),
+        )
+    })?;
+
+    if args.json {
+        let keys: Vec<_> = plan
+            .bindings
+            .iter()
+            .map(|binding| {
+                serde_json::json!({
+                    "role": binding.role.as_str(),
+                    "name": binding.name,
+                    "kid": binding.kid,
+                    "thumbprint": binding.thumbprint,
+                    "algorithm": binding.algorithm,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "format": "anpio-key-bind-did-v1",
+                "did": plan.did,
+                "out": args.out,
+                "keys": keys,
+            }))?
+        );
+        return Ok(());
+    }
+
+    println!("bound {} keys for {}", sealed.len(), plan.did);
+    for (binding, wrapped) in plan.bindings.iter().zip(&sealed) {
+        println!(
+            "  {:<17} {:<16} {:<9} {}\n    {}",
+            binding.role.as_str(),
+            binding.name,
+            format!("{:?}", wrapped.algorithm).to_lowercase(),
+            wrapped.id.thumbprint,
+            binding.kid
+        );
+    }
+    println!("wrote {}", args.out.display());
+    println!("the source store was not modified; migrate the new store with `admin inspect-vault`");
     Ok(())
 }
 
@@ -2185,21 +2400,79 @@ fn policy_covers(content: &serde_json::Value, origin: &str, method: &str) -> boo
             .is_some_and(|methods| methods.iter().any(|m| m.as_str() == Some(method)))
 }
 
+/// A document-proof grant is usable only if its policy actually allows the
+/// proof purpose the service requests (`assertionMethod`).
+fn policy_covers_document_proof(content: &serde_json::Value) -> bool {
+    if content.get("schema_version").and_then(serde_json::Value::as_u64) != Some(2)
+        || content.get("purpose").and_then(serde_json::Value::as_str) != Some("document-proof")
+    {
+        return false;
+    }
+    content
+        .get("content")
+        .and_then(|content| content.get("proof_purposes"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|purposes| purposes.iter().any(|p| p.as_str() == Some("assertionMethod")))
+}
+
+fn role_name(role: &crate::persistence::catalog::KeyRole) -> &'static str {
+    use crate::persistence::catalog::KeyRole;
+    match role {
+        KeyRole::Unclassified => "unclassified",
+        KeyRole::Root => "root",
+        KeyRole::Hot => "hot",
+        KeyRole::Recovery => "recovery",
+        KeyRole::Challenge => "challenge",
+        KeyRole::DeviceSigning => "device_signing",
+        KeyRole::KeyAgreement => "key_agreement",
+    }
+}
+
 fn grant_create(root: Option<&Path>, args: GrantCreateArgs) -> Result<()> {
     use crate::security::client::Client as AdminClient;
 
-    // 本地那把钥匙和它的 DID 先对一遍:`e1_` 段必须是信封的指纹,否则这份
-    // grant 会绑到一把根本不是这儿那把钥匙的 key 上。
-    let layout = layout(root)?;
-    let wrapped = store::load_named(&layout, &args.key)?;
-    let from_did = thumbprint_of(&args.did)?;
-    if from_did != wrapped.id.thumbprint {
-        return Err(KeydError::Did(format!(
-            "the DID {} carries {from_did}, but the key {} is {}",
-            args.did, args.key, wrapped.id.thumbprint
-        )));
-    }
-    let enrolled_kid = format!("{}#key-1", args.did);
+    // 受保护目录才是权威。`--kid` 直接点名;`--key` 只是旧写法的便利,
+    // 用来从本地信封推出 DID 并核对一次指纹。
+    let enrolled_kid = match (&args.kid, &args.key) {
+        (Some(kid), None) => {
+            let (did, fragment) = kid.split_once('#').ok_or_else(|| {
+                KeydError::Misuse(format!(
+                    "--kid must be a full key id like <did>#<fragment>, not {kid}"
+                ))
+            })?;
+            if fragment.is_empty() {
+                return Err(KeydError::Misuse(format!(
+                    "--kid must be a full key id like <did>#<fragment>, not {kid}"
+                )));
+            }
+            if let Some(explicit) = &args.did {
+                if explicit != did {
+                    return Err(KeydError::Did(format!(
+                        "--did {explicit} does not match the DID inside --kid ({did})"
+                    )));
+                }
+            }
+            kid.clone()
+        }
+        (None, Some(name)) => {
+            let layout = layout(root)?;
+            let wrapped = store::load_named(&layout, name)?;
+            let did = args.did.clone().ok_or_else(|| {
+                KeydError::Misuse(
+                    "--did is required with --key; or pass --kid <did>#<fragment> instead".into(),
+                )
+            })?;
+            let from_did = thumbprint_of(&did)?;
+            if from_did != wrapped.id.thumbprint {
+                return Err(KeydError::Did(format!(
+                    "the DID {} carries {from_did}, but the key {} is {}",
+                    did, name, wrapped.id.thumbprint
+                )));
+            }
+            format!("{did}#key-1")
+        }
+        _ => unreachable!("clap makes --key and --kid exclusive and one of them required"),
+    };
 
     let catalog = AdminClient::connect(&args.config, true)?
         .catalog()?
@@ -2210,12 +2483,24 @@ fn grant_create(root: Option<&Path>, args: GrantCreateArgs) -> Result<()> {
         .iter()
         .find(|key| key.kid == enrolled_kid && key.state == "active")
         .ok_or_else(|| {
-            let known: Vec<&str> = catalog.keys.iter().map(|key| key.kid.as_str()).collect();
+            let known: Vec<String> = catalog
+                .keys
+                .iter()
+                .map(|key| format!("{} ({})", key.kid, role_name(&key.role)))
+                .collect();
             KeydError::Misuse(format!(
                 "the protected catalog has no active key {enrolled_kid}; enrolled kids: {}",
                 if known.is_empty() { "(none)".to_string() } else { known.join(", ") }
             ))
         })?;
+    if key.role != args.purpose.role() {
+        return Err(KeydError::Misuse(format!(
+            "{enrolled_kid} is {}, but --purpose {} needs a {} key",
+            role_name(&key.role),
+            args.purpose.policy_name(),
+            role_name(&args.purpose.role())
+        )));
+    }
 
     let principals = AdminClient::connect(&args.config, true)?
         .principals()?
@@ -2257,7 +2542,26 @@ fn grant_create(root: Option<&Path>, args: GrantCreateArgs) -> Result<()> {
         }
     };
 
-    let target_origin = origin_of(&args.target)?;
+    let (target_origin, target_detail) = match args.purpose {
+        GrantPurpose::HttpAuthentication => {
+            let target = args.target.as_deref().ok_or_else(|| {
+                KeydError::Misuse(
+                    "--target is required for http-authentication; pass the URL the grant allows"
+                        .into(),
+                )
+            })?;
+            let origin = origin_of(target)?;
+            (Some(origin.clone()), format!("{} {origin}", args.method))
+        }
+        GrantPurpose::DocumentProof => {
+            if args.target.is_some() {
+                return Err(KeydError::Misuse(
+                    "--target only applies to http-authentication".into(),
+                ));
+            }
+            (None, "assertionMethod".into())
+        }
+    };
     let (policy_id, policy_version) = match (&args.policy, args.policy_version) {
         (Some(id), Some(version)) => (id.clone(), version),
         (None, _) => {
@@ -2267,7 +2571,14 @@ fn grant_create(root: Option<&Path>, args: GrantCreateArgs) -> Result<()> {
                 .filter_map(|policy| {
                     let content: serde_json::Value =
                         serde_json::from_str(policy.get("content")?.as_str()?).ok()?;
-                    if !policy_covers(&content, &target_origin, &args.method) {
+                    let covers = match (args.purpose, &target_origin) {
+                        (GrantPurpose::HttpAuthentication, Some(origin)) => {
+                            policy_covers(&content, origin, &args.method)
+                        }
+                        (GrantPurpose::DocumentProof, _) => policy_covers_document_proof(&content),
+                        _ => false,
+                    };
+                    if !covers {
                         return None;
                     }
                     Some((
@@ -2285,18 +2596,25 @@ fn grant_create(root: Option<&Path>, args: GrantCreateArgs) -> Result<()> {
                     .cloned()
                     .expect("one policy id means at least one row"),
                 0 => {
-                    return Err(KeydError::Misuse(format!(
-                        "no published `http-authentication` policy covers {} on {target_origin}; \
-                         publish one with `anpio-key admin prepare` or pass --policy",
-                        args.method
-                    )))
+                    return Err(KeydError::Misuse(match args.purpose {
+                        GrantPurpose::HttpAuthentication => format!(
+                            "no published `http-authentication` policy covers {} on {}; \
+                             publish one with `anpio-key admin prepare` or pass --policy",
+                            args.method,
+                            target_origin.as_deref().unwrap_or("(no origin)")
+                        ),
+                        GrantPurpose::DocumentProof => "no published `document-proof` policy \
+                             allows assertionMethod; publish one with `anpio-key admin prepare` \
+                             or pass --policy"
+                            .to_string(),
+                    }))
                 }
                 _ => {
                     return Err(KeydError::Misuse(format!(
-                        "{} policies cover {} on {target_origin} ({}); pass --policy and \
+                        "{} policies match --purpose {} ({}); pass --policy and \
                          --policy-version",
                         ids.len(),
-                        args.method,
+                        args.purpose.policy_name(),
                         ids.into_iter().collect::<Vec<_>>().join(", ")
                     )))
                 }
@@ -2319,10 +2637,11 @@ fn grant_create(root: Option<&Path>, args: GrantCreateArgs) -> Result<()> {
 
     println!("grant — not created yet");
     println!("    principal: {principal_id}");
-    println!("    key:       {enrolled_kid}");
+    println!("    key:       {enrolled_kid} ({})", role_name(&key.role));
     println!("    catalog:   key_id {}", key.key_id);
+    println!("    purpose:   {}", args.purpose.policy_name());
     println!("    policy:    {policy_id} v{policy_version}");
-    println!("    target:    {} {target_origin}", args.method);
+    println!("    target:    {target_detail}");
     println!("    expires:   {expires} (in {})", args.ttl);
     println!("    uses:      {}", args.uses);
     println!();
@@ -2360,7 +2679,8 @@ fn grant_create(root: Option<&Path>, args: GrantCreateArgs) -> Result<()> {
         .commit(prepared.operation_id, prepared.digest)?;
     println!("created grant {grant_id}");
     println!();
-    println!("Write it into the DID client with: anpio-cli key grant {grant_id}");
+    println!("Write it into the DID client with: anpio-cli key grant {grant_id} --purpose {}",
+        args.purpose.anpio_cli_name());
     Ok(())
 }
 
@@ -3083,5 +3403,112 @@ mod tests {
         assert!(!policy_covers(&v1, "https://awiki.me", "POST"));
         let other = serde_json::json!({"schema_version": 2, "purpose": "ecdh", "content": {}});
         assert!(!policy_covers(&other, "https://awiki.me", "POST"));
+    }
+
+    /// 一个 purpose 只由一种角色持有:HTTP 要 Hot,文档 proof 要 Root。
+    /// 迁移前 `grant create` 把 HTTP 许可签给 `#key-1`,正是因为这条映射
+    /// 不存在;现在它是 `grant create` 的硬前置。
+    #[test]
+    fn a_grant_purpose_names_the_one_key_role_that_may_hold_it() {
+        use crate::persistence::catalog::KeyRole;
+        assert_eq!(GrantPurpose::HttpAuthentication.role(), KeyRole::Hot);
+        assert_eq!(GrantPurpose::DocumentProof.role(), KeyRole::Root);
+        assert_eq!(
+            GrantPurpose::HttpAuthentication.policy_name(),
+            "http-authentication"
+        );
+        assert_eq!(GrantPurpose::DocumentProof.policy_name(), "document-proof");
+        assert_eq!(GrantPurpose::HttpAuthentication.anpio_cli_name(), "http");
+        assert_eq!(
+            GrantPurpose::DocumentProof.anpio_cli_name(),
+            "document-proof"
+        );
+    }
+
+    /// 文档 proof 的策略只看名字不够:必须同时是 v2、purpose 是
+    /// `document-proof`,并且 `proof_purposes` 里真的有 `assertionMethod`。
+    /// 一份名字对、内容空的策略不该被自动选中。
+    #[test]
+    fn a_document_proof_policy_must_allow_assertion_method() {
+        let good = serde_json::json!({
+            "schema_version": 2,
+            "purpose": "document-proof",
+            "content": {"proof_purposes": ["assertionMethod"]},
+        });
+        assert!(policy_covers_document_proof(&good));
+
+        let v1 = serde_json::json!({
+            "schema_version": 1,
+            "purpose": "document-proof",
+            "proof_purposes": ["assertionMethod"],
+        });
+        assert!(!policy_covers_document_proof(&v1));
+
+        let mut wrong_purpose = good.clone();
+        wrong_purpose["purpose"] = serde_json::json!("http-authentication");
+        assert!(!policy_covers_document_proof(&wrong_purpose));
+
+        let mut wrong_method = good.clone();
+        wrong_method["content"]["proof_purposes"] = serde_json::json!(["authentication"]);
+        assert!(!policy_covers_document_proof(&wrong_method));
+
+        let empty = serde_json::json!({
+            "schema_version": 2,
+            "purpose": "document-proof",
+            "content": {"proof_purposes": []},
+        });
+        assert!(!policy_covers_document_proof(&empty));
+
+        let missing = serde_json::json!({
+            "schema_version": 2,
+            "purpose": "document-proof",
+            "content": {},
+        });
+        assert!(!policy_covers_document_proof(&missing));
+    }
+
+    /// `--kid` 是新的主写法,`--key` 保留但二选一;两者都不给时 clap 就
+    /// 拒绝,而不是让 `grant create` 在连上管理面之后才猜。
+    #[test]
+    fn grant_create_takes_exactly_one_of_kid_and_key() {
+        let cli = parse(&[
+            "grant",
+            "create",
+            "--kid",
+            "did:wba:awiki.me:user:bot:e1_x#bot/default-sign",
+            "--purpose",
+            "document-proof",
+        ])
+        .unwrap();
+        let Command::Grant(GrantArgs {
+            operation: GrantCommand::Create(args),
+        }) = cli.command
+        else {
+            panic!("expected `grant create`");
+        };
+        assert_eq!(args.purpose, GrantPurpose::DocumentProof);
+        assert_eq!(
+            args.kid.as_deref(),
+            Some("did:wba:awiki.me:user:bot:e1_x#bot/default-sign")
+        );
+        assert!(args.key.is_none());
+
+        let cli = parse(&["grant", "create", "--kid", "did#key-1"]).unwrap();
+        let Command::Grant(GrantArgs {
+            operation: GrantCommand::Create(args),
+        }) = cli.command
+        else {
+            panic!("expected `grant create`");
+        };
+        assert_eq!(args.purpose, GrantPurpose::HttpAuthentication);
+
+        let missing = parse(&["grant", "create"]).unwrap_err();
+        assert_eq!(missing.kind(), ErrorKind::MissingRequiredArgument);
+
+        let both = parse(&[
+            "grant", "create", "--kid", "did#key-1", "--key", "named", "--did", "did",
+        ])
+        .unwrap_err();
+        assert_eq!(both.kind(), ErrorKind::ArgumentConflict);
     }
 }

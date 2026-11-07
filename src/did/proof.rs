@@ -13,8 +13,10 @@
 //! `standard_signature` 分支),所以"把老方言的字节换个字母表交出去"必然验不过。
 //! 这里自己拼,拼的就是规范那一条。
 //!
-//! 产物里**不带** proof 级的 `@context`:规范要它进签名基;验签方会从文档里
-//! 把它补回来(上游就是这么做的)。带上也能验过,但同一份文档会有两种写法。
+//! 产物里**保留** proof 级的 `@context`。上游 `anp` 的验签会从文档里把它补回来,
+//! 但 awiki 宿主不会:它拿存的 proof 对象原样当 proof options。签的时候把字段
+//! 折进签名基、发出去的时候又删掉,等于签的是一份、发的是另一份,宿主直接以
+//! `did_document_proof_invalid` 拒掉。
 
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -97,7 +99,6 @@ pub(crate) fn complete(prepared: Prepared, signature: &[u8; 64]) -> Result<Signe
         .map_err(|_| unusable("the signature does not match the key that was asked to make it"))?;
 
     let mut proof_object = prepared.proof_object;
-    proof_object.remove("@context");
     proof_object.insert(
         "proofValue".into(),
         json!(proof_value::encode(signature)),

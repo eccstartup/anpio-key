@@ -503,8 +503,9 @@ mod tests {
                 expected_challenge: None,
             },
         ));
-        // `@context` 进的是签名基,不是产出的 proof 对象。
-        assert!(signed.proof.get("@context").is_none());
+        // `@context` 进签名基,也留在产出的 proof 对象里:awiki 宿主拿存的 proof
+        // options 原样验,删掉它等于签一份、发一份。
+        assert_eq!(signed.proof.get("@context"), Some(&context));
         assert_eq!(signed.value["@context"], context);
     }
 

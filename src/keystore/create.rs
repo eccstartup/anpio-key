@@ -194,6 +194,44 @@ pub fn generate_named_from_seed(
     })
 }
 
+/// 同上,但铸的是 X25519 协商钥匙。
+///
+/// 命名钥匙默认是 Ed25519,因为绝大多数命名钥匙用来签名;身份文档里的
+/// `{device}-agreement` 是例外:它只进 `keyAgreement`,只能做 ECDH。曲线
+/// 不是签名算法那样的可选参数 —— 这里只有这一条 X25519 路,别处也没有
+/// 第二份推导。
+pub fn generate_named_agreement_from_seed(
+    name: &str,
+    label: &str,
+    passphrase: &[u8],
+    device_secret: &LockedBytes,
+    argon: Argon2Config,
+    hardware: HardwareChoice,
+    seed: &LockedBytes,
+) -> Result<WrappedKey> {
+    let (public, public_multibase) = wrap::seed_to_x25519_public(seed);
+    let thumbprint = crate::crypto::thumbprint::x1_segment(&x25519_dalek::PublicKey::from(public));
+
+    let hardware = hardware::seal_new(hardware, &thumbprint)?;
+
+    wrap::seal(wrap::SealRequest {
+        id: KeyId {
+            did: String::new(),
+            kid: String::new(),
+            thumbprint,
+        },
+        algorithm: KeyAlgorithm::X25519,
+        public_multibase,
+        label: label.to_string(),
+        name: name.to_string(),
+        passphrase,
+        device_secret,
+        seed,
+        argon,
+        hardware,
+    })
+}
+
 /// 铸一把命名钥匙并落盘。
 ///
 /// 名字是否合法、是否已经被占用,由 [`crate::keystore::layout`] 与
@@ -752,6 +790,41 @@ mod tests {
         let device_secret = device::load(&layout).unwrap();
         let key = crate::keystore::unlock(&loaded, b"pw", &device_secret).unwrap();
         assert_eq!(key.public_multibase(), created.wrapped.public_multibase);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 命名钥匙也有曲线之分:X25519 那把只能协商,公钥前缀必须是 `0xec01`。
+    #[test]
+    fn a_named_agreement_key_is_x25519_and_unlocks() {
+        let dir = std::env::temp_dir().join(format!("keyd-named-x-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let layout = KeydLayout::at(dir.clone());
+        let seed = LockedBytes::fill(|bytes| *bytes = [0x19; 32]).unwrap();
+
+        let wrapped = generate_named_agreement_from_seed(
+            "agreement",
+            "device-agreement",
+            b"pw",
+            &device(),
+            fast(),
+            HardwareChoice::None,
+            &seed,
+        )
+        .unwrap();
+        store::save_named(&layout, &wrapped).unwrap();
+
+        assert_eq!(wrapped.algorithm, KeyAlgorithm::X25519);
+        assert!(wrapped.id.thumbprint.starts_with("x1_"), "{}", wrapped.id.thumbprint);
+        let material = bs58::decode(wrapped.public_multibase.trim_start_matches('z'))
+            .into_vec()
+            .unwrap();
+        assert_eq!(&material[..2], &[0xec, 0x01]);
+
+        let loaded = store::load_named(&layout, "agreement").unwrap();
+        assert_eq!(loaded.algorithm, KeyAlgorithm::X25519);
+        let unlocked = crate::keystore::unlock(&loaded, b"pw", &device()).unwrap();
+        assert_eq!(unlocked.public_multibase(), wrapped.public_multibase);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

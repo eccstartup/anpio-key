@@ -1,6 +1,7 @@
 //! 密钥库:信封的生成、封装、解开,以及磁盘布局。
 
 pub mod archive;
+pub mod bind;
 pub mod create;
 pub mod device;
 pub mod hardware;

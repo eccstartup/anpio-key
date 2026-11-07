@@ -67,13 +67,14 @@ fn key_from_seed(wrapped: &WrappedKey, seed: LockedBytes) -> Result<LockedSignin
     Ok(key)
 }
 
-/// 解出 seed —— **内部的**那一条。
+/// 解出 seed —— **crate 内部的**那一条。
 ///
-/// [`unlock`] 要它来造签名密钥;导出要的是那 32 个字节本身。两件事在
-/// 密码学上是同一段代码,在**能拿到什么**上完全不同:前者拿到的是一把只会
-/// 签名的东西,后者拿到的是种子。所以这个函数不对外 —— 对外的那个口子
-/// (`open_seed`)只在带 `seed-export` 的构建里存在。
-fn seed_of(wrapped: &WrappedKey, passphrase: &[u8], device_secret: &LockedBytes) -> Result<LockedBytes> {
+/// [`unlock`] 要它来造签名密钥;导出要的是那 32 个字节本身;`bind-did` 要它
+/// 把同一把 seed 封进 DID 绑定的新信封。三件事在密码学上是同一段代码,在
+/// **能拿到什么**上完全不同:前者拿到的是一把只会签名的东西,后两者拿到的
+/// 是种子。所以这个函数不对外 —— 对外的那个口子 (`open_seed`) 只在带
+/// `seed-export` 的构建里存在。
+pub(crate) fn seed_of(wrapped: &WrappedKey, passphrase: &[u8], device_secret: &LockedBytes) -> Result<LockedBytes> {
     wrapped.validate()?;
 
     // ① 重算 AAD 摘要并比对。先于任何密码学 —— 也先于**任何外部调用**,

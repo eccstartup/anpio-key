@@ -28,10 +28,10 @@ Linux 上在仓库根目录执行：
 anpio-cli did create --host awiki.me --handle mybot --email you@example.com
 ```
 
-默认钥匙由 CLI 本机保管。要让本机的 `anpio-key` 保管钥匙，由**管理员在自己的终端**加 `--key anpio-key`；CLI 只拿到钥匙名和公钥，口令只由 daemon 从 `/dev/tty` 读取。
+默认钥匙由 CLI 本机保管。要让本机的 `anpio-key` 保管钥匙，由**管理员在自己的终端**加 `--key anpio-key`；CLI 只拿到钥匙名和公钥，口令只由 daemon 从 `/dev/tty` 读取。**机器上已经装了受保护服务时，这条命令会拒绝**：服务还不能为新建身份 provision 钥匙，已有身份要走接管路径（macOS `./install.sh --adopt`，见第 5 节；Linux 的接管命令尚未提供）。
 
 > [!IMPORTANT]
-> 受保护服务目前只认已经迁入 vault、并登记成 `{did}#key-1` 的 DID 绑定钥匙。命名钥匙还没有登记路径（见 [TODO](../TODO.md)），所以 `--key anpio-key` 建出来的身份还不能在受保护平面上签名。在那之前，要给受保护服务一把能签的钥匙，走 `./install.sh --bootstrap` 这条老路。
+> 受保护服务只认已经迁入 vault、并在 catalog 里登记的 DID 绑定钥匙。`--key anpio-key` 建出来的三把命名钥匙还没有登记路径（见 [TODO](../TODO.md)），所以它们不能在受保护平面上签名。macOS 上用 `./install.sh --adopt` 把已有身份接管进服务；Linux 上暂时仍只能用 `./install.sh --bootstrap` 让服务拿到一把能签的钥匙。
 
 老路仍然是一条命令完成安装和初始化：
 
@@ -68,7 +68,18 @@ anpio-cli did create --host awiki.me --handle mybot --email you@example.com
 
 手动校验发行包、更新和离线迁移见 [Linux 部署](linux/README.md)。
 
-macOS 用 `./install.sh` 安装本机预览，始终 `protected_supported=false`；装完同样用 `anpio-cli did create` 建身份。`--bootstrap` 在 macOS 上仍可用，只使用 `_anpagent` 和 `--hardware none`，走的也是上面那条老路（生成身份、创建热钥匙、离线迁入、登记 vault、确认角色、发布策略、创建 grant 并解锁）。本机预览请用一次性身份和公开口令试跑，不要用真实密钥试错。已有身份或需要迁入真实密钥时按 `deploy/macos/AGENT.md` 手动完成。
+macOS 用 `./install.sh` 安装本机预览，始终 `protected_supported=false`。装完后用**接管**把已有身份迁进服务：
+
+```bash
+sudo ./install.sh --adopt --identity ~/.anpio-cli/mybot/default/identity.json \
+  --cli-binary /path/to/anpio-cli --cli-sha256 "$(shasum -a 256 /path/to/anpio-cli | cut -d' ' -f1)" \
+  --target https://awiki.me/anp-im/rpc \
+  --target https://awiki.me/user-service/v1/did-auth/rpc
+```
+
+脚本把三把 DID 绑定钥匙迁入 vault（DID 与已发布文档不变），确认 root / hot / key_agreement 角色，打开 `sign_document_proof`，发布 HTTP 与文档 proof 两条策略，给 Agent 账号建两个 grant，解锁，安装 CLI，并在 `/Library/ANPIOKey/agent/home` 写好 Agent 记录。口令只从你的终端读取；可重跑；不删除源 store；grant 和 unlock 都在**最后一次重启之后**。`--dry-run` 只打印计划。之后由 `_anpagent` 运行 `anp sign`，管理员账号（uid 501）按设计连不上签名口。
+
+`--bootstrap` 在 macOS 上仍可用，只使用 `_anpagent` 和 `--hardware none`，走的也是上面那条老路（生成一次性预览身份、创建热钥匙、离线迁入、登记 vault、确认角色、发布策略、创建 grant 并解锁）。本机预览请用一次性身份和公开口令试跑，不要用真实密钥试错。需要逐步核对时按 `deploy/macos/AGENT.md` 手动执行。
 
 ## 2. 手动完成身份和授权
 
@@ -76,7 +87,7 @@ macOS 用 `./install.sh` 安装本机预览，始终 `protected_supported=false`
 
 ### 2.1 准备身份（受保护迁移走的路线）
 
-新身份优先用 `anpio-cli did create`（见第 1 节）。但受保护服务只接受已经迁入 vault 的 DID 绑定钥匙，命名钥匙还没有登记路径，所以要让受保护服务真正持有并签一把钥匙，本节这条老路仍要完整走一遍，`spec` / `keygen` / `publish` 继续按兼容别名使用。
+新身份优先用 `anpio-cli did create`（见第 1 节），但受保护服务只接受已经迁入 vault 的 DID 绑定钥匙，命名钥匙没有登记路径。macOS 上交给 `./install.sh --adopt` 完成接管；Linux 上要服务真正持有并签一把钥匙，本节这条老路仍要完整走一遍，`spec` / `keygen` / `publish` 继续按兼容别名使用。
 
 先在 root 控制的暂存目录里生成身份。`keygen` 会在终端显示一次 24 词，确认抄好后输入口令；它是唯一的备份机会，之后没有导出路径。`keygen` 生成的是绑定钥匙（root），日常签名还需要一把单独的热钥匙：
 
