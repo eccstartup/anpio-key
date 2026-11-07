@@ -4,7 +4,7 @@ layout: home
 hero:
   name: Anpio Key
   text: 替 Agent 保管私钥，只按许可签名
-  tagline: 跑在本机的服务。AI Agent 把请求交给它，它检查许可后生成 HTTP 签名；私钥始终留在服务里。
+  tagline: 跑在本机的服务。AI Agent 把请求交给它，它检查许可后生成 HTTP 签名、W3C proof 或 X25519 共享密钥；私钥始终留在服务里。
   actions:
     - theme: brand
       text: 五分钟跑通
@@ -19,8 +19,10 @@ hero:
 features:
   - title: 私钥不给 Agent
     details: Agent 通过本地 socket 提交要签名的请求，拿回签名头。接口里没有任何字段能取走私钥。
+  - title: 不止 HTTP 签名
+    details: origin proof、设备用途断言、W3C 对象/文档 proof 和 X25519 协商各自一个开关，默认关；开过哪一路，启动审计里有记录。
   - title: 每次签名都检查许可
-    details: 许可写明哪把钥匙、哪个网站和路径、什么方法、有效期和次数。超出范围直接拒绝。
+    details: 许可写明哪把钥匙、哪个操作、什么目标、有效期和次数。超出范围直接拒绝。
   - title: 撤销和重启立即生效
     details: 撤销后不再产生新签名；重启后所有旧许可作废、钥匙重新锁定。
   - title: 管理员和 Agent 分开

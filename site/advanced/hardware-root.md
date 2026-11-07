@@ -15,7 +15,7 @@
 | 后端 | 怎么用 | 当前状态 |
 |---|---|---|
 | Linux TPM 2.0 | 构建 `hardware-tpm`，通过 `/dev/tpmrm0` 解封 | 部署范围已验证；实体芯片保护声明未做 |
-| macOS Secure Enclave | 构建 `hardware-se`，通过登录钥匙串解封 | 芯片 ECDH 路径可用；正式签名、持久化和重启恢复未验收 |
+| macOS Secure Enclave | 构建 `hardware-se`，通过登录钥匙串解封 | 开发签名身份下持久 SE 与主机生命周期已在本机验收；Developer ID 正式分发未完成 |
 | `hardware-software` | 文件形式的测试替身 | 不是硬件；release 构建拒绝 |
 
 本地生成钥匙时需要对应的构建：
@@ -65,7 +65,7 @@ SE 依赖用户的登录钥匙串，所以必须有一个在图形登录会话�
 - 注销、切换用户、休眠或助手退出后，锁钥、撤销 grant、作废旧批准；
 - 不会自动恢复 grant。
 
-正式签名身份、持久 SE、分发、注销/重启等整机生命周期还没有验收。合成 HS 的桥接测试不等于持久 SE 证据。协议细节见仓库 `deploy/macos/SE-SESSION.md`。
+开发签名身份下，持久 SE、跨进程重启、用户切换、注销/重新登录、休眠和整机重启已在本机验收；Developer ID 正式签名、公证与长期安装身份仍未完成。正式分发前的只读预检见 `deploy/macos/se-preflight.py`，协议细节见仓库 `deploy/macos/SE-SESSION.md`。
 
 ## 硬件丢了怎么办
 

@@ -68,7 +68,7 @@ cargo clippy --locked --offline --all-targets --features mcp,hardware-software -
 
 ## 硬件按平台单独验收
 
-- **Secure Enclave**：芯片 ECDH 路径可用；持久化还差 Apple 签发的身份、profile 和主机生命周期验收。
+- **Secure Enclave**：开发签名身份下持久化、跨进程重启和主机生命周期已在本机验收；Developer ID 正式分发未完成。
 - **TPM**：部署范围已验收；三条硬件测试标记为 `#[ignore]`，需要显式运行。实体芯片保护声明仍需真机验收。
 
 平台说明和未验项见[硬件根](/advanced/hardware-root)。

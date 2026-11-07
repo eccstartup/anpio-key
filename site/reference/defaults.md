@@ -10,6 +10,8 @@
 - **根密钥的 fragment 不写进规格文件。** 它是工具内部识别根密钥的名字，不是文档声明。
 - **`publish` 不带 `--spec` 时沿用本地文档的声明。** 重发不会清掉已有 service 条目。
 - **`publish --spec` 的坐标必须和 `--did` 一致。** 不一致直接拒绝。
+- **`keygen` 的 24 个词只显示一次。** 词在铸任何东西之前显示，只写 tty；之后没有导出路径。
+- **`import-mnemonic` 恢复四类钥匙。** `key-1`、hot、`{device}-sign`、`{device}-agreement`；后铸的设备键不在词里，只能靠归档带走。
 
 ## Linux v2 的默认边界
 
@@ -21,6 +23,17 @@
 - 策略检查和签名使用同一份规范化请求。
 
 详见[设计说明](/design/)。
+
+## 数据面新签名路默认关
+
+`SIGN_ORIGIN_PROOF`、`SIGN_PURPOSE`、`ECDH`、`SIGN_OBJECT_PROOF`、`SIGN_DOCUMENT_PROOF` 各自一个开关，默认关：
+
+- 开关在服务配置的 `features` 里，逐路独立；`SIGN_PURPOSE` 还按用途再分，只有列出来的用途能签。
+- 关着时操作不出现在 `operations`，发过去是 `OPERATION_DISABLED`；客户端不能降级到别的操作。
+- 每开一路，启动时往审计链追加一条事件（`FEATURES`、`SIGN_PURPOSE_ENABLED`、`ECDH_ENABLED`、`SIGN_OBJECT_PROOF_ENABLED`、`SIGN_DOCUMENT_PROOF_ENABLED`）。
+- `ECDH` 是唯一输出秘密的操作：共享密钥不落库，同一个 `request_id` 重放拿不到第二次。
+
+开关只决定数据面收不收这个操作，不改变 `SIGN_HTTP` 的行为。完整字段和默认关清单见仓库 [ADAPTER.md §11.7](https://github.com/eccstartup/anpio-key/blob/master/docs/ADAPTER.md)。
 
 ## 开发守护进程
 

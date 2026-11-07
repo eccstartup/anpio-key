@@ -1,6 +1,6 @@
 # 接到 Agent 上
 
-前提：管理员已经装好服务、登记身份、发布策略、创建 grant 并解锁了热钥匙。Agent 需要知道三样东西：
+前提：管理员已经装好服务、登记身份、发布策略、创建 grant 并解锁对应钥匙。Agent 需要知道三样东西：
 
 - 受保护配置的路径，通常是 `/etc/anpio-key/service.json`；
 - `grant_id`；
@@ -37,12 +37,21 @@ anpio-key data --config /etc/anpio-key/service.json --file request.json
 
 | 操作 | 用途 |
 |---|---|
+| `GET_CAPABILITIES` | 看协议版本、`operations`、用途和 grant 类型 |
 | `LIST_AUTHORIZED_KEYS` | 看自己当前能用哪些钥匙 |
 | `GET_DOCUMENT` | 取某把钥匙的公开文档，需要 `key_id` |
 | `GET_GRANT_STATUS` | 查 grant 的期限和剩余次数 |
 | `GET_REQUEST_STATUS` | 用原 `request_id` 查签名结果 |
+| `SIGN_ORIGIN_PROOF` | ANP origin proof，用 hot 键 |
+| `RENEW_GRANT` | 续 session grant，只延期不加次数 |
+| `SIGN_PURPOSE` | 设备/应用用途断言，用绑定了该用途的设备键 |
+| `ECDH` | X25519 协商，用协商键 |
+| `SIGN_OBJECT_PROOF` | W3C 对象 proof，用设备签名键 |
+| `SIGN_DOCUMENT_PROOF` | DID 文档 proof，用根键的管理面 grant |
 
-数据接口没有解锁、密码、根签名、任意字节签名或生命周期操作。
+`SIGN_ORIGIN_PROOF`、`SIGN_PURPOSE`、`ECDH`、`SIGN_OBJECT_PROOF`、`SIGN_DOCUMENT_PROOF` 默认关；先查 `GET_CAPABILITIES` 的 `operations`，名字不在里面就是没开，不要按构建版本猜。字段、编码与错误码见仓库 [ADAPTER.md §11](https://github.com/eccstartup/anpio-key/blob/master/docs/ADAPTER.md)。
+
+数据接口没有解锁、密码、通用根签名、任意字节签名或生命周期操作。唯一能用根键的数据面操作是 `SIGN_DOCUMENT_PROOF`，它的 grant 只能由管理面签发；换设备、改文档、注册这些根操作全部留在管理面。
 
 ## 拿到签名之后
 

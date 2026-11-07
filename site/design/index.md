@@ -51,7 +51,7 @@ Agent 提交请求
 ## 授权模型
 
 - **主体**：由内核 UID 映射成持久的 principal UUID。PID、工作目录、调用方自报名字都不参与授权。
-- **钥匙角色**：root、hot、recovery、challenge。只有已验证、active 的 hot key 能进入普通 Agent 的 grant。
+- **钥匙角色**：root、hot、device_signing、key_agreement、recovery、challenge。grant 只能绑定与操作匹配的角色：hot 用于 HTTP 与 origin proof，device_signing 用于用途断言与对象 proof，key_agreement 用于 ECDH，root 只通过管理面签发的 grant 用于文档 proof。
 - **grant**：绑定主体、指定钥匙、不可变策略版本、启动轮次、绝对到期时间和最大次数。
 - **策略**：当前只支持精确 HTTPS 域名、方法白名单、精确路径、禁止或精确 query、空或有界 body。没有通配域名、路径正则或可执行策略。
 
@@ -68,10 +68,10 @@ Agent 通过数据 socket 只能：
 
 - 列出自己获准的钥匙；
 - 读取公开文档；
-- 请求签名；
+- 请求 HTTP 签名、origin proof、用途断言、对象/文档 proof 或 X25519 协商；
 - 查询自己的请求状态。
 
-数据面没有密码、解锁、根签名、任意字节签名或生命周期入口。
+数据面没有密码、解锁、通用根签名、任意字节签名或生命周期入口。除了基线六个操作，其余签名路各自一个开关、默认关；唯一能用根键的是 `SIGN_DOCUMENT_PROOF`，它的 grant 只能由管理面签发。
 
 ## 持久化和恢复
 
@@ -112,7 +112,7 @@ KEK = HKDF-SHA256( argon2id(口令) ‖ device.secret ‖ HS, salt )
 ## 当前不支持的能力
 
 - macOS 受保护执行域和正式发行；
-- Secure Enclave 的正式签名、持久密钥、分发和整机生命周期验收；
+- Secure Enclave 的正式分发（Developer ID 签名、公证、长期安装身份）；
 - 实体 TPM 硬件保护声明；
 - 无人值守恢复；
 - 通配域名、路径正则、字段级 body/query、多 origin 等扩展策略；

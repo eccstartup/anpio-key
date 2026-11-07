@@ -84,9 +84,11 @@ Agent 不能拥有 sudo、宿主 Docker socket、服务配置写权限或控制�
 
 这些格式决定已有身份和备份能否恢复。不能为了接口重构修改既有推导、AAD 序列化或版本语义；需要扩展时使用明确新版本并保留旧格式读取测试。
 
-### 3.1 助记词：`bip39-entropy-v1`
+### 3.1 助记词：`bip39-entropy-v1` / `bip39-entropy-v2`
 
-24 个 BIP-39 词直接编码 32 字节 Ed25519 seed：256 位熵加 8 位校验，共 264 位。这里使用 BIP-39 熵的编码/解码，**不使用** PBKDF2-HMAC-SHA512 的 BIP-39 seed 派生，也不接受其可选 passphrase。
+24 个 BIP-39 词直接编码 32 字节熵：256 位熵加 8 位校验，共 264 位。这里使用 BIP-39 熵的编码/解码，**不使用** PBKDF2-HMAC-SHA512 的 BIP-39 seed 派生，也不接受其可选 passphrase。
+
+`bip39-entropy-v2` 从同一份熵派生四类钥匙：`key-1`（熵本身，与 v1 逐字节相同）、hot、`{device}-sign`、`{device}-agreement`，后三条各走一条冻结的 HKDF 域串（`anp-keyd/v2/hot`、`anp-keyd/v2/device-sign`、`anp-keyd/v2/device-agreement`）。`anp-keyd/v1/kek`、`anp-keyd/v2/kek`、`anp-keyd/v2/se-hs` 与 v1 保持不变。`IssueDeviceKeys` 后铸的设备键是随机种子，不在助记词里，只能靠归档带走。
 
 标准工具的 `to_seed()` 会得到另一把钥匙，通常不会报错。恢复实现必须验证词数、推导版本、公钥、指纹和 DID 文档关系，不能只检查词语有效。实现见 `src/crypto/mnemonic.rs`。
 
@@ -120,7 +122,7 @@ KEK、DEK 和 seed 均为 32 字节。DEK 随机生成；两次 XChaCha20-Poly13
 
 ### 4.1 主体、密钥角色与 grant
 
-principal 表示经过 OS 认证的执行域；key handle 是数据库内部 UUID，kid 是公开 DID 方法标识，两者不能混用。密钥角色为 root、hot、recovery、challenge 或 unclassified；只有已验证、active 的 hot key 可进入数据面 grant。
+principal 表示经过 OS 认证的执行域；key handle 是数据库内部 UUID，kid 是公开 DID 方法标识，两者不能混用。密钥角色为 root、hot、device_signing、key_agreement、recovery、challenge 或 unclassified。数据面 grant 只能绑定已验证、active 且与操作匹配的角色：`hot` 用于 HTTP 和 origin proof，`device_signing` 用于用途断言与对象 proof，`key_agreement` 用于 ECDH，`root` 只通过管理面签发的 grant 用于文档 proof。操作到角色的放行表见 [ADAPTER](ADAPTER.md) §11.5。
 
 角色由管理端确认，并绑定信封、公钥及文档摘要。重新登记保留 handle，但撤销旧授权并重新确认角色；根绑定密钥不能通过改标签变成热密钥。文件摘要、文档或身份状态改变后必须重新验证。
 
@@ -137,6 +139,8 @@ grant 绑定 principal、exact key、不可变 policy 版本、boot epoch、绝�
 body 显式区分 absent 和 present；present 的空数组也签 Content-Digest。签名固定覆盖 `@method`、`@target-uri`、`@authority`，有 body 时覆盖 `content-digest`，有 content-type 时覆盖该头。调用者不能覆盖 profile、减少覆盖面或指定任意签名基。
 
 签名期限不超过 grant 墙钟截止、单调剩余期限和 300 秒中的最小值。调用者可提交对端 nonce，但其来源和一次性语义仍由网络适配器及验证方管理。签名核心不会通过联网判断业务是否已经授权。
+
+除 `SIGN_HTTP` 外，数据面还有 origin proof、用途断言、W3C 对象 proof、文档 proof 和 X25519 协商。它们各自有独立的签名基和编码，且默认关闭；字段与签名基见 [ADAPTER](ADAPTER.md) §11.3，默认关清单见 §11.7。
 
 ## 五、签名事务、撤销与不确定结果
 
@@ -179,7 +183,7 @@ body 显式区分 absent 和 present；present 的空数组也签 Content-Digest
 
 ### 6.1 数据库是真源
 
-当前 SQLite schema 为 3，通过固定的 rusqlite 访问层使用 bundled SQLite。单实例锁、rollback journal DELETE、synchronous EXTRA 和外键设置均需校验；不支持网络文件系统或多 daemon 并行写入。
+当前 SQLite schema 为 5，通过固定的 rusqlite 访问层使用 bundled SQLite。单实例锁、rollback journal DELETE、synchronous EXTRA 和外键设置均需校验；不支持网络文件系统或多 daemon 并行写入。
 
 数据库保存主体、vault、角色与摘要、不可变策略、grant、请求、批准意图、跨文件操作及审计。它不保存 seed、KEK、密码或原始敏感 HTTP body。结果缓存只保存生成头及 profile 覆盖的 content-type，不持久化任意调用方凭据头。
 
@@ -189,7 +193,9 @@ body 显式区分 absent 和 present；present 的空数组也签 Content-Digest
 
 管理员通过 prepare 获取 operation_id、digest、effect 和 expires_at，检查后 commit。批准绑定同一管理员、boot/mutation epoch、墙钟及单调期限，单次使用；状态变化后旧批准可能失效。
 
-普通管理包含主体启停、vault 登记、角色确认、策略发布、grant 创建/撤销和已签文档安装。`RegistrationChallenge` 与 `RotateHotKey` 经专用 complete-secret-operation 完成：秘密走认证后的独立有界二进制帧，根密钥瞬时解封、用后销毁，不驻留供 Agent 使用。
+普通管理包含主体启停、vault 登记、角色确认、策略发布、grant 创建/撤销和已签文档安装。设备入组与撤销也走管理面：`IssueDeviceKeys` 在 vault 内铸一对设备键，`ReissueDocument` 的 `add`/`remove` 改文档，根在带凭据的完成步才签。批准后文档被别人动过（哪怕语义等价）就拒签；数据面不接受调用方交进来的私钥。
+
+`RegistrationChallenge`、`RotateHotKey`、`IssueDeviceKeys` 与 `ReissueDocument` 经专用 complete-secret-operation 完成：秘密走认证后的独立有界二进制帧，根密钥瞬时解封、用后销毁，不驻留供 Agent 使用。
 
 注册挑战限定 exact root key、HTTPS origin 和 32 位小写 hex challenge。来源真实性由可信管理适配器校验，daemon 不接受 Agent 的“已经验证”标签。256 字节长度上限不能隔离文档 proof；普通数据面没有 raw/challenge 接口。
 
@@ -250,20 +256,21 @@ Linux systemd 主机验收已完成，覆盖完整关机和启动；它不证明
 
 | 后端 | 实现方式 | 当前声明 |
 |---|---|---|
-| Secure Enclave | P-256 ECDH，信封携带恢复共享材料所需的信息，钥匙串 tag 定位 | 芯片 ECDH 路径可用；正式签名身份、钥匙串持久化与跨进程重启恢复未验收 |
+| Secure Enclave | P-256 ECDH，信封携带恢复共享材料所需的信息，钥匙串 tag 定位 | 开发签名身份下芯片 ECDH、持久钥匙串、跨进程重启、注销/重新登录、休眠和整机重启已在本机验收；Developer ID 正式签名、公证与长期安装身份未完成 |
 | TPM 2.0 | TPM 创建/解封，持久句柄定位 | 部署范围已验收：设备访问、systemd 沙箱、跨进程封存/打开、跨 UID 拒绝、删除后拒绝；实体芯片保护未声明 |
 | hardware-software | 文件形式测试替身 | 不是硬件；release 构建拒绝该 feature |
 
-不可用的指定硬件后端必须报错，不能静默降级软件。v2 信封的 hardware 与 hs_ciphertext 成对存在；空封装字符串不代表未绑定硬件。当前 TPM 路径不能被描述为已具有启动状态/PCR 证明。SE 分发需要匹配的签名与 entitlement；单次临时密钥实验不证明持久化可发行。
+不可用的指定硬件后端必须报错，不能静默降级软件。v2 信封的 hardware 与 hs_ciphertext 成对存在；空封装字符串不代表未绑定硬件。当前 TPM 路径不能被描述为已具有启动状态/PCR 证明。SE 正式分发需要 Developer ID 证书、公证和长期安装身份；本机短期 Apple Development 身份与 `LocalProvision` profile 的结果不构成发行验收。
 
 ## 十、当前不支持的能力
 
 - macOS 受保护执行域与正式发行；当前只有 `macos-boundary-preview`，`protected_supported=false`。
-- Secure Enclave 的正式签名、持久密钥、分发和主机生命周期验收。
+- Secure Enclave 的正式分发：Developer ID 签名、公证、长期安装身份与发行审核。
 - 实体 TPM 硬件保护声明；需要真芯片上的故障、升级、换机和恢复验收。
 - 单个 workload 的受限无人值守恢复；重启仍然撤销授权并锁定密钥。
 - 通配域名、路径正则、字段级 body/query、多 origin、header 约束等扩展请求策略。
 - 跨主体委托链；grant 只绑定单个 principal。
 - 远程多租户 KMS、通用密码管理器、完整企业 IAM，以及不可信宿主管理员下的密钥保密。
+- awiki-cli-rs2 与 anpio-cli 的客户端侧私钥迁移；这两步在各自仓库验收，本仓库只提供数据面与管理面操作。
 
 每项能力单独定义威胁模型和验收，不因 Linux 首版完成而自动获得安全声明。
