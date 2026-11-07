@@ -2346,9 +2346,21 @@ fn grant_create(root: Option<&Path>, args: GrantCreateArgs) -> Result<()> {
         .prepare(change)?
         .prepared
         .ok_or_else(|| KeydError::Protocol("the management plane returned no prepared change".into()))?;
-    let reply = AdminClient::connect(&args.config, true)?
+    // 完成回执只有一个 `OK`,编号只在预备结果里;客户端要拿它写进
+    // identity.json,所以这里必须把它打出来。
+    let grant_id = prepared
+        .effect
+        .get("effect")
+        .and_then(|effect| effect.get("grant"))
+        .and_then(|grant| grant.get("grant_id"))
+        .and_then(|id| id.as_str())
+        .ok_or_else(|| KeydError::Protocol("the prepared change carries no grant id".into()))?
+        .to_owned();
+    AdminClient::connect(&args.config, true)?
         .commit(prepared.operation_id, prepared.digest)?;
-    println!("{}", serde_json::to_string(&reply)?);
+    println!("created grant {grant_id}");
+    println!();
+    println!("Write it into the DID client with: anpio-cli key grant {grant_id}");
     Ok(())
 }
 
