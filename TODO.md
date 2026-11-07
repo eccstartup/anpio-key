@@ -15,7 +15,7 @@
 - [x] U4 独立审计采集器、SSH 固定端点、原子保管、回滚/分叉/崩溃/断网验收；交付部署模板与两容器验收。保持本地审计签名继续策略，不承诺在线强制锚定或非审计状态保护。
 - [ ] 受限无人值守恢复（须先指定 workload 与可信解封机制）。
 - [ ] 命名签名进受保护平面：`sign --key` / `key sign-document` 现在只有开发开关（`serve --development --allow-named-key-signing`），不走 grant，也不核目标/期限/次数；审计只有 `NAMED_SIGNED`（key、keyid、文档摘要）。要给这条签名路一个独立 capability（`named-key-signing`，默认关）、在签名时按 grant 核 target/TTL/次数，并把 `grant_id`/`request_id` 并进它自己那条审计行。做完之前受保护安装不开启这条路。
-- [ ] 文档与技能切到新主路径：`skills/anpio-key/SKILL.md` 的 A/B/C 三节、`README.md`、`deploy/LOCAL-USE.md`、`deploy/macos/README.md` 改成 `key create` + `grant create` 的流程，`spec`/`keygen`/`publish` 只留迁移说明；`install.sh` 与 `deploy/*/bootstrap.py` 的 `--bootstrap` 改为建一把命名钥匙并开启命名签名，不再 keygen 一份 DID。三件事都等上面那条 capability 落地，且工作区里现有的文档改动落定后一起改。
+- [ ] 安装器切到命名钥匙：`install.sh` 与 `deploy/*/bootstrap.py` 的 `--bootstrap` 仍会 keygen 一份 DID；应改成建一把命名钥匙并开启命名签名。文档与技能已切到 `key create` + `grant create` 的主路径，`spec`/`keygen`/`publish` 只剩迁移说明；安装器这一半等上面那条 capability 落地。
 - [ ] 按实际需求扩展注册 challenge 格式；当前仅支持管理端精确批准的 awiki 32 位小写 hex 格式。
 - [x] 外部 awiki-cli-rs2：依赖改造已完成并推送——只删掉 `../anp/...` path 依赖，保留 `anp =1.0.3`、`anp-identity =0.2.3` 原版本钉（二者 crates.io 上均有），`Cargo.lock` 只补 `source`/`checksum`；`cargo check --locked --workspace` 通过、`cargo test -p awiki-im-core --lib` 1522 项全过。提交 `a8c5663c` 已推到 fork `eccstartup/awiki-cli-rs2` 的 `eccstartup` 分支，未推上游、未开 PR。升级 `anp-identity` 0.2.5 需先做 awiki 自己的 DID 文档迁移（0.2.5 拒绝 P6 legacy bundle，185/1522 测试失败），单列。本仓库侧交付已完成：Node v2 客户端及 anp-sdk connector，SDK 侧最低兼容版本 `@connectx-sdk/core@0.4.2`。
 

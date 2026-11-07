@@ -39,19 +39,33 @@ covered.
 ## Fresh installation: human terminal
 
 Use a trusted, reviewed checkout. Do not run privileged installation scripts from
-an Agent-controlled working tree. From the repository root, one command builds,
-provisions the accounts and starts the local preview:
+an Agent-controlled working tree. On a fresh machine, get one first:
+
+```sh
+git clone --depth 1 https://github.com/eccstartup/anpio-key.git ~/code/anpio-key
+cd ~/code/anpio-key
+```
+
+From the repository root, one command builds, provisions the accounts and starts
+the local preview. It creates no identity:
 
 ```sh
 ./install.sh
 ```
 
-Add `--bootstrap --did-host HOST --target https://...` (or answer the terminal
-prompts) to create a disposable preview identity, migrate it into protected
-state and issue one grant in the same run. This path always uses
-`_anpagent` and `--hardware none`; it still reports `protected_supported=false`.
-Passphrases are read by Anpio Key from the human terminal only. Use a disposable
-identity and a public password, never real keys.
+Create an identity afterward with `anpio-cli did create --host HOST --handle NAME`
+(add `--key anpio-key` at the administrator's terminal to keep the key in this
+machine's `anpio-key` store). The protected surface currently accepts only DID-bound
+keys that have been migrated into the vault; named keys have no enrollment path
+yet (see [TODO.md](../../TODO.md)), so until that lands `--bootstrap` remains the
+way to give the preview service a key it can sign with.
+
+`--bootstrap --did-host HOST --target https://...` (or answer the terminal
+prompts) runs the legacy one-shot: it creates a disposable preview identity,
+migrates it into protected state and issues one grant in the same run. This path
+always uses `_anpagent` and `--hardware none`; it still reports
+`protected_supported=false`. Passphrases are read by Anpio Key from the human
+terminal only. Use a disposable identity and a public password, never real keys.
 
 The script asks for sudo only after the build. It creates `_anpio` / `_anpagent`,
 four groups, root-owned installation/configuration and a launchd job, starts the

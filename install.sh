@@ -28,7 +28,7 @@ usage() {
   --dry-run           只打印计划，不做任何修改
   -h, --help          显示本帮助
 
-初始化身份和 grant（安装后在同一个命令里继续；macOS 只用于本机预览）:
+初始化身份和 grant（老路：受保护迁移用；macOS 只用于本机预览）:
   --bootstrap         安装后创建新身份、迁入受保护状态并创建一张 grant
   --did-host HOST     DID 文档所在域名，例如 agents.example.com
   --did-path PATH     DID 路径，默认 agents/anpio-key
@@ -46,8 +46,11 @@ usage() {
     --target https://api.example.com/v1/status
   sudo ./install.sh --binary /root/anpio-key --sha256 VERIFIED_SHA256 --admin-user operator
 
-不带 --bootstrap 时只创建空服务。身份、策略和 grant 也可以之后按
-deploy/LOCAL-USE.md 手动完成。口令始终由你在这个终端输入，不经过 Agent。
+不带 --bootstrap 时只创建空服务。新身份用 `anpio-cli did create` 建；要让
+本机的 anpio-key 保管钥匙就由管理员在自己的终端加 `--key anpio-key`。受保护
+服务目前只认已迁入 vault、登记成 {did}#key-1 的 DID 绑定钥匙，命名钥匙的
+登记和受保护签名还没做（见 TODO.md），在那之前用 --bootstrap 这条老路。
+口令始终由你在这个终端输入，不经过 Agent。
 EOF
 }
 

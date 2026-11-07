@@ -12,16 +12,35 @@
 
 不要给 Agent sudo、Docker 管理权限、管理员凭据、真实身份口令，也不要让它能改服务程序或配置。
 
-## 1. 一条命令完成安装和初始化
+## 1. 装服务，再建身份
 
 Linux 上在仓库根目录执行：
+
+```bash
+./install.sh
+```
+
+它构建 release、校验摘要、创建服务账号、安装并启动 systemd 服务，**不生成身份**。装上之后按第 2 节创建身份和授权。
+
+身份由 `anpio-cli did create` 一条命令建完（读服务信息、预检 handle、生成钥匙、签文档、注册）：
+
+```bash
+anpio-cli did create --host awiki.me --handle mybot --email you@example.com
+```
+
+默认钥匙由 CLI 本机保管。要让本机的 `anpio-key` 保管钥匙，由**管理员在自己的终端**加 `--key anpio-key`；CLI 只拿到钥匙名和公钥，口令只由 daemon 从 `/dev/tty` 读取。
+
+> [!IMPORTANT]
+> 受保护服务目前只认已经迁入 vault、并登记成 `{did}#key-1` 的 DID 绑定钥匙。命名钥匙还没有登记路径（见 [TODO](../TODO.md)），所以 `--key anpio-key` 建出来的身份还不能在受保护平面上签名。在那之前，要给受保护服务一把能签的钥匙，走 `./install.sh --bootstrap` 这条老路。
+
+老路仍然是一条命令完成安装和初始化：
 
 ```bash
 ./install.sh --bootstrap --did-host agents.example.com \
   --target https://api.example.com/v1/status
 ```
 
-这条命令依次完成：
+它依次完成：
 
 1. 构建 release、校验摘要、创建服务账号、安装并启动 systemd 服务；
 2. 生成一个 did:wba 身份，并发布本地 DID 文档；
@@ -47,23 +66,19 @@ Linux 上在仓库根目录执行：
 
 `--method` 可以重复，默认 `GET`；`--body-bytes`、`--grant-days`、`--max-uses` 分别限制请求体大小、有效天数和签名次数。指定多个 Agent 账号时，`--bootstrap` 只为第一个账号创建 grant。
 
-只安装空服务，之后手动初始化：
-
-```bash
-./install.sh
-```
-
 手动校验发行包、更新和离线迁移见 [Linux 部署](linux/README.md)。
 
-macOS 用同一条命令安装本机预览，始终 `protected_supported=false`；`--bootstrap` 同样可用，只使用 `_anpagent` 和 `--hardware none`，流程与 Linux 一致（生成身份、创建热钥匙、离线迁入、登记 vault、确认角色、发布策略、创建 grant 并解锁）。本机预览请用一次性身份和公开口令试跑，不要用真实密钥试错。已有身份或需要迁入真实密钥时仍按 `deploy/macos/AGENT.md` 手动完成。
+macOS 用 `./install.sh` 安装本机预览，始终 `protected_supported=false`；装完同样用 `anpio-cli did create` 建身份。`--bootstrap` 在 macOS 上仍可用，只使用 `_anpagent` 和 `--hardware none`，走的也是上面那条老路（生成身份、创建热钥匙、离线迁入、登记 vault、确认角色、发布策略、创建 grant 并解锁）。本机预览请用一次性身份和公开口令试跑，不要用真实密钥试错。已有身份或需要迁入真实密钥时按 `deploy/macos/AGENT.md` 手动完成。
 
 ## 2. 手动完成身份和授权
 
 需要已有身份、多个 Agent 或自定义策略时，按本节手动完成。下面的程序路径是正式安装的位置；管理命令必须在管理员账号下运行（root 不在 `admin_uids` 里）。
 
-### 2.1 准备一个身份
+### 2.1 准备身份（受保护迁移走的路线）
 
-新身份先在一个 root 控制的暂存目录里生成。`keygen` 生成的是绑定钥匙（root）；日常签名还需要一把单独的热钥匙：
+新身份优先用 `anpio-cli did create`（见第 1 节）。但受保护服务只接受已经迁入 vault 的 DID 绑定钥匙，命名钥匙还没有登记路径，所以要让受保护服务真正持有并签一把钥匙，本节这条老路仍要完整走一遍，`spec` / `keygen` / `publish` 继续按兼容别名使用。
+
+先在 root 控制的暂存目录里生成身份。`keygen` 会在终端显示一次 24 词，确认抄好后输入口令；它是唯一的备份机会，之后没有导出路径。`keygen` 生成的是绑定钥匙（root），日常签名还需要一把单独的热钥匙：
 
 ```bash
 sudo install -d -m 700 /root/keyd-staging
@@ -187,6 +202,17 @@ $ADMIN status
 
 口令由管理 CLI 从终端读取，不经过 Agent、MCP 或聊天。解锁只让钥匙可用，不会自己产生授权；授权来自上面的 grant。`status` 应报告 `signing_available=true`。
 
+### 2.6 设备入组与撤销
+
+一台设备在文档里是两把钥匙：`{device}-sign`（挂在 `authentication` 和 `assertionMethod` 下）和 `{device}-agreement`（只挂 `keyAgreement`）。入组四步，顺序不能换：
+
+1. `IssueDeviceKeys` 在 vault 里铸出这两把，不公布；
+2. `ReissueDocument` 的 `add` 把两个公钥写进文档，根在带凭据的完成步才签；
+3. `EnrollVault` 按本机信封重扫，登记成 catalog 行；
+4. `ConfirmRole`：签名键确认成 `device_signing` 并绑定 `purpose`，协商键确认成 `key_agreement`。
+
+撤销只有一步：拿两个 kid 走 `ReissueDocument` 的 `remove`，两把一起退休。`IssueDeviceKeys` 铸的是随机种子，不在助记词里，只能靠归档带走。完整字段和失败恢复见仓库 [ADAPTER.md §7.4](https://github.com/eccstartup/anpio-key/blob/master/docs/ADAPTER.md)。
+
 ## 3. 启动 Agent
 
 确认 Agent 账号：
@@ -202,6 +228,8 @@ Agent 可以用 CLI：
 ```bash
 anpio-key data --config /etc/anpio-key/service.json --file request.json
 ```
+
+数据面支持 HTTP 签名、origin proof、设备/应用用途断言、W3C 对象/文档 proof 和 X25519 协商。除基线六个操作外，其余签名路各自一个开关、默认关；客户端先看 `GET_CAPABILITIES` 的 `operations`，不在列表里就是没开。
 
 也可以用 MCP：
 
@@ -230,6 +258,6 @@ MCP 需要构建时启用 `mcp` feature。工具参数不能覆盖配置文件�
 
 ## 5. macOS 预览和 SE
 
-macOS 提供独立账号的本机预览，始终 `protected_supported=false`。Secure Enclave 登录助手、真实注销/休眠/整机重启、正式签名和持久 SE 仍需要单独验收，见[SE 说明](macos/SE-SESSION.md)。
+macOS 提供独立账号的本机预览，始终 `protected_supported=false`。开发签名身份下，持久 Secure Enclave、跨进程重启、注销/重新登录、休眠和整机重启已在本机验收；Developer ID 正式签名、公证与长期安装身份仍未完成，见[SE 说明](macos/SE-SESSION.md)。
 
 预览测试通过不等于 macOS 正式发行完成，也不能把结果套到 Linux 受保护部署上。
