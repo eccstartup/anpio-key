@@ -2,8 +2,10 @@
 import importlib.util
 from pathlib import Path
 from types import SimpleNamespace as NS
+import tempfile
 import unittest
 from unittest.mock import patch
+import uuid
 
 spec = importlib.util.spec_from_file_location('mac_install', Path(__file__).resolve().parents[1] / 'install.py')
 module = importlib.util.module_from_spec(spec)
@@ -30,7 +32,11 @@ class Policy(unittest.TestCase):
     def test_preview_only(self):
         config = self.config()
         self.assertEqual(config['mode'], 'macos-boundary-preview')
-        self.assertEqual(config['vault_ids'], [])
+        self.assertEqual(len(config['vault_ids']), 1)
+        uuid.UUID(config['vault_ids'][0])
+        self.assertTrue(config['features']['sign_document_proof'])
+        self.assertEqual(config['features']['sign_purpose'],
+                         {'device_assertion': True, 'application_assertion': False})
         self.assertNotEqual(config['admin_uids'][0], config['principals'][0]['uid'])
 
     def test_shared_uid_refused(self):
@@ -57,15 +63,43 @@ class Policy(unittest.TestCase):
         with self.assertRaises(ValueError): self.config()
 
 
+class Upgrade(unittest.TestCase):
+    def test_existing_vault_and_explicit_features_are_preserved(self):
+        config = {'vault_ids': ['11111111-1111-4111-8111-111111111111'],
+                  'features': {'sign_document_proof': False, 'ecdh': True}}
+        with tempfile.TemporaryDirectory() as directory:
+            updated, changed = module.upgraded_config(config, Path(directory))
+        self.assertEqual(updated['vault_ids'], config['vault_ids'])
+        self.assertFalse(updated['features']['sign_document_proof'])
+        self.assertTrue(updated['features']['sign_origin_proof'])
+        self.assertFalse(updated['features']['sign_purpose']['application_assertion'])
+        self.assertTrue(changed)
+
+    def test_empty_config_gets_one_vault_only_without_catalog(self):
+        with tempfile.TemporaryDirectory() as directory:
+            updated, changed = module.upgraded_config({'vault_ids': []}, Path(directory))
+            self.assertEqual(len(updated['vault_ids']), 1)
+            uuid.UUID(updated['vault_ids'][0])
+            self.assertTrue(changed)
+            (Path(directory) / 'catalog.sqlite3').write_bytes(b'')
+            kept, untouched = module.upgraded_config(
+                {'vault_ids': [], 'features': dict(module.DEFAULT_FEATURES)}, Path(directory))
+            self.assertEqual(kept['vault_ids'], [])
+            self.assertFalse(untouched)
+
+
 class Layout(unittest.TestCase):
     def test_state_layout_includes_vaults(self):
         service = NS(pw_uid=501, pw_gid=601)
-        config = {'agent_gid': 610, 'admin_gid': 611}
+        config = {'agent_gid': 610, 'admin_gid': 611,
+                  'vault_ids': ['11111111-1111-4111-8111-111111111111']}
         calls = []
         with patch.object(module, 'directory', side_effect=lambda *args: calls.append(args)):
             module.create_directories(Path('/base'), service, config)
         self.assertIn((Path('/base/state'), 501, 601, 0o700), calls)
         self.assertIn((Path('/base/state/vaults'), 501, 601, 0o700), calls)
+        self.assertIn((Path('/base/state/vaults/11111111-1111-4111-8111-111111111111'),
+                       501, 601, 0o700), calls)
         self.assertIn((Path('/base/sign'), 501, 610, 0o750), calls)
         self.assertIn((Path('/base/admin'), 501, 611, 0o750), calls)
 

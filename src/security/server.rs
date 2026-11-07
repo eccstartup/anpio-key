@@ -1131,7 +1131,63 @@ impl Boundary {
                     )
                 })();
                 match result {
-                    Ok(data) => {
+                    Ok(mut data) => {
+                        // 一次确认刚把这三把信封封上;同一份口令顺手打开,身份
+                        // 才不会一出生就是锁着的。解锁失败不回滚目录,只回报。
+                        let minted = match (&data.get("vault_id"), &data.get("did")) {
+                            (Some(serde_json::Value::String(vault_id)), Some(serde_json::Value::String(did))) => {
+                                Some((vault_id.clone(), did.clone()))
+                            }
+                            _ => None,
+                        };
+                        if let Some((vault_id, did)) = minted {
+                            let mut unlocked = Vec::new();
+                            let mut failed = Vec::new();
+                            let kids: Vec<String> = data
+                                .get("keys")
+                                .and_then(serde_json::Value::as_array)
+                                .map(|keys| {
+                                    keys.iter()
+                                        .filter_map(|key| {
+                                            key.get("kid").and_then(serde_json::Value::as_str)
+                                        })
+                                        .map(str::to_owned)
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            if let Some(state) = self.vaults.get(&vault_id) {
+                                for kid in &kids {
+                                    let fragment = kid
+                                        .strip_prefix(&format!("{did}#"))
+                                        .filter(|value| !value.is_empty() && !value.contains('#'));
+                                    let opened = fragment.is_some_and(|fragment| {
+                                        state
+                                            .unlock_guarded(
+                                                self.config.service_uid,
+                                                &did,
+                                                Some(fragment),
+                                                secret.clone(),
+                                                || Ok(()),
+                                            )
+                                            .is_ok()
+                                    });
+                                    if opened {
+                                        unlocked.push(kid.clone());
+                                    } else {
+                                        failed.push(kid.clone());
+                                    }
+                                }
+                            } else {
+                                failed = kids;
+                            }
+                            if !self.record(json!({"event":"PROVISIONED","actor":actor,"vault_id":vault_id,"did":did,"unlocked":unlocked,"unlock_failed":failed})) {
+                                return Reply::code("AUDIT_UNAVAILABLE");
+                            }
+                            if let serde_json::Value::Object(map) = &mut data {
+                                map.insert("unlocked".into(), json!(unlocked));
+                                map.insert("unlock_failed".into(), json!(failed));
+                            }
+                        }
                         let mut reply = Reply::code("OK");
                         reply.data = Some(data);
                         reply
@@ -1255,6 +1311,129 @@ impl Boundary {
                     return Reply::code("AUDIT_UNAVAILABLE");
                 }
                 Reply::code("OK")
+            }
+            AdminRequest::SignFirstDocument {
+                vault_id,
+                did,
+                document,
+                domain,
+                challenge,
+            } => {
+                let Ok(now) = SystemClock.now() else {
+                    self.emergency();
+                    return Reply::code("AUDIT_UNAVAILABLE");
+                };
+                let root = {
+                    let db = match self.database.lock() {
+                        Ok(db) => db,
+                        Err(_) => {
+                            self.emergency();
+                            return Reply::code("AUDIT_UNAVAILABLE");
+                        }
+                    };
+                    let catalog = match db.catalog() {
+                        Ok(catalog) => catalog,
+                        Err(_) => {
+                            drop(db);
+                            self.emergency();
+                            return Reply::code("AUDIT_UNAVAILABLE");
+                        }
+                    };
+                    let keys: Vec<_> = catalog
+                        .keys
+                        .into_iter()
+                        .filter(|key| {
+                            key.vault_id == vault_id && key.did == did && key.state == "active"
+                        })
+                        .collect();
+                    // This request exists for exactly one moment: the keys were
+                    // just minted and nothing has been published. Once any key
+                    // carries a document digest, proving belongs to the agent's
+                    // SIGN_DOCUMENT_PROOF grant, not to the management plane.
+                    let roots: Vec<_> = keys
+                        .iter()
+                        .filter(|key| key.role == crate::persistence::catalog::KeyRole::Root)
+                        .collect();
+                    if keys.is_empty()
+                        || roots.len() != 1
+                        || keys
+                            .iter()
+                            .any(|key| key.document_digest != crate::persistence::GENESIS)
+                    {
+                        return Reply::code("ADMIN_OPERATION_INVALID");
+                    }
+                    // The signature may cover only the keys this DID was given:
+                    // a document carrying any other verification method would
+                    // publish material the catalog never approved.
+                    let methods: Vec<&str> = document
+                        .get("verificationMethod")
+                        .and_then(serde_json::Value::as_array)
+                        .map(|methods| {
+                            methods
+                                .iter()
+                                .filter_map(|method| {
+                                    method.get("id").and_then(serde_json::Value::as_str)
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if methods.len() != keys.len()
+                        || keys
+                            .iter()
+                            .any(|key| !methods.contains(&key.kid.as_str()))
+                    {
+                        return Reply::code("ADMIN_OPERATION_INVALID");
+                    }
+                    roots[0].clone()
+                };
+                let request = (|| -> Result<super::proofs::DocumentProofRequest> {
+                    // The first document has no proof yet, so only the id and the
+                    // `e1_` fingerprint can be checked before signing.
+                    crate::did::document::verify_path_identity(&did, &document)?;
+                    if serde_json::to_vec(&document)?.len() > 32768 {
+                        return Err(KeydError::Misuse("ADMIN_OPERATION_INVALID".into()));
+                    }
+                    let request = super::proofs::DocumentProofRequest::new(
+                        document.clone(),
+                        Some("assertionMethod"),
+                        domain.clone(),
+                        challenge.clone(),
+                    )?;
+                    request.verify_binding(&did, &root.kid)?;
+                    Ok(request)
+                })();
+                let Ok(request) = request else {
+                    return Reply::code("ADMIN_OPERATION_INVALID");
+                };
+                let Some(state) = self.vaults.get(&vault_id) else {
+                    return Reply::code("ADMIN_OPERATION_INVALID");
+                };
+                let signed = match state.sign_document_proof(
+                    self.config.service_uid,
+                    &root,
+                    &request,
+                    now.wall,
+                ) {
+                    Ok(signed) => signed,
+                    Err(KeydError::Locked) => return Reply::code("KEY_LOCKED"),
+                    Err(KeydError::Misuse(_)) => return Reply::code("ADMIN_OPERATION_INVALID"),
+                    Err(_) => {
+                        self.emergency();
+                        return Reply::code("AUDIT_UNAVAILABLE");
+                    }
+                };
+                if !self.record(json!({
+                    "event": "PROVISION_DOCUMENT_PROOF",
+                    "actor": actor,
+                    "vault_id": vault_id,
+                    "did": did,
+                    "kid": root.kid,
+                })) {
+                    return Reply::code("AUDIT_UNAVAILABLE");
+                }
+                let mut reply = Reply::code("OK");
+                reply.data = Some(json!({"document": signed.value, "kid": root.kid}));
+                reply
             }
             AdminRequest::Unlock { vault_id, did, kid } => {
                 let Some(passphrase) = secret else {

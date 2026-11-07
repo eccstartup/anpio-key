@@ -47,14 +47,39 @@ cd ~/code/anpio-key
 ```
 
 From the repository root, one command builds, provisions the accounts and starts
-the local preview. It creates no identity:
+the local preview. It only installs the service: it creates no identity, collects
+no passphrase and issues no grants.
 
 ```sh
 ./install.sh
 ```
 
-Provision the identity next. A protected install does not mint new keys, so an
-installed preview is given an identity that already exists:
+Provision an identity next. The install itself mints nothing, collects no
+passphrase and issues no grant — it only installs the service.
+
+A new identity is created straight into the service, with one human confirmation:
+
+```sh
+anpio-cli did create --host awiki.me --handle NAME --email you@example.com \
+  --agent NAME --key anpio-key
+#   → anpio-key asks for a new passphrase twice on this terminal, mints the root,
+#     device-signing and agreement keys, seals and unlocks them, publishes the
+#     identity's policies and issues its grants; the CLI proofs the document,
+#     installs the first document in the vault, registers the handle, and prints
+#     the did attach command for the agent account
+```
+
+The passphrase appears only on that terminal: never in argv, the environment,
+MCP, or the printed handoff. `--device`, `--target`, `--method` and
+`--ecdh-peer` shape the document's device name, the HTTP policy and the ECDH
+grant. Afterwards the agent signs by itself; nobody is asked again.
+
+An identity that already exists with local keys is adopted instead. `--adopt`
+migrates the three DID-bound keys into the vault without changing the DID or its
+published document, confirms the root / hot / key-agreement roles, enables
+`sign_document_proof`, publishes the HTTP and document-proof policies, issues
+one grant per purpose to the agent account, unlocks the two keys, installs the
+CLI and writes an agent record under `/Library/ANPIOKey/agent/home`:
 
 ```sh
 sudo ./install.sh --adopt --identity ~/.anpio-cli/NAME/default/identity.json \
@@ -64,21 +89,11 @@ sudo ./install.sh --adopt --identity ~/.anpio-cli/NAME/default/identity.json \
   --target https://awiki.me/user-service/v1/did-auth/rpc
 ```
 
-`--adopt` migrates the three DID-bound keys into the vault without changing the
-DID or its published document, confirms the root / hot / key-agreement roles,
-enables `sign_document_proof`, publishes the HTTP and document-proof policies,
-issues one grant per purpose to the agent account, unlocks the two keys, installs
-the CLI and writes an agent record under `/Library/ANPIOKey/agent/home`. Every
-passphrase is read by Anpio Key from the human terminal; nothing is taken from
-arguments or the environment. The run is restartable, and it never deletes the
-source store. `--dry-run` prints the plan and touches nothing. Grants and unlocks
-happen only after the last service restart, because a restart revokes them.
-
-New identities cannot be provisioned into the service yet (see
-[TODO.md](../../TODO.md)), so `anpio-cli did create --key anpio-key` refuses on a
-machine with the service installed and names this command. Named keys have no
-enrollment path: `--bootstrap` remains the legacy one-shot for a *disposable
-preview identity*, not for real keys.
+`--adopt` reads that identity's passphrases through Anpio Key from the human
+terminal; nothing is taken from arguments or the environment. The run is
+restartable, and it never deletes the source store. `--dry-run` prints the plan
+and touches nothing. Grants and unlocks happen only after the last service
+restart, because a restart revokes them.
 
 `--bootstrap --did-host HOST --target https://...` (or answer the terminal
 prompts) runs that legacy one-shot: it creates a disposable preview identity,
@@ -230,8 +245,10 @@ See the [daily workflow](../LOCAL-USE.md) for explicit grant creation and runnin
 the entire Agent under its own UID.
 
 Stopping/restarting leaves configuration/state intact but locks keys and
-invalidates grants. `KeepAlive=false`; crash recovery does not automatically
-restart/unlock. The normal update is `./install.sh --upgrade`; it builds as you,
+invalidates grants. Re-unlock as above, then issue the grants again
+(`anpio-key grant create --purpose …`) and record the new ids
+(`anpio-cli key grant <id> --purpose …`). `KeepAlive=false`; crash recovery does
+not automatically restart/unlock. The normal update is `./install.sh --upgrade`; it builds as you,
 stops/starts the job through `update-local.py` and skips everything when the
 installed digest already matches, so it never restarts for a no-op. `--dry-run`
 prints the plan. For an independently reviewed digest, run the updater directly

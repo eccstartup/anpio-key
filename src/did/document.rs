@@ -305,6 +305,20 @@ pub fn publishable(
 /// 2. **自己重算** `e1_` 指纹,和对得上才算过 —— 给的是能查原因的错误;
 /// 3. 上游的规范性检查(含 proof 验签)。
 pub fn verify_path_binding(did: &str, document: &Value) -> Result<()> {
+    verify_path_identity(did, document)?;
+    if !upstream_accepts_the_proof(document)? {
+        return Err(KeydError::Did(format!(
+            "the document for {did} failed the normative did:wba binding check"
+        )));
+    }
+    Ok(())
+}
+
+/// [`verify_path_binding`] 的前两道,不要求文档已经签好。
+///
+/// 只给"正在签这份文档"的那条路用:第一份文档此刻还没有 proof,而第 3 道
+/// 检查验的就是 proof。id 与 `e1_` 指纹的绑定仍然照查。
+pub fn verify_path_identity(did: &str, document: &Value) -> Result<()> {
     let parts = parse_did_wba(did)?;
     let expected = parts
         .e1_segment()
@@ -333,12 +347,6 @@ pub fn verify_path_binding(did: &str, document: &Value) -> Result<()> {
     if actual != expected {
         return Err(KeydError::Did(format!(
             "{did} claims fingerprint {expected}, but its key hashes to {actual}"
-        )));
-    }
-
-    if !upstream_accepts_the_proof(document)? {
-        return Err(KeydError::Did(format!(
-            "the document for {did} failed the normative did:wba binding check"
         )));
     }
     Ok(())
@@ -514,6 +522,35 @@ mod tests {
     fn a_did_without_an_e1_segment_is_refused() {
         let (_, doc) = signed_document(11);
         assert!(verify_path_binding("did:wba:example.com:user:alice", &doc).is_err());
+    }
+
+    /// The check `SignFirstDocument` runs before the first proof exists: no proof to verify,
+    /// but the id and the key still have to be this DID's — otherwise the service would proof
+    /// a document that belongs to somebody else.
+    #[test]
+    fn an_unsigned_document_still_has_to_be_the_dids_own() {
+        let k = key(13);
+        let (did, unsigned) = build_unsigned(&spec(), &k.verifying_key().unwrap()).unwrap();
+        assert!(verify_path_identity(&did, &unsigned).is_ok());
+
+        let mut imposter = unsigned.clone();
+        imposter["id"] = Value::String("did:wba:example.com:user:alice:e1_other".into());
+        assert!(
+            verify_path_identity(&did, &imposter).is_err(),
+            "a document that names another DID must be refused even before it is signed"
+        );
+    }
+
+    #[test]
+    fn an_unsigned_document_whose_key_does_not_hash_to_the_did_is_refused() {
+        let mine = key(14);
+        let other = key(15);
+        let (did, _) = build_unsigned(&spec(), &mine.verifying_key().unwrap()).unwrap();
+        let (_, theirs) = build_unsigned(&spec(), &other.verifying_key().unwrap()).unwrap();
+
+        let mut imposter = theirs.clone();
+        imposter["id"] = Value::String(did.clone());
+        assert!(verify_path_identity(&did, &imposter).is_err());
     }
 
     #[test]

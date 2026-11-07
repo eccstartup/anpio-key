@@ -20,20 +20,22 @@ Linux 上在仓库根目录执行：
 ./install.sh
 ```
 
-它构建 release、校验摘要、创建服务账号、安装并启动 systemd 服务，**不生成身份**。装上之后按第 2 节创建身份和授权。
+它构建 release、校验摘要、创建服务账号、安装并启动 systemd 服务，**只装服务**：不建身份、不收口令、不发 grant。macOS 上跑 `./install.sh` 语义相同（见第 5 节）。
 
-身份由 `anpio-cli did create` 一条命令建完（读服务信息、预检 handle、生成钥匙、签文档、注册）：
+装好之后，新身份用一条命令建进服务，全程**一次口令确认**：
 
 ```bash
-anpio-cli did create --host awiki.me --handle mybot --email you@example.com
+anpio-cli did create --host awiki.me --handle mybot --email you@example.com \
+  --agent mybot --key anpio-key
 ```
 
-默认钥匙由 CLI 本机保管。要让本机的 `anpio-key` 保管钥匙，由**管理员在自己的终端**加 `--key anpio-key`；CLI 只拿到钥匙名和公钥，口令只由 daemon 从 `/dev/tty` 读取。**机器上已经装了受保护服务时，这条命令会拒绝**：服务还不能为新建身份 provision 钥匙，已有身份要走接管路径（macOS `./install.sh --adopt`，见第 5 节；Linux 的接管命令尚未提供）。
+CLI 准备 `ProvisionIdentity`（坐标、device、策略、grant），服务的 `complete-secret-operation --new-secret` 在**你的终端**读两遍新口令，铸根钥匙、设备签名钥匙和 X25519 协商钥匙，用同一口令封存并解锁，`AddKeys` + 发布策略 + 发 grant 在一个事务里完成；CLI 再用根钥匙签文档、把第一份文档 `InstallDocument` 进 vault、注册 handle，最后打印给 Agent 管理员的 `did attach` 命令。口令只在终端出现，不进 argv、环境变量、MCP 或日志；之后 agent 自己签名，不再问人。
 
-> [!IMPORTANT]
-> 受保护服务只认已经迁入 vault、并在 catalog 里登记的 DID 绑定钥匙。`--key anpio-key` 建出来的三把命名钥匙还没有登记路径（见 [TODO](../TODO.md)），所以它们不能在受保护平面上签名。macOS 上用 `./install.sh --adopt` 把已有身份接管进服务；Linux 上暂时仍只能用 `./install.sh --bootstrap` 让服务拿到一把能签的钥匙。
+`--target`/`--method` 决定 HTTP 策略覆盖的路径和方法，`--ecdh-peer` 才发 ECDH grant，`--device` 决定文档里的设备名。不带 `--key anpio-key` 时钥匙仍由 CLI 本机保管（0600 文件），不进入服务。
 
-老路仍然是一条命令完成安装和初始化：
+已有的身份（钥匙还在本地 store）用接管：macOS 上是 `sudo ./install.sh --adopt`（见第 5 节）；Linux 的接管命令尚未提供。接管只迁移钥匙，DID 和已发布文档一字不改。
+
+老路仍然是一条命令完成安装和初始化（**仅用于一次性预览身份**，不要用于真实钥匙）：
 
 ```bash
 ./install.sh --bootstrap --did-host agents.example.com \
@@ -87,7 +89,7 @@ sudo ./install.sh --adopt --identity ~/.anpio-cli/mybot/default/identity.json \
 
 ### 2.1 准备身份（受保护迁移走的路线）
 
-新身份优先用 `anpio-cli did create`（见第 1 节），但受保护服务只接受已经迁入 vault 的 DID 绑定钥匙，命名钥匙没有登记路径。macOS 上交给 `./install.sh --adopt` 完成接管；Linux 上要服务真正持有并签一把钥匙，本节这条老路仍要完整走一遍，`spec` / `keygen` / `publish` 继续按兼容别名使用。
+新身份用 `anpio-cli did create --key anpio-key` 直接 provision 进服务（见第 1 节）：钥匙由服务铸造、登记在 catalog，CLI 自动发 grant。已有身份（钥匙还在本地 store）在 macOS 上交给 `./install.sh --adopt` 完成接管；Linux 的接管命令尚未提供，需要让服务持有并签一把已有身份时，本节这条老路仍要完整走一遍，`spec` / `keygen` / `publish` 继续按兼容别名使用。
 
 先在 root 控制的暂存目录里生成身份。`keygen` 会在终端显示一次 24 词，确认抄好后输入口令；它是唯一的备份机会，之后没有导出路径。`keygen` 生成的是绑定钥匙（root），日常签名还需要一把单独的热钥匙：
 
@@ -187,6 +189,8 @@ $ADMIN commit --operation-id PREPARED_OPERATION_UUID --digest PREPARED_DIGEST
 
 ### 2.4 创建 grant
 
+新身份由 `did create --key anpio-key` 自动发好整套 grant（HTTP、文档 proof、设备断言、三种 origin proof，加 `--ecdh-peer` 才有 ECDH）；本节只在手工建身份、补发或轮换时用。手工创建时写成管理变更：
+
 ```json
 {
   "kind": "Grant",
@@ -211,7 +215,7 @@ $ADMIN unlock --vault-id VAULT_UUID --did DID --kid FULL_KID
 $ADMIN status
 ```
 
-口令由管理 CLI 从终端读取，不经过 Agent、MCP 或聊天。解锁只让钥匙可用，不会自己产生授权；授权来自上面的 grant。`status` 应报告 `signing_available=true`。
+口令由管理 CLI 从终端读取，不经过 Agent、MCP 或聊天。解锁只让钥匙可用，不会自己产生授权；授权来自上面的 grant。`status` 应报告 `signing_available=true`。服务重启会锁住钥匙并作废 grant：重启后重新解锁，再按 2.4 重新发 grant 并把新 id 记进身份（`anpio-cli key grant <id> --purpose …`）。
 
 ### 2.6 设备入组与撤销
 

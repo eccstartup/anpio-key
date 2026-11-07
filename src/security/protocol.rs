@@ -125,6 +125,23 @@ pub enum AdminRequest {
         did: String,
         kid: String,
     },
+    /// Proof the first document of a just-provisioned identity.
+    ///
+    /// The human administrator runs `did create` and the root key is in the
+    /// vault, but the management account deliberately cannot open the sign
+    /// socket. This is the one signing request the management plane accepts:
+    /// only while every active key of the DID is still unpublished, only over a
+    /// document that names exactly those keys, and only with the root key the
+    /// passphrase unlocked moments earlier. Every later proof goes through the
+    /// agent's `SIGN_DOCUMENT_PROOF` grant.
+    #[serde(rename = "SIGN_FIRST_DOCUMENT")]
+    SignFirstDocument {
+        vault_id: String,
+        did: String,
+        document: serde_json::Value,
+        domain: Option<String>,
+        challenge: Option<String>,
+    },
 }
 
 #[derive(Deserialize, Serialize)]
@@ -272,6 +289,29 @@ mod tests {
             assert!(!error.to_string().contains("secret"));
         }
         assert!(read::<_, Envelope<DataRequest>>(&mut &[0, 0, 0, 1, 3][..]).is_err());
+    }
+
+    #[test]
+    fn first_document_proof_is_management_only_and_bounded() {
+        let ok = parse::<Envelope<AdminRequest>>(
+            r#"{"version":2,"request":{"operation":"SIGN_FIRST_DOCUMENT","vault_id":"v","did":"d","document":{"id":"d"},"domain":"example.com","challenge":"ab"}}"#,
+        );
+        assert!(matches!(
+            ok.unwrap().request,
+            AdminRequest::SignFirstDocument { .. }
+        ));
+        assert!(parse::<Envelope<AdminRequest>>(
+            r#"{"version":2,"request":{"operation":"SIGN_FIRST_DOCUMENT","vault_id":"v","did":"d","document":{"id":"d"},"kid":"d#key-1"}}"#,
+        )
+        .is_err());
+        assert!(parse::<Envelope<AdminRequest>>(
+            r#"{"version":2,"request":{"operation":"SIGN_FIRST_DOCUMENT","vault_id":"v","did":"d"}}"#,
+        )
+        .is_err());
+        assert!(parse::<Envelope<DataRequest>>(
+            r#"{"version":2,"request":{"operation":"SIGN_FIRST_DOCUMENT","vault_id":"v","did":"d","document":{"id":"d"}}}"#,
+        )
+        .is_err());
     }
 
     #[test]

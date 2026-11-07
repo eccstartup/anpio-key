@@ -111,7 +111,7 @@ git clone https://github.com/eccstartup/anpio-key.git && cd anpio-key
 ./install.sh
 ```
 
-先看计划不改系统：`./install.sh --dry-run`；物理 TPM 加 `--tpm-device`。安装器创建服务、管理员与 Agent 三个系统账号、受保护配置和 systemd 单元，**不生成身份**。已经是这个状态时再跑一次只会打印状态并退出 0，不构建、不提权。
+先看计划不改系统：`./install.sh --dry-run`；物理 TPM 加 `--tpm-device`。安装器创建服务、管理员与 Agent 三个系统账号、受保护配置和 systemd 单元，**不生成身份、不收口令、不发 grant**。已经是这个状态时再跑一次只会打印状态并退出 0，不构建、不提权。
 
 日常命令：
 
@@ -124,15 +124,16 @@ git clone https://github.com/eccstartup/anpio-key.git && cd anpio-key
 
 状态不符退出 2（半成品安装、卸载后只剩配置），缺前置退出 4（cargo、python3、systemd）。
 
-装完之后建身份。DID、handle、文档与注册由 `anpio-cli did create` 一条命令完成，默认钥匙由 CLI 本机保管：
+装完之后建身份。在装了受保护服务的机器上，新身份直接 provision 进服务：加 `--key anpio-key`，全程**一次口令确认**。CLI 准备 `ProvisionIdentity`（坐标、device、策略、grant），服务的 `complete-secret-operation --new-secret` 在你的终端读两遍新口令，铸根钥匙、设备签名钥匙和 X25519 协商钥匙，用同一口令封存并解锁，`AddKeys` + 发布策略 + 发 grant 在一个事务里完成；CLI 再用根钥匙签文档、把第一份文档 `InstallDocument` 进 vault、注册 handle，最后打印给 Agent 管理员的 `did attach` 命令。之后 agent 自己签名，不再问人。
 
 ```bash
-anpio-cli did create --host awiki.me --handle mybot --email you@example.com
+anpio-cli did create --host awiki.me --handle mybot --email you@example.com \
+  --agent mybot --key anpio-key
 ```
 
-在装了受保护服务的机器上，这是受保护流程的第一步：身份先由 CLI 建出来，再交给接管命令把钥匙迁进服务（macOS 上是 `sudo ./install.sh --adopt`，见下文）。`--key anpio-key` 在这类机器上会**拒绝**：服务还不能为新建身份 provision 钥匙，已有身份才走接管。
+已有身份（钥匙还在本地 store）走接管：macOS 上是 `sudo ./install.sh --adopt`，见下文。不带 `--key anpio-key` 时钥匙由 CLI 本机保管，不进入服务。
 
-授权是独立的一步。接管会自动建好两个 grant；手工重建时用完整 kid 指名钥匙、用 `--purpose` 区分用途：`anpio-key grant create --kid '<did>#<agent>/<profile>-sign' --target URL`（HTTP，Hot 角色）和 `anpio-key grant create --kid '<did>#key-1' --purpose document-proof`（文档 proof，Root 角色）。命令打印摘要、确认一次，然后走 `prepare` / `commit`；`anpio-cli key grant <id> --purpose http|document-proof` 把编号记进 store。`did create --key anpio-key` 铸出来的命名钥匙不进 catalog，也不能在受保护平面上签名（见 [TODO](TODO.md)）。受保护部署里要让服务拿到一把能签的钥匙，Linux 上仍走下面的 `--bootstrap` 老路。
+授权是独立的一步，只在手工重建时需要：接管和 provision 都会自动发好 grant。手工重建时用完整 kid 指名钥匙、用 `--purpose` 区分用途：`anpio-key grant create --kid '<did>#<agent>/<profile>-sign' --target URL`（HTTP，Hot 角色）和 `anpio-key grant create --kid '<did>#key-1' --purpose document-proof`（文档 proof，Root 角色）；`purpose`（设备断言）、`origin-proof-agent`/`-group`/`-service`、`object-proof`、`ecdh` 也各有名字。命令打印摘要、确认一次，然后走 `prepare` / `commit`；`anpio-cli key grant <id> --purpose http|document-proof|…` 把编号记进 store。命名钥匙（没有受保护服务的开发路径）不进 catalog，只能在开发 daemon 上签。
 
 已有身份或钥匙的迁移按[本机使用指南](deploy/LOCAL-USE.md)：`keygen` 生成四把、`migrate-vault` 离线迁入、`EnrollVault` / `ConfirmRole` 登记、发布策略，再建 grant。这条老路仍然是一步式的：
 

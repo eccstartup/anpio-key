@@ -189,6 +189,32 @@ impl Client {
         self.reply()
     }
 
+    /// Proof the first document of a DID whose keys are still unpublished.
+    pub fn sign_first_document(
+        mut self,
+        vault_id: String,
+        did: String,
+        document: serde_json::Value,
+        domain: Option<String>,
+        challenge: Option<String>,
+    ) -> Result<Reply> {
+        self.management()?;
+        protocol::write(
+            &mut self.stream,
+            &Envelope {
+                version: VERSION,
+                request: AdminRequest::SignFirstDocument {
+                    vault_id,
+                    did,
+                    document,
+                    domain,
+                    challenge,
+                },
+            },
+        )?;
+        self.reply()
+    }
+
     pub fn complete_secret_operation(
         mut self,
         operation_id: String,

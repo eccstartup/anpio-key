@@ -332,6 +332,12 @@ pub enum AdminCommand {
         operation_id: String,
         #[arg(long)]
         digest: String,
+        /// Ask twice for a *new* passphrase (identity provisioning).
+        #[arg(long)]
+        new_secret: bool,
+        /// One-line JSON on stdout; every prompt stays on /dev/tty.
+        #[arg(long)]
+        json: bool,
     },
     ListPrincipals,
     Catalog,
@@ -353,6 +359,27 @@ pub enum AdminCommand {
         operation_id: String,
         #[arg(long)]
         digest: String,
+    },
+    /// Proof the first document of a DID whose keys are still unpublished.
+    ///
+    /// Only valid right after `ProvisionIdentity`: every active key of the DID
+    /// must still carry the genesis document digest, and the document may name
+    /// exactly those keys. The root key must be unlocked. Later proofs go
+    /// through the agent's `SIGN_DOCUMENT_PROOF` grant.
+    SignFirstDocument {
+        #[arg(long)]
+        vault_id: String,
+        #[arg(long)]
+        did: String,
+        /// The unsigned DID document (JSON).
+        #[arg(long)]
+        document: PathBuf,
+        /// Bare hostname for the proof, as the host's registration expects.
+        #[arg(long)]
+        domain: Option<String>,
+        /// Fresh 32-hex challenge.
+        #[arg(long)]
+        challenge: Option<String>,
     },
     Status,
     LockAll,
@@ -720,10 +747,20 @@ impl GrantPurpose {
         }
     }
 
-    fn role(self) -> crate::persistence::catalog::KeyRole {
+    /// The key roles the management plane accepts for this purpose. This is
+    /// `grants::role_for` itself, not a copy: a provisioned identity has no Hot
+    /// key (the service gives its HTTP grant to the device-signing key), and a
+    /// restart revokes every grant — so this check must not be stricter than
+    /// the plane, or those identities could never be re-granted.
+    fn roles(self) -> &'static [crate::persistence::catalog::KeyRole] {
+        crate::persistence::grants::role_for(self.purpose()).unwrap_or(&[])
+    }
+
+    fn purpose(self) -> crate::persistence::policy::Purpose {
+        use crate::persistence::policy::Purpose;
         match self {
-            Self::HttpAuthentication => crate::persistence::catalog::KeyRole::Hot,
-            Self::DocumentProof => crate::persistence::catalog::KeyRole::Root,
+            Self::HttpAuthentication => Purpose::HttpAuthentication,
+            Self::DocumentProof => Purpose::DocumentProof,
         }
     }
 
@@ -1359,11 +1396,43 @@ pub fn run(cli: Cli) -> Result<()> {
                     operation_id,
                     digest,
                 } => client.commit(operation_id, digest)?,
+                AdminCommand::SignFirstDocument {
+                    vault_id,
+                    did,
+                    document,
+                    domain,
+                    challenge,
+                } => {
+                    use std::io::Read;
+                    let limit = crate::security::protocol::MAX_FRAME / 2;
+                    let mut bytes = Vec::new();
+                    std::fs::File::open(document)?
+                        .take((limit + 1) as u64)
+                        .read_to_end(&mut bytes)?;
+                    if bytes.len() > limit {
+                        return Err(KeydError::Misuse("management input too large".into()));
+                    }
+                    let document: serde_json::Value = crate::security::json::decode(&bytes)?;
+                    client.sign_first_document(vault_id, did, document, domain, challenge)?
+                }
                 AdminCommand::Status => client.capabilities()?,
-                AdminCommand::CompleteSecretOperation { operation_id, digest } => {
+                AdminCommand::CompleteSecretOperation {
+                    operation_id,
+                    digest,
+                    new_secret,
+                    ..
+                } => {
                     client.capabilities()?;
                     let tty = crate::tty::open()?;
-                    let secret = crate::tty::read_secret(&tty, "Management root passphrase: ")?;
+                    let secret = if new_secret {
+                        crate::tty::read_secret_twice(
+                            &tty,
+                            "New identity passphrase: ",
+                            "Repeat passphrase: ",
+                        )?
+                    } else {
+                        crate::tty::read_secret(&tty, "Management root passphrase: ")?
+                    };
                     AdminClient::connect(&args.config, true)?.complete_secret_operation(operation_id, digest, secret)?
                 }
                 AdminCommand::LockAll => client.lock_all()?,
@@ -2493,12 +2562,14 @@ fn grant_create(root: Option<&Path>, args: GrantCreateArgs) -> Result<()> {
                 if known.is_empty() { "(none)".to_string() } else { known.join(", ") }
             ))
         })?;
-    if key.role != args.purpose.role() {
+    let roles = args.purpose.roles();
+    if !roles.contains(&key.role) {
+        let allows: Vec<&str> = roles.iter().map(role_name).collect();
         return Err(KeydError::Misuse(format!(
             "{enrolled_kid} is {}, but --purpose {} needs a {} key",
             role_name(&key.role),
             args.purpose.policy_name(),
-            role_name(&args.purpose.role())
+            allows.join(" or ")
         )));
     }
 
@@ -3405,14 +3476,20 @@ mod tests {
         assert!(!policy_covers(&other, "https://awiki.me", "POST"));
     }
 
-    /// 一个 purpose 只由一种角色持有:HTTP 要 Hot,文档 proof 要 Root。
-    /// 迁移前 `grant create` 把 HTTP 许可签给 `#key-1`,正是因为这条映射
-    /// 不存在;现在它是 `grant create` 的硬前置。
+    /// A purpose's roles are the plane's `role_for`, not a copy of it: HTTP
+    /// accepts the device-signing key a provisioned identity actually has, so
+    /// re-granting after a restart is possible for it too.
     #[test]
-    fn a_grant_purpose_names_the_one_key_role_that_may_hold_it() {
+    fn a_grant_purpose_names_the_key_roles_the_plane_accepts() {
         use crate::persistence::catalog::KeyRole;
-        assert_eq!(GrantPurpose::HttpAuthentication.role(), KeyRole::Hot);
-        assert_eq!(GrantPurpose::DocumentProof.role(), KeyRole::Root);
+        assert_eq!(
+            GrantPurpose::HttpAuthentication.roles(),
+            &[KeyRole::Hot, KeyRole::DeviceSigning][..]
+        );
+        assert_eq!(
+            GrantPurpose::DocumentProof.roles(),
+            &[KeyRole::Root][..]
+        );
         assert_eq!(
             GrantPurpose::HttpAuthentication.policy_name(),
             "http-authentication"

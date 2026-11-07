@@ -7,12 +7,24 @@ A deterministic loopback Messages API drives the tool call; it performs no model
 inference and uses no human model credential. This does not accept a live model
 provider, arbitrary plugin set, remote business service, or real identity.
 
-For a fresh disposable preview, `./install.sh --bootstrap` now creates the
+The install itself only installs the service: no identity is minted, no
+passphrase is collected and no grant is issued. A new identity is then created
+into it with `anpio-cli did create --key anpio-key` — one passphrase confirmation
+on the human terminal, after which `anpio-key` mints, seals and unlocks the
+root, device-signing and agreement keys, publishes the policies, issues the
+grants and the CLI installs the first document; the agent then signs by itself.
+
+For a fresh disposable preview, `./install.sh --bootstrap` creates the
 identity, migrates it, publishes a policy, issues one grant and unlocks the hot
 key automatically. For an existing identity, `./install.sh --adopt` performs the
 cutover below in one restartable run. This document remains the procedure for the
 complete framework and as the reference for what each cutover step must produce
 when a source needs manual review.
+
+A restart locks the keys and revokes every grant. Before the framework signs
+again, re-unlock through `admin unlock --native-ui` and issue the grants again
+(`anpio-key grant create --purpose …`), recording the new ids in the identity
+(`anpio-cli key grant <id> --purpose …`).
 
 ## Temporary acceptance, human terminal
 

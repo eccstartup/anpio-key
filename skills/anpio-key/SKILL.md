@@ -47,15 +47,21 @@ anpio-key key rotate --name NAME     # 同名换一把，旧的作废，算法�
 anpio-cli did create --host awiki.me --handle mybot --email you@example.com
 ```
 
-默认钥匙由 CLI 本机保管。`did create --key anpio-key` 只在**没有安装受保护服务**的机器上用：它让本机的 `anpio-key` 铸三把**命名**钥匙，身份文件里只记名字，但这三把仍在你的账号下，不构成边界。
+`did create --key anpio-key` 有两种落法，取决于机器上有没有受保护服务。
+
+**装了服务**（macOS `/Library/ANPIOKey/service.json`，Linux `/etc/anpio-key/service.json`）：新身份被 **provision 进服务**，整个过程只要一次人类确认。CLI 准备一个 `ProvisionIdentity`（host/port/path segments、device、策略、grant），服务端以 `complete-secret-operation --new-secret` 在你的终端读两遍**新口令**，铸根钥匙（`#key-1`）、设备签名钥匙（`{device}-sign`）和 X25519 协商钥匙（`{device}-agreement`），用同一个口令封存并解锁，然后在一个事务里 `AddKeys` + 发布策略 + 发 grant。CLI 拿回公钥组文档、用根钥匙签 `SIGN_DOCUMENT_PROOF`、把第一份文档 `InstallDocument` 进 vault、注册 handle，最后打印 Agent 管理员的 `did attach` 命令和每个 grant id。之后 agent 自己签名，不再问人。
 
 ```bash
-anpio-cli did create --host awiki.me --handle mybot --email you@example.com --key anpio-key
+anpio-cli did create --host awiki.me --handle mybot --email you@example.com \
+  --agent mybot --key anpio-key
+#   6 policies · 6 grants · 一次口令确认（口令只在终端出现，不进 argv/env）
 ```
 
-这时 CLI 调用三次 `anpio-key key create --json`（两次 Ed25519：根钥匙和设备签名钥匙；一次 `--algorithm x25519`：设备协商钥匙），再用 `anpio-key key sign-document` 让根钥匙给 DID 文档签 proof；身份文件里只记三把钥匙的名字，没有任何私钥、seed 或口令字节。三条 `key create` 会各自要求口令并各显示一次 24 词。非交互终端直接拒绝，不会偷偷改用本机钥匙。
+`--target`/`--method` 决定 HTTP 策略覆盖的路径和方法，`--ecdh-peer` 决定是否发 ECDH grant，`--device` 决定文档里的设备名。**安装本身不收口令、不建身份、不发 grant；口令只出现在这一次创建里。**
 
-机器上装了受保护服务（macOS `/Library/ANPIOKey/service.json`，Linux `/etc/anpio-key/service.json`）之后，这条命令会**拒绝**并给出 `install.sh --adopt`：新身份的钥匙还不能被服务 provision，已有的身份则接管进去（见 A/B 节）。命名钥匙**不走 grant**；开发试跑用的 `serve --development --allow-named-key-signing` 只在 C 节出现，它不建边界，也不是受保护安装的签名路。
+**没装服务**：CLI 调用三次 `anpio-key key create --json`（两次 Ed25519：根钥匙和设备签名钥匙；一次 `--algorithm x25519`：设备协商钥匙），再用 `anpio-key key sign-document` 让根钥匙给 DID 文档签 proof；身份文件里只记三把钥匙的名字，没有任何私钥、seed 或口令字节。但这三把仍在你的账号下，**不构成边界**。三条 `key create` 会各自要求口令并各显示一次 24 词。非交互终端直接拒绝，不会偷偷改用本机钥匙。这样建起来的身份之后可以用 `install.sh --adopt` 迁进受保护安装。
+
+已有的身份用 adopt 接管（见 A/B 节）；命名钥匙**不走 grant**。开发试跑用的 `serve --development --allow-named-key-signing` 只在 C 节出现，它不建边界，也不是受保护安装的签名路。
 
 `grant create` 只给**已经登记在受保护 catalog 里**的钥匙签 grant。用完整的 kid 指名钥匙，不需要本机钥匙：
 
@@ -69,7 +75,7 @@ anpio-key grant create --config /Library/ANPIOKey/service.json \
   --kid '<did>#key-1' --purpose document-proof
 ```
 
-HTTP 和文档 proof 是两个不同的 grant，用 `--purpose` 区分；`--key <本地名字>` 仍可用，但它只用来解析 DID 并核对 `e1_` 段，权威仍是 catalog。拿到 grant id 后记进 store：`anpio-cli key grant <id> --purpose http`（或 `--purpose document-proof`）。
+HTTP 和文档 proof 是两个不同的 grant，用 `--purpose` 区分；`purpose`（设备断言）、`origin-proof-agent`/`-group`/`-service`、`object-proof`、`ecdh`（协商钥匙）也各有名字。`--key <本地名字>` 仍可用，但它只用来解析 DID 并核对 `e1_` 段，权威仍是 catalog。拿到 grant id 后记进 store：`anpio-cli key grant <id> --purpose http`（或 `--purpose document-proof` 等）。
 
 `spec` / `keygen` / `publish` 已从主路径移出，只留兼容别名（`--help` 不再列出，执行时会提示改用 `key create` 或 `anpio-cli did create`）。已有用坐标脚本生成的身份继续可用，迁移说明见最后一节。
 
@@ -87,7 +93,11 @@ HTTP 和文档 proof 是两个不同的 grant，用 `--purpose` 区分；`--key 
 
 先看计划不改系统：`./install.sh --dry-run`。物理 TPM：加 `--tpm-device`。
 
-**接管身份（adopt）** 受保护安装不铸造新身份，而是把**已有**的三把 DID 绑定钥匙迁进 vault，DID 和已发布文档一字不改：
+安装只装服务：不收口令、不建身份、不发 grant。空服务里没有 vault、没有 catalog、没有任何钥匙。
+
+**创建身份（provision）** 装好服务之后，用 `anpio-cli did create --key anpio-key` 把**新**身份建进服务（见前节）：一次口令确认，服务端 `complete-secret-operation --new-secret` 铸三把钥匙、`AddKeys`、发布策略、发 grant，CLI 签文档、`InstallDocument`、注册 handle，最后打印 `did attach`。这是日常创建身份的方式。
+
+**接管已有身份（adopt）** 已有身份（钥匙还在本地 store）用 adopt 把三把 DID 绑定钥匙迁进 vault，DID 和已发布文档一字不改：
 
 ```bash
 sudo ./install.sh --adopt --identity ~/.anpio-cli/mybot/default/identity.json \
@@ -160,9 +170,9 @@ sudo -u operator /usr/local/libexec/anpio-key admin \
 
 已安装时直接跑 `./install.sh` 只打印状态并退出 0。日常用 `--status` / `--verify` / `--upgrade` / `--uninstall`，语义与 Linux 一节相同：升级保留配置和状态，卸载保留 `service.json`、`state/` 和 `_anpio*` 账号。不要手工删这些路径或账号。
 
-**接管身份** 和 Linux 一样用 `./install.sh --adopt`（见 A 节），把已有的 DID 绑定钥匙迁进 `/Library/ANPIOKey`。受保护安装不铸造新身份，`anpio-cli did create --key anpio-key` 在这台机器上会拒绝；`--bootstrap` 那条一次性预览路径仍然保留，用于没有现成身份的实验。配置在 `/Library/ANPIOKey/service.json`。
+**创建与接管身份** 装好服务之后，新身份用 `anpio-cli did create --key anpio-key` 直接 provision 进 `/Library/ANPIOKey`（一次口令确认，见前节）；已有身份用 `./install.sh --adopt`（见 A 节）把 DID 绑定钥匙迁进来。`--bootstrap` 那条一次性预览路径仍然保留，用于没有现成身份的实验。配置在 `/Library/ANPIOKey/service.json`。
 
-`grant create` 在 macOS 上要带 `--config /Library/ANPIOKey/service.json`（命令默认值指向 Linux 的路径）。接管的身份由脚本自动建 grant；手工重建时用 `--kid '<did>#<agent>/<profile>-sign'`（HTTP）和 `--kid '<did>#key-1' --purpose document-proof`（文档 proof）。管理员账号（uid 501）按设计连不上签名口，签名必须由 `_anpagent` 运行。
+`grant create` 在 macOS 上要带 `--config /Library/ANPIOKey/service.json`（命令默认值指向 Linux 的路径）。接管的身份由脚本自动建 grant，新身份由 `did create` 自动发 grant；手工重建时用 `--kid '<did>#<agent>/<profile>-sign'`（HTTP）和 `--kid '<did>#key-1' --purpose document-proof`（文档 proof），其余 purpose 见前节。管理员账号（uid 501）按设计连不上签名口，签名必须由 `_anpagent` 运行。
 
 **手动安装**
 
@@ -229,7 +239,7 @@ anpio-key key sign-document --name bot --keyid DID#key-1 \
   --domain awiki.me --challenge <32 hex>
 ```
 
-它写一行自己的审计。`anpio-cli did create --key anpio-key` 调用的就是这条。
+它写一行自己的审计。**没装服务**时 `anpio-cli did create --key anpio-key` 调用的就是这条；装了服务时走前节的 provision，由 `SIGN_DOCUMENT_PROOF` 签。
 
 开发模式所有文件都在你自己的账号下，**同一账号的任意代码都能拿到密钥**，不构成隔离。
 
@@ -253,6 +263,8 @@ $ADMIN unlock --vault-id VAULT_ID --did DID --kid FULL_KID --native-ui
 ```
 
 所有变更走两步：`prepare --file change.json` 生成 effect 与摘要，人工核对后 `commit --operation-id ... --digest ...`。解锁只让钥匙可用，不产生授权；授权来自 grant。
+
+服务每次重启都会锁住钥匙并作废 grant。重启后重新 `unlock`，再用 `grant create --purpose http|document-proof|…` 重新发 grant，并把新 id 记进身份（`anpio-cli key grant <id> --purpose …`）。这是日常维护里唯一必须由人做的两步。
 
 ## 装完之后：Agent 怎么用
 

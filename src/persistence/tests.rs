@@ -651,6 +651,52 @@ fn journal_recovers_after_file_install_and_refuses_unknown_disk_state() {
     assert_eq!(std::fs::read(path).unwrap(), b"{}");
 }
 #[test]
+fn only_the_first_install_of_a_vault_keeps_the_fresh_keys_unlocked() {
+    use catalog::*;
+    let mut f = Fixture::new();
+    let (vault, did, doc) = vault_fixture(&mut f);
+    // Provisioning sealed the keys and unlocked them with the one passphrase, and
+    // nothing has been published yet. Installing that first document is the same
+    // confirmation, so it must not lock the keys again.
+    let layout = crate::keystore::layout::KeydLayout::at(f.dir.join("vaults").join(&vault));
+    std::fs::remove_file(layout.did_path(&did)).unwrap();
+    let first = f
+        .db
+        .prepare(
+            1002,
+            Change::Catalog {
+                change: CatalogChange::InstallDocument {
+                    vault_id: vault.clone(),
+                    document: doc.clone(),
+                },
+            },
+            now(),
+        )
+        .unwrap();
+    assert!(!f.db.commit_changes_keys(&first.operation_id).unwrap());
+    f.db.commit(1002, &first.operation_id, &first.digest, now())
+        .unwrap();
+
+    // A later replacement is an ordinary catalog change: committing it puts the
+    // keys back under lock.
+    let updated = changed_document(&f, &vault, &did, &doc);
+    let next = f
+        .db
+        .prepare(
+            1002,
+            Change::Catalog {
+                change: CatalogChange::InstallDocument {
+                    vault_id: vault.clone(),
+                    document: updated,
+                },
+            },
+            now(),
+        )
+        .unwrap();
+    assert!(f.db.commit_changes_keys(&next.operation_id).unwrap());
+}
+
+#[test]
 fn legacy_commands_reject_managed_vault_even_through_symlink() {
     let f = Fixture::new();
     let nested = f.dir.join("vaults").join(uuid());
@@ -4077,4 +4123,581 @@ fn fixed_audit_source_binds_previous_and_refuses_implicit_enrollment() {
     // Collection neither consumes an operation nor changes authorization state.
     f.db.commit(1002, &op.operation_id, &op.digest, now())
         .unwrap();
+}
+
+// ------------------------------------------------------------- provisioning
+
+fn identity_limits() -> policy::Limits {
+    policy::Limits {
+        max_duration_seconds: 30 * 86_400,
+        max_uses: 100,
+        max_lifetime_seconds: 30 * 86_400,
+        max_renewals: 0,
+    }
+}
+
+fn http_identity_policy(name: &str, origin: &str) -> IdentityPolicy {
+    IdentityPolicy {
+        policy_id: uuid(),
+        name: name.into(),
+        purpose: "http_authentication".into(),
+        limits: identity_limits(),
+        content: json!({
+            "origin": origin,
+            "methods": ["POST"],
+            "paths": ["/user-service/v1/did-auth/rpc"],
+            "query": {"mode": "none"},
+            "body": {"mode": "bounded", "max_bytes": 1_048_576},
+            "signature_profile": "anp-http-v2",
+        }),
+    }
+}
+
+fn provision_change(
+    vault: &str,
+    policies: Vec<IdentityPolicy>,
+    grants: Vec<IdentityGrant>,
+) -> Change {
+    Change::ProvisionIdentity {
+        vault_id: Some(vault.to_string()),
+        host: "example.com".into(),
+        port: None,
+        path_segments: vec!["user".into(), "alice".into()],
+        device_id: "alice/default".into(),
+        principal_uid: None,
+        policies,
+        grants,
+        expiry_days: 30,
+        max_uses: 100,
+    }
+}
+
+fn provision(f: &mut Fixture, vault: &str) -> (Value, String) {
+    let http = http_identity_policy("http", "https://service.example.com");
+    let policy_id = http.policy_id.clone();
+    let change = provision_change(
+        vault,
+        vec![http],
+        vec![IdentityGrant {
+            policy_id: policy_id.clone(),
+            key: catalog::KeyRole::DeviceSigning,
+        }],
+    );
+    let prepared = f.db.prepare(1002, change, now()).unwrap();
+    let data = f
+        .db
+        .commit_secret(
+            1002,
+            &prepared.operation_id,
+            &prepared.digest,
+            now(),
+            Some("new-pass"),
+        )
+        .unwrap()
+        .expect("provisioning mints an identity");
+    (data, policy_id)
+}
+
+fn key_of<'a>(data: &'a Value, role: &str) -> &'a Value {
+    data["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|key| key["role"] == role)
+        .unwrap()
+}
+
+fn fragment<'a>(did: &str, kid: &'a str) -> &'a str {
+    kid.strip_prefix(&format!("{did}#")).unwrap()
+}
+
+fn document_digest(value: &Value) -> String {
+    hex(&Sha256::digest(
+        serde_json_canonicalizer::to_vec(value).unwrap(),
+    ))
+}
+
+#[test]
+fn provisioning_mints_a_root_device_key_agreement_key_and_its_grants() {
+    use catalog::KeyRole;
+    let mut f = Fixture::new();
+    let (vault, _, _) = vault_fixture(&mut f);
+    let (data, policy_id) = provision(&mut f, &vault);
+
+    let did = data["did"].as_str().unwrap();
+    assert!(did.starts_with("did:wba:example.com:user:alice:e1_"));
+    assert_eq!(data["device_id"], "alice/default");
+    assert_eq!(data["vault_id"], vault.as_str());
+    let root = key_of(&data, "root");
+    let sign = key_of(&data, "device_signing");
+    let agreement = key_of(&data, "key_agreement");
+    assert_eq!(root["kid"], format!("{did}#key-1"));
+    assert_eq!(sign["kid"], format!("{did}#alice/default-sign"));
+    assert_eq!(agreement["kid"], format!("{did}#alice/default-agreement"));
+
+    // Exactly the three minted keys, unpublished and unconsumed.
+    let catalog = f.db.catalog().unwrap();
+    let minted: Vec<_> = catalog.keys.iter().filter(|key| key.did == did).collect();
+    assert_eq!(minted.len(), 3);
+    for role in [KeyRole::Root, KeyRole::DeviceSigning, KeyRole::KeyAgreement] {
+        assert_eq!(minted.iter().filter(|key| key.role == role).count(), 1);
+    }
+    assert!(minted
+        .iter()
+        .all(|key| key.state == "active" && key.document_digest == GENESIS));
+    assert!(minted
+        .iter()
+        .all(|key| key.identity_epoch == 0 && key.generation == 0));
+    assert_eq!(
+        catalog
+            .policies
+            .iter()
+            .filter(|policy| policy["policy_id"] == policy_id.as_str())
+            .count(),
+        1
+    );
+
+    // The HTTP grant points at the device-signing key, which is a role the
+    // `role_for` set accepts for HTTP even though the identity has no hot key.
+    let http = &data["grants"]["http"];
+    let signing = minted
+        .iter()
+        .find(|key| key.role == KeyRole::DeviceSigning)
+        .unwrap();
+    assert_eq!(http["key_id"], signing.key_id);
+    let principal = f.config.principals[0].principal_id.clone();
+    let grant = f
+        .db
+        .grant_status(&principal, http["grant_id"].as_str().unwrap(), now())
+        .unwrap();
+    assert_eq!(grant.state, "active");
+    assert_eq!(grant.key_id, signing.key_id);
+    assert_eq!(grant.policy_id, policy_id);
+
+    let layout = crate::keystore::layout::KeydLayout::at(f.dir.join("vaults").join(&vault));
+    for kid in [
+        root["kid"].as_str().unwrap(),
+        sign["kid"].as_str().unwrap(),
+        agreement["kid"].as_str().unwrap(),
+    ] {
+        assert!(
+            crate::keystore::store::resolve(&layout, did, Some(fragment(did, kid))).is_ok(),
+            "the envelope for {kid} is on disk"
+        );
+    }
+}
+
+#[test]
+fn provisioning_refuses_coordinates_principals_and_grants_it_cannot_honour() {
+    use catalog::KeyRole;
+    let mut f = Fixture::new();
+    let (vault, _, _) = vault_fixture(&mut f);
+
+    let unknown = uuid();
+    assert!(f
+        .db
+        .prepare(
+            1002,
+            provision_change(
+                &unknown,
+                vec![http_identity_policy("http", "https://service.example.com")],
+                vec![],
+            ),
+            now()
+        )
+        .is_err());
+
+    let http = http_identity_policy("http", "https://service.example.com");
+    let policy_id = http.policy_id.clone();
+    // An HTTP grant can only ride on the device key or a hot key, never root.
+    assert!(f
+        .db
+        .prepare(
+            1002,
+            provision_change(
+                &vault,
+                vec![http.clone()],
+                vec![IdentityGrant {
+                    policy_id: policy_id.clone(),
+                    key: KeyRole::Root,
+                }],
+            ),
+            now()
+        )
+        .is_err());
+    // A grant naming a policy that is not in this request.
+    assert!(f
+        .db
+        .prepare(
+            1002,
+            provision_change(
+                &vault,
+                vec![http.clone()],
+                vec![IdentityGrant {
+                    policy_id: uuid(),
+                    key: KeyRole::DeviceSigning,
+                }],
+            ),
+            now()
+        )
+        .is_err());
+    // An unknown principal.
+    let mut change = provision_change(
+        &vault,
+        vec![http.clone()],
+        vec![IdentityGrant {
+            policy_id: policy_id.clone(),
+            key: KeyRole::DeviceSigning,
+        }],
+    );
+    if let Change::ProvisionIdentity { principal_uid, .. } = &mut change {
+        *principal_uid = Some(9_999);
+    }
+    assert!(f.db.prepare(1002, change, now()).is_err());
+    // Object proofs are not identity grants at all.
+    assert!(f
+        .db
+        .prepare(
+            1002,
+            provision_change(
+                &vault,
+                vec![IdentityPolicy {
+                    policy_id: uuid(),
+                    name: "object".into(),
+                    purpose: "object_proof".into(),
+                    limits: identity_limits(),
+                    content: json!({"proof_purposes": ["device_assertion"]}),
+                }],
+                vec![],
+            ),
+            now()
+        )
+        .is_err());
+    // ECDH peers are 32-byte lowercase hex, and the grant rides the agreement key.
+    let ecdh = IdentityPolicy {
+        policy_id: uuid(),
+        name: "ecdh".into(),
+        purpose: "ecdh".into(),
+        limits: identity_limits(),
+        content: json!({"peers": ["not-a-hex-peer"]}),
+    };
+    assert!(f
+        .db
+        .prepare(
+            1002,
+            provision_change(
+                &vault,
+                vec![ecdh.clone()],
+                vec![IdentityGrant {
+                    policy_id: ecdh.policy_id.clone(),
+                    key: KeyRole::KeyAgreement,
+                }],
+            ),
+            now()
+        )
+        .is_err());
+    let ecdh = IdentityPolicy {
+        policy_id: uuid(),
+        name: "ecdh".into(),
+        purpose: "ecdh".into(),
+        limits: identity_limits(),
+        content: json!({"peers": ["ab".repeat(32)]}),
+    };
+    assert!(f
+        .db
+        .prepare(
+            1002,
+            provision_change(
+                &vault,
+                vec![ecdh.clone()],
+                vec![IdentityGrant {
+                    policy_id: ecdh.policy_id.clone(),
+                    key: KeyRole::DeviceSigning,
+                }],
+            ),
+            now()
+        )
+        .is_err());
+    // An origin whose kind the data plane does not know.
+    assert!(f
+        .db
+        .prepare(
+            1002,
+            provision_change(
+                &vault,
+                vec![IdentityPolicy {
+                    policy_id: uuid(),
+                    name: "origin".into(),
+                    purpose: "origin_proof".into(),
+                    limits: identity_limits(),
+                    content: json!({
+                        "origin": "anp://not-a-target",
+                        "methods": ["POST"],
+                        "paths": ["*"],
+                        "body": {"mode": "empty", "max_bytes": 0},
+                    }),
+                }],
+                vec![],
+            ),
+            now()
+        )
+        .is_err());
+    // Two policies for one origin produce one grant name.
+    let first = http_identity_policy("one", "https://service.example.com");
+    let second = http_identity_policy("two", "https://service.example.com");
+    assert!(f
+        .db
+        .prepare(
+            1002,
+            provision_change(
+                &vault,
+                vec![first.clone(), second.clone()],
+                vec![
+                    IdentityGrant {
+                        policy_id: first.policy_id.clone(),
+                        key: KeyRole::DeviceSigning,
+                    },
+                    IdentityGrant {
+                        policy_id: second.policy_id.clone(),
+                        key: KeyRole::DeviceSigning,
+                    },
+                ],
+            ),
+            now()
+        )
+        .is_err());
+
+    // Once the coordinate is provisioned, the same path cannot mint a second identity.
+    provision(&mut f, &vault);
+    assert!(f
+        .db
+        .prepare(
+            1002,
+            provision_change(
+                &vault,
+                vec![http_identity_policy("http", "https://service.example.com")],
+                vec![IdentityGrant {
+                    policy_id: policy_id,
+                    key: KeyRole::DeviceSigning,
+                }],
+            ),
+            now()
+        )
+        .is_err());
+}
+
+#[test]
+fn a_failed_provisioning_commit_removes_the_envelopes_it_minted() {
+    use catalog::KeyRole;
+    let mut f = Fixture::new();
+    let (vault, _, _) = vault_fixture(&mut f);
+    let layout = crate::keystore::layout::KeydLayout::at(f.dir.join("vaults").join(&vault));
+    let before = crate::keystore::store::load_all(&layout).unwrap().len();
+
+    let http = http_identity_policy("http", "https://service.example.com");
+    let policy_id = http.policy_id.clone();
+    let change = provision_change(
+        &vault,
+        vec![http],
+        vec![IdentityGrant {
+            policy_id,
+            key: KeyRole::DeviceSigning,
+        }],
+    );
+    let prepared = f.db.prepare(1002, change, now()).unwrap();
+    f.db.connection
+        .execute_batch(
+            "CREATE TRIGGER fail_provision BEFORE INSERT ON grants \
+             BEGIN SELECT RAISE(ABORT,'crash before the grant lands'); END;",
+        )
+        .unwrap();
+    assert!(f
+        .db
+        .commit_secret(
+            1002,
+            &prepared.operation_id,
+            &prepared.digest,
+            now(),
+            Some("new-pass"),
+        )
+        .is_err());
+    // The minted envelopes are deleted with the rolled-back transaction.
+    assert_eq!(
+        crate::keystore::store::load_all(&layout).unwrap().len(),
+        before
+    );
+    assert!(f.db.catalog().unwrap().keys.is_empty());
+}
+
+#[test]
+fn first_document_install_publishes_the_minted_keys_and_reinstalling_is_idempotent() {
+    use catalog::*;
+    let mut f = Fixture::new();
+    let (vault, _, _) = vault_fixture(&mut f);
+    let (data, policy_id) = provision(&mut f, &vault);
+    let did = data["did"].as_str().unwrap().to_string();
+    let layout = crate::keystore::layout::KeydLayout::at(f.dir.join("vaults").join(&vault));
+    let secret = crate::keystore::device::load(&layout).unwrap();
+
+    // Unlock the minted keys with the one secret the provision commit used.
+    let root_kid = key_of(&data, "root")["kid"].as_str().unwrap().to_string();
+    let root_wrapped =
+        crate::keystore::store::resolve(&layout, &did, Some(fragment(&did, &root_kid))).unwrap();
+    let root = crate::keystore::unwrap::unlock(&root_wrapped, b"new-pass", &secret).unwrap();
+    let sign_kid = key_of(&data, "device_signing")["kid"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let sign_wrapped =
+        crate::keystore::store::resolve(&layout, &did, Some(fragment(&did, &sign_kid))).unwrap();
+    let agreement_kid = key_of(&data, "key_agreement")["kid"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let agreement_wrapped =
+        crate::keystore::store::resolve(&layout, &did, Some(fragment(&did, &agreement_kid)))
+            .unwrap();
+
+    // The document the client builds in `did create` from the provisioning
+    // reply: the same three methods, addressed by the kids the service minted.
+    let method = |kid: &str, multibase: &str| {
+        json!({
+            "id": kid,
+            "type": "Multikey",
+            "controller": did,
+            "publicKeyMultibase": multibase,
+        })
+    };
+    let unsigned = json!({
+        "id": did,
+        "@context": [
+            "https://www.w3.org/ns/did/v1",
+            "https://w3id.org/security/data-integrity/v2",
+            "https://w3id.org/security/multikey/v1",
+        ],
+        "verificationMethod": [
+            method(&root_kid, &root_wrapped.public_multibase),
+            method(&sign_kid, &sign_wrapped.public_multibase),
+            method(&agreement_kid, &agreement_wrapped.public_multibase),
+        ],
+        "authentication": [root_kid.clone(), sign_kid.clone()],
+        "assertionMethod": [root_kid.clone(), sign_kid.clone()],
+        "keyAgreement": [agreement_kid.clone()],
+    });
+    let signed = crate::did::document::sign_document(&unsigned, &root, &root_kid).unwrap();
+    let after = document_digest(&signed);
+
+    let install = |f: &mut Fixture, document: &Value| {
+        let prepared = f
+            .db
+            .prepare(
+                1002,
+                Change::Catalog {
+                    change: CatalogChange::InstallDocument {
+                        vault_id: vault.clone(),
+                        document: document.clone(),
+                    },
+                },
+                now(),
+            )
+            .unwrap();
+        f.db.commit(1002, &prepared.operation_id, &prepared.digest, now())
+            .unwrap();
+    };
+    install(&mut f, &signed);
+
+    let catalog = f.db.catalog().unwrap();
+    let rows: Vec<_> = catalog.keys.iter().filter(|key| key.did == did).collect();
+    assert_eq!(rows.len(), 3);
+    assert!(rows
+        .iter()
+        .all(|key| key.state == "active" && key.document_digest == after));
+    assert!(rows.iter().all(|key| key.identity_epoch == 1));
+    let installed: Value =
+        serde_json::from_slice(&std::fs::read(layout.did_path(&did)).unwrap()).unwrap();
+    assert_eq!(installed, signed);
+
+    // The grant was born before the document, so publishing that first
+    // document must not revoke it.
+    let principal = f.config.principals[0].principal_id.clone();
+    let grant_id = data["grants"]["http"]["grant_id"].as_str().unwrap();
+    let grant = f.db.grant_status(&principal, grant_id, now()).unwrap();
+    assert_eq!(grant.state, "active");
+    assert_eq!(grant.policy_id, policy_id);
+
+    // A byte-identical re-install changes nothing, grants included.
+    install(&mut f, &signed);
+    let again = f.db.catalog().unwrap();
+    let rows: Vec<_> = again.keys.iter().filter(|key| key.did == did).collect();
+    assert!(rows
+        .iter()
+        .all(|key| key.state == "active" && key.document_digest == after));
+    let installed: Value =
+        serde_json::from_slice(&std::fs::read(layout.did_path(&did)).unwrap()).unwrap();
+    assert_eq!(installed, signed);
+    let grant = f.db.grant_status(&principal, grant_id, now()).unwrap();
+    assert_eq!(grant.state, "active");
+}
+
+#[test]
+fn add_keys_refuses_a_did_that_already_holds_an_active_key() {
+    use catalog::*;
+    let mut f = Fixture::new();
+    let (vault, _, _) = vault_fixture(&mut f);
+    let (data, _) = provision(&mut f, &vault);
+    let did = data["did"].as_str().unwrap().to_string();
+    let existing = f
+        .db
+        .catalog()
+        .unwrap()
+        .keys
+        .into_iter()
+        .find(|key| key.did == did)
+        .unwrap();
+    assert!(f
+        .db
+        .prepare(
+            1002,
+            Change::Catalog {
+                change: CatalogChange::AddKeys {
+                    vault_id: vault.clone(),
+                    did,
+                    keys: vec![existing],
+                },
+            },
+            now(),
+        )
+        .is_err());
+}
+
+#[test]
+fn purpose_role_sets_name_every_role_that_may_hold_the_grant() {
+    use catalog::KeyRole;
+    use policy::Purpose;
+    assert_eq!(
+        grants::role_for(Purpose::HttpAuthentication).unwrap(),
+        &[KeyRole::Hot, KeyRole::DeviceSigning]
+    );
+    assert_eq!(
+        grants::role_for(Purpose::OriginProof).unwrap(),
+        &[KeyRole::Hot, KeyRole::DeviceSigning]
+    );
+    assert_eq!(
+        grants::role_for(Purpose::PurposeSigning).unwrap(),
+        &[KeyRole::DeviceSigning]
+    );
+    assert_eq!(
+        grants::role_for(Purpose::ObjectProof).unwrap(),
+        &[KeyRole::DeviceSigning]
+    );
+    assert_eq!(
+        grants::role_for(Purpose::Ecdh).unwrap(),
+        &[KeyRole::KeyAgreement]
+    );
+    assert_eq!(
+        grants::role_for(Purpose::DocumentProof).unwrap(),
+        &[KeyRole::Root]
+    );
+    // Root's remaining operations only exist on the admin plane.
+    assert!(grants::role_for(Purpose::Root).is_err());
 }

@@ -80,18 +80,23 @@ fn principal(db: &Connection, id: &str) -> Result<()> {
     Ok(())
 }
 
-/// 一个 purpose 允许用哪种角色的键。还没有操作面的 purpose 只有形状:
-/// 建 grant 会被拒。
-fn role_for(purpose: super::policy::Purpose) -> Result<catalog::KeyRole> {
+/// 一个 purpose 允许用哪几种角色的键。
+///
+/// 返回的是**集合**而不是单值:一个身份可能有热密钥(旧身份),也可能从一
+/// 出生就只有设备签名键(新身份,没有 `Hot` 归档)。两者都能做 HTTP 与
+/// origin proof,但设备签名键不做热密钥那一套轮换。
+pub(crate) fn role_for(purpose: super::policy::Purpose) -> Result<&'static [catalog::KeyRole]> {
     use super::policy::Purpose;
     Ok(match purpose {
-        Purpose::HttpAuthentication | Purpose::OriginProof => catalog::KeyRole::Hot,
-        Purpose::PurposeSigning => catalog::KeyRole::DeviceSigning,
+        Purpose::HttpAuthentication | Purpose::OriginProof => {
+            &[catalog::KeyRole::Hot, catalog::KeyRole::DeviceSigning]
+        }
+        Purpose::PurposeSigning => &[catalog::KeyRole::DeviceSigning],
         // 协商键是唯一一种 X25519 键,它不做别的。
-        Purpose::Ecdh => catalog::KeyRole::KeyAgreement,
+        Purpose::Ecdh => &[catalog::KeyRole::KeyAgreement],
         // 对象 proof 是设备断言的一种形状;文档 proof 动的是身份本身,只有根能做。
-        Purpose::ObjectProof => catalog::KeyRole::DeviceSigning,
-        Purpose::DocumentProof => catalog::KeyRole::Root,
+        Purpose::ObjectProof => &[catalog::KeyRole::DeviceSigning],
+        Purpose::DocumentProof => &[catalog::KeyRole::Root],
         // 根的其余操作(换设备、轮换)只走管理平面,数据平面上一律没有 grant 形状。
         Purpose::Root => return Err(refused("GRANT_INVALID")),
     })
@@ -118,7 +123,7 @@ fn key_for(
     purpose: super::policy::Purpose,
 ) -> Result<catalog::KeyRecord> {
     let key = catalog::get_key(db, id).map_err(|_| refused("KEY_ROLE_FORBIDDEN"))?;
-    if key.role != role_for(purpose)? || key.state != "active" {
+    if !role_for(purpose)?.contains(&key.role) || key.state != "active" {
         return Err(refused("KEY_ROLE_FORBIDDEN"));
     }
     catalog::check_key(db, root, &key.vault_id, &key.did, &key.kid)

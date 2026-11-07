@@ -22,7 +22,7 @@ fn denied() -> KeydError {
 #[serde(rename_all = "kebab-case")]
 // `PurposeSigning` 的前缀就是枚举名,但线上词是 `purpose-signing`,不为 lint 改。
 #[allow(clippy::enum_variant_names)]
-pub(super) enum Purpose {
+pub enum Purpose {
     HttpAuthentication,
     OriginProof,
     PurposeSigning,
@@ -36,11 +36,11 @@ pub(super) enum Purpose {
 /// `max_duration_seconds`、`max_renewals` 取 0 —— 即 v1 的 grant 续不了。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct Limits {
-    pub(super) max_duration_seconds: u32,
-    pub(super) max_uses: u32,
-    pub(super) max_lifetime_seconds: u32,
-    pub(super) max_renewals: u32,
+pub struct Limits {
+    pub max_duration_seconds: u32,
+    pub max_uses: u32,
+    pub max_lifetime_seconds: u32,
+    pub max_renewals: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

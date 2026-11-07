@@ -5,6 +5,7 @@ use crate::keystore::{
     record::{KeyAlgorithm, WrappedKey},
     store,
 };
+use std::collections::BTreeSet;
 use std::os::unix::fs::MetadataExt;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -19,7 +20,7 @@ pub enum KeyRole {
     KeyAgreement,
 }
 impl KeyRole {
-    fn name(&self) -> &'static str {
+    pub(super) fn name(&self) -> &'static str {
         match self {
             Self::Unclassified => "unclassified",
             Self::Root => "root",
@@ -56,6 +57,16 @@ pub enum CatalogChange {
         policy_id: String,
         version: u32,
         content: Value,
+    },
+    /// Insert keys for a DID that has no catalog rows yet.
+    ///
+    /// `ProvisionIdentity` mints the envelopes and writes this in the same
+    /// transaction, before any document exists for the DID. Unlike `EnrollVault`
+    /// it never revokes grants and never resets roles: everything here is new.
+    AddKeys {
+        vault_id: String,
+        did: String,
+        keys: Vec<KeyRecord>,
     },
     InstallDocument {
         vault_id: String,
@@ -360,6 +371,11 @@ pub enum CatalogEffect {
         content: String,
         digest: String,
     },
+    AddKeys {
+        vault_id: String,
+        did: String,
+        keys: Vec<KeyRecord>,
+    },
     InstallDocument {
         vault_id: String,
         did: String,
@@ -415,8 +431,18 @@ fn active_vault(tx: &Connection, vault: &str) -> Result<()> {
     Ok(())
 }
 fn document(layout: &KeydLayout, did: &str) -> Result<Value> {
+    document_opt(layout, did)?.ok_or_else(invalid)
+}
+
+/// 这份 DID 已经发布的文档,或者 `None` —— 新身份在安装第一份文档之前,
+/// 目录里已经有键,但磁盘上还没有文档。
+fn document_opt(layout: &KeydLayout, did: &str) -> Result<Option<Value>> {
     let path = layout.did_path(did);
-    let meta = std::fs::symlink_metadata(&path)?;
+    let meta = match std::fs::symlink_metadata(&path) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
     if !meta.is_file()
         || meta.nlink() != 1
         || meta.uid() != std::fs::metadata(layout.root())?.uid()
@@ -426,7 +452,27 @@ fn document(layout: &KeydLayout, did: &str) -> Result<Value> {
     }
     let doc = store::read_did_document(layout, did)?;
     crate::did::document::verify_path_binding(did, &doc)?;
-    Ok(doc)
+    Ok(Some(doc))
+}
+
+/// 信封的角色**形状**:曲线与角色配对、角色与 purpose 配对。关系(它挂在
+/// 文档的哪个数组下)要等文档出来才验得了 —— 见 [`verify_role`]。
+fn verify_key_shape(wrapped: &WrappedKey, role: &KeyRole, purpose: &str) -> Result<()> {
+    if !purpose_valid(role, purpose) {
+        return Err(invalid());
+    }
+    let ok = match role {
+        KeyRole::Root | KeyRole::DeviceSigning => wrapped.algorithm == KeyAlgorithm::Ed25519,
+        KeyRole::KeyAgreement => wrapped.algorithm == KeyAlgorithm::X25519,
+        KeyRole::Unclassified => false,
+        // 新身份不经这条路径造热/恢复/挑战键。
+        KeyRole::Hot | KeyRole::Recovery | KeyRole::Challenge => false,
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(invalid())
+    }
 }
 fn verify_role(wrapped: &WrappedKey, doc: &Value, role: &KeyRole) -> Result<()> {
     if crate::did::lifecycle::is_deactivated(doc) {
@@ -529,6 +575,15 @@ pub(super) fn validate_key(root: &Path, record: &KeyRecord) -> Result<()> {
         .strip_prefix(&format!("{}#", record.did))
         .ok_or_else(invalid)?;
     let wrapped = store::resolve(&layout, &record.did, Some(fragment))?;
+    if record.document_digest == GENESIS {
+        // 还没有文档可以对照。信封本身照样要核:文件和摘要一致、角色与曲线
+        // 一致。关系校验在 `InstallDocument` 里对着新文档做,那是这份记录
+        // 第一次拿到真文档摘要的地方。
+        if digest(&wrapped)? != record.envelope_digest {
+            return Err(invalid());
+        }
+        return verify_key_shape(&wrapped, &record.role, &record.purpose);
+    }
     let current = snapshot(root, &record.vault_id, &wrapped)?;
     if record.envelope_digest != current.envelope_digest
         || record.document_digest != current.document_digest
@@ -640,6 +695,68 @@ pub(super) fn resolve(
                 digest,
             }
         }
+        CatalogChange::AddKeys {
+            vault_id,
+            did,
+            keys,
+        } => {
+            active_vault(tx, &vault_id)?;
+            let layout = layout(root, &vault_id)?;
+            if keys.is_empty() || keys.len() > 64 {
+                return Err(invalid());
+            }
+            let active: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM keys WHERE vault_id=?1 AND did=?2 AND state='active')",
+                    params![&vault_id, &did],
+                    |r| r.get(0),
+                )
+                .map_err(db_error)?;
+            if active {
+                return Err(invalid());
+            }
+            let doc = document_opt(&layout, &did)?;
+            let mut kids = BTreeSet::new();
+            for key in &keys {
+                if key.vault_id != vault_id
+                    || key.did != did
+                    || key.state != "active"
+                    || key.role == KeyRole::Unclassified
+                    || key.identity_epoch != 0
+                    || key.generation != 0
+                {
+                    return Err(invalid());
+                }
+                let fragment = key
+                    .kid
+                    .strip_prefix(&format!("{did}#"))
+                    .filter(|f| !f.is_empty() && !f.contains('#'))
+                    .ok_or_else(invalid)?;
+                if !kids.insert(key.kid.clone()) {
+                    return Err(invalid());
+                }
+                let wrapped = store::resolve(&layout, &did, Some(fragment))?;
+                if wrapped.id.kid != key.kid || digest(&wrapped)? != key.envelope_digest {
+                    return Err(invalid());
+                }
+                verify_key_shape(&wrapped, &key.role, &key.purpose)?;
+                match &doc {
+                    Some(doc) => {
+                        if key.document_digest != digest(doc)? {
+                            return Err(invalid());
+                        }
+                        verify_role(&wrapped, doc, &key.role)?;
+                    }
+                    None if key.document_digest == GENESIS => {}
+                    None => return Err(invalid()),
+                }
+            }
+            CatalogEffect::AddKeys {
+                vault_id,
+                did,
+                keys,
+            }
+        }
         CatalogChange::InstallDocument {
             vault_id,
             document: doc,
@@ -654,9 +771,14 @@ pub(super) fn resolve(
             if serde_json::to_vec(&doc)?.len() > 32768 {
                 return Err(invalid());
             }
-            let old = document(&layout(root, &vault_id)?, &did)?;
-            if crate::did::lifecycle::is_deactivated(&old) {
-                return Err(invalid());
+            // 第一份文档没有"旧文档"可以退休,也没有关系可以对照。`None`
+            // 就是那个状态;摘要用全零哨兵,和 `ProvisionIdentity` 写进
+            // `keys.document_digest` 的未发布标记是同一个值。
+            let old = document_opt(&layout(root, &vault_id)?, &did)?;
+            if let Some(old) = &old {
+                if crate::did::lifecycle::is_deactivated(old) {
+                    return Err(invalid());
+                }
             }
             // A root-signed replacement may retire a hot key. Root/recovery
             // methods cannot silently disappear through this operation.
@@ -689,7 +811,10 @@ pub(super) fn resolve(
             CatalogEffect::InstallDocument {
                 vault_id,
                 did,
-                before_digest: digest(&old)?,
+                before_digest: match &old {
+                    Some(old) => digest(old)?,
+                    None => GENESIS.to_string(),
+                },
                 after_digest: digest(&doc)?,
                 document: doc,
             }
@@ -755,6 +880,30 @@ pub(super) fn apply(
             )
             .map_err(db_error)?;
         }
+        CatalogEffect::AddKeys {
+            vault_id,
+            did,
+            keys,
+        } => {
+            active_vault(tx, &vault_id)?;
+            let active: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM keys WHERE vault_id=?1 AND did=?2 AND state='active')",
+                    params![&vault_id, &did],
+                    |r| r.get(0),
+                )
+                .map_err(db_error)?;
+            if active {
+                return Err(invalid());
+            }
+            for key in keys {
+                if key.vault_id != vault_id || key.did != did {
+                    return Err(invalid());
+                }
+                validate_key(root, &key)?;
+                tx.execute("INSERT INTO keys(key_id,vault_id,did,kid,role,purpose,envelope_digest,state,identity_epoch,generation,document_digest) VALUES(?1,?2,?3,?4,?5,?6,?7,'active',?8,?9,?10)",params![key.key_id,key.vault_id,key.did,key.kid,key.role.name(),key.purpose,key.envelope_digest,key.identity_epoch,key.generation,key.document_digest]).map_err(db_error)?;
+            }
+        }
         CatalogEffect::InstallDocument {
             vault_id,
             did,
@@ -773,9 +922,11 @@ pub(super) fn apply(
                     document: doc.clone(),
                 },
             )?;
-            if digest(&document(&layout(root, &vault_id)?, &did)?)? != before_digest
-                || digest(&doc)? != after_digest
-            {
+            let current = match document_opt(&layout(root, &vault_id)?, &did)? {
+                Some(doc) => digest(&doc)?,
+                None => GENESIS.to_string(),
+            };
+            if current != before_digest || digest(&doc)? != after_digest {
                 return Err(invalid());
             }
             crate::did::document::verify_path_binding(&did, &doc)?;
@@ -797,7 +948,14 @@ pub(super) fn apply(
             )
             .map_err(db_error)?;
             tx.execute("UPDATE keys SET state='maintenance',generation=generation+1 WHERE vault_id=?1 AND state='active'",[&vault_id]).map_err(db_error)?;
-            tx.execute("UPDATE grants SET state='revoked' WHERE key_id IN (SELECT key_id FROM keys WHERE vault_id=?1) AND state='active'",[&vault_id]).map_err(db_error)?;
+            // 文档一变,挂在旧文档上的授权就得重新发。两个例外:一份逐字节
+            // 相同的文档没有改变任何授权(重装它不该顺手撤掉 grant);一个
+            // **从未发布过**的键则是和它的 grant 在同一次 provision 里出
+            // 生,这份文档就是它的第一份,没有"旧授权"可撤 —— 摘要用哨兵
+            // 标记这一档。
+            if before_digest != after_digest {
+                tx.execute("UPDATE grants SET state='revoked' WHERE state='active' AND key_id IN (SELECT key_id FROM keys WHERE vault_id=?1 AND document_digest<>?2)",params![&vault_id,GENESIS]).map_err(db_error)?;
+            }
         }
     }
     Ok(())
@@ -890,7 +1048,10 @@ pub(super) fn recover_files(db: &mut Connection, root: &Path) -> Result<()> {
         }
         crate::did::document::verify_path_binding(&did, &target)?;
         let layout = layout(root, &vault)?;
-        let current = digest(&document(&layout, &did)?)?;
+        let current = match document_opt(&layout, &did)? {
+            Some(doc) => digest(&doc)?,
+            None => GENESIS.to_string(),
+        };
         if current != before && current != after {
             return Err(unavailable());
         }

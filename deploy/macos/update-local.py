@@ -49,6 +49,16 @@ def write_new(path, content):
         os.fsync(handle.fileno())
 
 
+def write_config(path, content):
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, 'wb') as handle:
+        handle.write(content)
+        handle.flush()
+        os.fchmod(handle.fileno(), 0o644)
+        os.fsync(handle.fileno())
+    os.chown(path, 0, 0)
+
+
 def archive_previous(previous, archive):
     # Exclusive copy + durable directory entry before removing the old slot.
     # Interruption may leave both copies, but never discards the only backup.
@@ -90,6 +100,10 @@ def main():
     config = json.loads(CONFIG.read_text())
     if config['mode'] != 'macos-boundary-preview':
         raise ValueError('explicit local macOS preview required')
+    state = Path(config['state_dir'])
+    # An installation made before identity provisioning existed has no vault.
+    # Fill provisioning defaults only when nothing was ever registered there.
+    config, config_changed = installer.upgraded_config(config, state)
     previous = BINARY.with_name('anpio-key.previous')
     archive = None
     if os.path.lexists(previous):
@@ -103,7 +117,8 @@ def main():
     print(json.dumps({'binary': str(BINARY), 'candidate_sha256': args.sha256,
                       'backup': str(previous), 'archive_existing_backup': str(archive) if archive else None,
                       'restart_locks_keys_and_revokes_grants': True,
-                      'config_and_state_preserved': True, 'apply': args.apply}, indent=2), flush=True)
+                      'config_and_state_preserved': True,
+                      'config_updated': config_changed, 'apply': args.apply}, indent=2), flush=True)
     if not args.apply:
         return
     if os.geteuid() != 0:
@@ -125,7 +140,6 @@ def main():
             if time.monotonic() >= deadline:
                 raise ValueError('service sockets remain after stop; binary/state left unchanged')
             time.sleep(0.1)
-        state = Path(config['state_dir'])
         meta = state.lstat()
         if not stat.S_ISDIR(meta.st_mode) or meta.st_uid != service.pw_uid or meta.st_mode & 0o777 != 0o700:
             raise ValueError('untrusted state directory; stopped for inspection')
@@ -138,6 +152,23 @@ def main():
             now = trusted_file(BINARY)
             if (now.st_dev, now.st_ino) != (before.st_dev, before.st_ino):
                 raise ValueError('installed binary changed during update')
+            if config_changed:
+                staged = CONFIG.with_name('.service.json-' + str(uuid.uuid4()))
+                try:
+                    write_config(staged, json.dumps(config, indent=2).encode())
+                    for vault_id in config['vault_ids']:
+                        path = state / 'vaults' / vault_id
+                        if not os.path.lexists(path):
+                            installer.directory(path, service.pw_uid, service.pw_gid, 0o700)
+                    os.replace(staged, CONFIG)
+                    config_fd = os.open(CONFIG.parent, os.O_RDONLY)
+                    try:
+                        os.fsync(config_fd)
+                    finally:
+                        os.close(config_fd)
+                finally:
+                    if staged.exists():
+                        staged.unlink()
             write_new(previous, read_binary(BINARY))
             os.replace(candidate, BINARY)
             directory = os.open(BINARY.parent, os.O_RDONLY)

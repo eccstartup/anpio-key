@@ -4,6 +4,10 @@ Run without --apply to inspect the exact plan. Accounts/groups must already exis
 Updates/migration are deliberately refused; existing state is never overwritten.
 --uninstall stops the launchd job and removes the binary and plist, but keeps
 configuration, state and accounts so an uninstall cannot destroy an identity.
+
+Installation only installs the service: no identity is created, no passphrase is
+collected and no grant is issued. A fresh install presets one empty vault so the
+first `anpio-cli did create --key anpio-key` has somewhere to live.
 """
 import argparse
 import ctypes
@@ -28,6 +32,14 @@ BINARY = BASE / 'bin/anpio-key'
 PLIST = Path('/Library/LaunchDaemons/org.anpio-key.local.plist')
 SOCKETS = (BASE / 'sign/sign.sock', BASE / 'admin/admin.sock')
 LABEL = 'org.anpio-key.local'
+# Data-plane switches a freshly created identity is expected to use. Explicit
+# values in an existing service.json are never overwritten.
+DEFAULT_FEATURES = {
+    'sign_document_proof': True,
+    'sign_origin_proof': True,
+    'sign_purpose': {'device_assertion': True, 'application_assertion': False},
+    'ecdh': True,
+}
 
 
 def check_chain(path):
@@ -88,8 +100,33 @@ def configuration(service, admin, agents, sign_group, admin_group):
         'admin_socket': str(BASE / 'admin/admin.sock'),
         'principals': [{'principal_id': str(uuid.uuid4()), 'uid': u.pw_uid,
                         'generation': 1, 'enabled': True} for u in agents],
-        'vault_ids': [],
+        'vault_ids': [str(uuid.uuid4())],
+        'features': json.loads(json.dumps(DEFAULT_FEATURES)),
     }
+
+
+def upgraded_config(config, state_dir):
+    """Fill provisioning defaults absent from an installed service.json.
+
+    `vault_ids` is preserved verbatim. Only a config that never had a vault and
+    never had a catalog gets one: presetting an ID beside an existing catalog
+    would make `Database::recover` inspect a vault that was never registered.
+    """
+    updated = json.loads(json.dumps(config))
+    changed = False
+    features = updated.setdefault('features', {})
+    for key, value in DEFAULT_FEATURES.items():
+        if key not in features:
+            features[key] = value
+            changed = True
+    if not updated.get('vault_ids'):
+        if (Path(state_dir) / 'catalog.sqlite3').exists():
+            print('note: existing catalog with no vault ID; run --adopt or configure a vault by hand',
+                  file=sys.stderr)
+        else:
+            updated['vault_ids'] = [str(uuid.uuid4())]
+            changed = True
+    return updated, changed
 
 
 def launch_job(service):
@@ -113,6 +150,8 @@ def create_directories(base, service, config):
     directory(base / 'bin', 0, 0, 0o755)
     directory(base / 'state', service.pw_uid, service.pw_gid, 0o700)
     directory(base / 'state' / 'vaults', service.pw_uid, service.pw_gid, 0o700)
+    for vault_id in config.get('vault_ids', []):
+        directory(base / 'state' / 'vaults' / vault_id, service.pw_uid, service.pw_gid, 0o700)
     directory(base / 'sign', service.pw_uid, config['agent_gid'], 0o750)
     directory(base / 'admin', service.pw_uid, config['admin_gid'], 0o750)
 
@@ -228,7 +267,9 @@ def main():
     subprocess.run(prefix + [str(BINARY), 'init-protected-state', '--config', str(CONFIG)], env=env, check=True)
     write_new(PLIST, plistlib.dumps(launch_job(service)))
     print('Installed, NOT started. Start explicitly: sudo launchctl bootstrap system ' + str(PLIST))
-    print('Empty state only; no user vault copied, no grant issued. Restart locks keys and revokes grants.')
+    print('Empty service only: no identity, passphrase or grant was created. '
+          'Create one with `anpio-cli did create --key anpio-key` (one passphrase confirmation).')
+    print('Restart locks keys and revokes grants.')
 
 
 if __name__ == '__main__':

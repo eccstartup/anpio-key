@@ -3,10 +3,11 @@ pub mod catalog;
 pub mod checkpoint;
 pub mod clock;
 pub mod grants;
-mod policy;
+pub(crate) mod policy;
 pub mod projection;
 pub mod requests;
 
+use std::collections::BTreeSet;
 use std::fs::OpenOptions;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
@@ -27,7 +28,7 @@ use clock::Time;
 
 const SCHEMA: i64 = 5;
 const APPLICATION: i64 = 0x414e504b;
-const GENESIS: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+pub(crate) const GENESIS: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
@@ -64,6 +65,33 @@ pub enum Change {
         origin: String,
         challenge: String,
     },
+    /// Mint a complete identity in one approved step: root plus one device's
+    /// signing and agreement keys, their catalog rows, the policies that say
+    /// what the identity may do, and the grants that hand those rights to the
+    /// new keys.
+    ///
+    /// The passphrase comes with the completion, so one human confirmation
+    /// both decides the identity and seals every envelope. Nothing is minted
+    /// at prepare time.
+    ProvisionIdentity {
+        vault_id: Option<String>,
+        host: String,
+        port: Option<u16>,
+        /// `e1_` 之前的路径段,例如 `["user", "<handle>"]`。
+        path_segments: Vec<String>,
+        /// `<agent>/<profile>`;文档里的设备 fragment 是 `{device}-sign` 与
+        /// `{device}-agreement`。
+        device_id: String,
+        /// 默认取唯一一个 enabled principal。
+        principal_uid: Option<u32>,
+        policies: Vec<IdentityPolicy>,
+        grants: Vec<IdentityGrant>,
+        /// grant 的生命周期,默认 30 天。
+        #[serde(default = "default_expiry_days")]
+        expiry_days: u32,
+        #[serde(default = "default_max_uses")]
+        max_uses: u32,
+    },
     RegisterPrincipal {
         uid: u32,
     },
@@ -97,6 +125,18 @@ enum Resolved {
         sign: String,
         agreement: String,
     },
+    ProvisionIdentity {
+        vault_id: String,
+        host: String,
+        port: Option<u16>,
+        path_segments: Vec<String>,
+        device_id: String,
+        principal_id: String,
+        policies: Vec<ResolvedPolicy>,
+        grants: Vec<ResolvedGrant>,
+        expiry: i64,
+        max_uses: u32,
+    },
     RegistrationChallenge {
         key: Box<catalog::KeyRecord>,
         origin: String,
@@ -126,6 +166,103 @@ pub struct Prepared {
     pub expires_at: i64,
 }
 
+/// 一次 provision 要发布的一条策略。
+///
+/// `purpose` 接受 `http_authentication` 与 `http-authentication` 两种写法,
+/// 落库前统一成策略 v2 自己的线上词。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityPolicy {
+    pub policy_id: String,
+    pub name: String,
+    pub purpose: String,
+    pub limits: policy::Limits,
+    pub content: Value,
+}
+
+/// 一条把策略授给本次新身份某把钥匙的 grant。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityGrant {
+    pub policy_id: String,
+    pub key: catalog::KeyRole,
+}
+
+/// 解析后的策略:内容已经过 `policy::normalize`,提交时原样落库。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResolvedPolicy {
+    policy_id: String,
+    purpose: policy::Purpose,
+    content: Value,
+    /// grant 回复要用的名字(`http`、`origin_proof_agent`、…)。
+    grant_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResolvedGrant {
+    grant_name: String,
+    policy_id: String,
+    key: catalog::KeyRole,
+}
+
+/// provision 已经写下的信封文件。
+///
+/// 事务提交之前出任何错(包括最后的期限复核),它们都必须删掉 —— 否则磁盘
+/// 上会留下没有目录行的孤儿钥匙。
+#[derive(Default)]
+struct MintedFiles {
+    paths: Vec<std::path::PathBuf>,
+    keep: bool,
+}
+impl MintedFiles {
+    fn push(&mut self, path: std::path::PathBuf) {
+        self.paths.push(path);
+    }
+    fn keep(mut self) {
+        self.keep = true;
+    }
+}
+impl Drop for MintedFiles {
+    fn drop(&mut self) {
+        if self.keep {
+            return;
+        }
+        for path in &self.paths {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+fn provision_record(
+    vault_id: &str,
+    did: &str,
+    wrapped: &crate::keystore::record::WrappedKey,
+    role: catalog::KeyRole,
+    purpose: &str,
+) -> Result<catalog::KeyRecord> {
+    Ok(catalog::KeyRecord {
+        key_id: uuid(),
+        vault_id: vault_id.to_owned(),
+        did: did.to_owned(),
+        kid: wrapped.id.kid.clone(),
+        role,
+        purpose: purpose.to_owned(),
+        envelope_digest: envelope_digest(wrapped)?,
+        document_digest: GENESIS.to_owned(),
+        state: "active".into(),
+        identity_epoch: 0,
+        generation: 0,
+    })
+}
+
+fn envelope_digest(wrapped: &impl Serialize) -> Result<String> {
+    Ok(hex(&Sha256::digest(
+        serde_json_canonicalizer::to_vec(wrapped).map_err(|_| invalid())?,
+    )))
+}
+
 pub struct Database {
     connection: Connection,
     pub boot_epoch: i64,
@@ -140,6 +277,254 @@ fn unavailable() -> KeydError {
 fn invalid() -> KeydError {
     KeydError::Misuse("ADMIN_OPERATION_INVALID".into())
 }
+fn default_expiry_days() -> u32 {
+    30
+}
+fn default_max_uses() -> u32 {
+    100
+}
+
+/// `http_authentication` 和 `http-authentication` 是同一个 purpose;落库的
+/// 永远是策略 v2 的线上词。
+fn identity_purpose(value: &str) -> Result<policy::Purpose> {
+    let wire = value.replace('_', "-");
+    let purpose: policy::Purpose = serde_json::from_value(Value::String(wire)).map_err(|_| invalid())?;
+    if matches!(
+        purpose,
+        policy::Purpose::ObjectProof | policy::Purpose::Root
+    ) {
+        return Err(invalid());
+    }
+    Ok(purpose)
+}
+
+/// grant 在回包与 attach 命令里的名字。origin proof 按目标类别各算一条。
+fn grant_name(purpose: policy::Purpose, content: &Value) -> Result<String> {
+    let name = match purpose {
+        policy::Purpose::HttpAuthentication => "http",
+        policy::Purpose::DocumentProof => "document_proof",
+        policy::Purpose::PurposeSigning => "purpose",
+        policy::Purpose::Ecdh => "ecdh",
+        policy::Purpose::OriginProof => {
+            let kind = content
+                .get("content")
+                .and_then(|c| c.get("origin"))
+                .and_then(Value::as_str)
+                .and_then(|origin| origin.strip_prefix("anp://"))
+                .filter(|kind| crate::security::origin::TARGET_KINDS.contains(kind))
+                .ok_or_else(invalid)?;
+            return Ok(format!("origin_proof_{kind}"));
+        }
+        _ => return Err(invalid()),
+    };
+    Ok(name.to_string())
+}
+
+fn provision_effect(
+    tx: &Connection,
+    now: Time,
+    vault_id: Option<String>,
+    host: String,
+    port: Option<u16>,
+    path_segments: Vec<String>,
+    device_id: String,
+    principal_uid: Option<u32>,
+    policies: Vec<IdentityPolicy>,
+    grants: Vec<IdentityGrant>,
+    expiry_days: u32,
+    max_uses: u32,
+) -> Result<Resolved> {
+    let vault_id = match vault_id {
+        Some(id) => id,
+        None => {
+            let ids: Vec<String> = {
+                let mut statement = tx
+                    .prepare("SELECT vault_id FROM vaults WHERE state='active'")
+                    .map_err(db_error)?;
+                let rows = statement
+                    .query_map([], |r| r.get::<_, String>(0))
+                    .map_err(db_error)?
+                    .collect::<std::result::Result<_, _>>()
+                    .map_err(db_error)?;
+                rows
+            };
+            match ids.len() {
+                1 => ids.into_iter().next().ok_or_else(invalid)?,
+                _ => return Err(invalid()),
+            }
+        }
+    };
+    let active: Option<String> = tx
+        .query_row(
+            "SELECT state FROM vaults WHERE vault_id=?1",
+            [&vault_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(db_error)?;
+    if active.as_deref() != Some("active") {
+        return Err(invalid());
+    }
+
+    crate::did::parse::check_host(&host)?;
+    if path_segments.is_empty() {
+        return Err(invalid());
+    }
+    for segment in &path_segments {
+        crate::did::parse::check_path_segment(segment)?;
+    }
+    let device_parts: Vec<&str> = device_id.split('/').collect();
+    if device_parts.len() != 2
+        || device_parts.iter().any(|part| {
+            part.is_empty()
+                || part.len() > 128
+                || part.chars().any(char::is_control)
+                || part.contains('#')
+                || part.contains(':')
+        })
+    {
+        return Err(invalid());
+    }
+
+    let principal_id: String = match principal_uid {
+        Some(uid) => tx
+            .query_row(
+                "SELECT principal_id FROM principals WHERE uid=?1 AND state='enabled'",
+                [uid],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(db_error)?
+            .ok_or_else(invalid)?,
+        None => {
+            let ids: Vec<String> = {
+                let mut statement = tx
+                    .prepare("SELECT principal_id FROM principals WHERE state='enabled'")
+                    .map_err(db_error)?;
+                let rows = statement
+                    .query_map([], |r| r.get::<_, String>(0))
+                    .map_err(db_error)?
+                    .collect::<std::result::Result<_, _>>()
+                    .map_err(db_error)?;
+                rows
+            };
+            match ids.len() {
+                1 => ids.into_iter().next().ok_or_else(invalid)?,
+                _ => return Err(invalid()),
+            }
+        }
+    };
+
+    // 精确 DID 要等根公钥生成才知道;准备阶段只知道坐标。同一个坐标下已有
+    // 一把 active 签名键,这个身份就重复了。
+    let base = match port {
+        Some(port) => format!("did:wba:{}%3A{}", host, port),
+        None => format!("did:wba:{}", host),
+    };
+    let prefix = format!("{base}:{}:e1_", path_segments.join(":"));
+    let dids: Vec<String> = {
+        let mut statement = tx
+            .prepare("SELECT DISTINCT did FROM keys WHERE vault_id=?1 AND state='active'")
+            .map_err(db_error)?;
+        let rows = statement
+            .query_map([&vault_id], |r| r.get::<_, String>(0))
+            .map_err(db_error)?
+            .collect::<std::result::Result<_, _>>()
+            .map_err(db_error)?;
+        rows
+    };
+    if dids.iter().any(|did| did.starts_with(&prefix)) {
+        return Err(invalid());
+    }
+
+    if expiry_days == 0 || expiry_days > 365 || max_uses == 0 {
+        return Err(invalid());
+    }
+    let expiry = now
+        .wall
+        .checked_add(i64::from(expiry_days) * 86_400)
+        .ok_or_else(invalid)?;
+
+    let mut policy_ids = BTreeSet::new();
+    let mut resolved_policies = Vec::with_capacity(policies.len());
+    for p in policies {
+        if !crate::principal::validate_uuid(&p.policy_id) || !policy_ids.insert(p.policy_id.clone()) {
+            return Err(invalid());
+        }
+        let purpose = identity_purpose(&p.purpose)?;
+        let content = json!({
+            "schema_version": 2,
+            "name": p.name,
+            "purpose": purpose,
+            "limits": p.limits,
+            "content": p.content,
+        });
+        let normalized = policy::normalize(content)?;
+        if purpose == policy::Purpose::PurposeSigning {
+            let purposes = normalized
+                .get("content")
+                .and_then(|c| c.get("purposes"))
+                .and_then(Value::as_array)
+                .ok_or_else(invalid)?;
+            if purposes.iter().any(|name| {
+                name.as_str()
+                    .is_none_or(|name| !catalog::purpose_valid(&catalog::KeyRole::DeviceSigning, name))
+            }) {
+                return Err(invalid());
+            }
+        }
+        if i64::from(p.limits.max_duration_seconds) < expiry.saturating_sub(now.wall)
+            || p.limits.max_uses < max_uses
+        {
+            return Err(invalid());
+        }
+        resolved_policies.push(ResolvedPolicy {
+            policy_id: p.policy_id,
+            grant_name: grant_name(purpose, &normalized)?,
+            purpose,
+            content: normalized,
+        });
+    }
+
+    if grants.is_empty() {
+        return Err(invalid());
+    }
+    let mut names = BTreeSet::new();
+    let mut resolved_grants = Vec::with_capacity(grants.len());
+    for g in grants {
+        let p = resolved_policies
+            .iter()
+            .find(|p| p.policy_id == g.policy_id)
+            .ok_or_else(invalid)?;
+        let expected = match p.purpose {
+            policy::Purpose::DocumentProof => catalog::KeyRole::Root,
+            policy::Purpose::Ecdh => catalog::KeyRole::KeyAgreement,
+            _ => catalog::KeyRole::DeviceSigning,
+        };
+        if g.key != expected || !names.insert(p.grant_name.clone()) {
+            return Err(invalid());
+        }
+        resolved_grants.push(ResolvedGrant {
+            grant_name: p.grant_name.clone(),
+            policy_id: g.policy_id,
+            key: g.key,
+        });
+    }
+
+    Ok(Resolved::ProvisionIdentity {
+        vault_id,
+        host,
+        port,
+        path_segments,
+        device_id,
+        principal_id,
+        policies: resolved_policies,
+        grants: resolved_grants,
+        expiry,
+        max_uses,
+    })
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -629,6 +1014,31 @@ impl Database {
                     agreement: issue.agreement,
                 }
             }
+            Change::ProvisionIdentity {
+                vault_id,
+                host,
+                port,
+                path_segments,
+                device_id,
+                principal_uid,
+                policies,
+                grants,
+                expiry_days,
+                max_uses,
+            } => provision_effect(
+                &tx,
+                now,
+                vault_id,
+                host,
+                port,
+                path_segments,
+                device_id,
+                principal_uid,
+                policies,
+                grants,
+                expiry_days,
+                max_uses,
+            )?,
             Change::RegisterPrincipal { uid } => {
                 if uid == 0 || uid == u32::MAX || tx.query_row("SELECT EXISTS(SELECT 1 FROM principals WHERE uid=?1 AND state='enabled')", [uid], |r| r.get::<_,bool>(0)).map_err(db_error)? { return Err(invalid()); }
                 let generation: u32 = tx
@@ -712,13 +1122,25 @@ impl Database {
             .optional()
             .map_err(db_error)?;
         Ok(match payload {
-            Some(p) => matches!(
-                serde_json::from_str::<Resolved>(&p).map_err(|_| unavailable())?,
-                Resolved::Catalog { .. }
-                    | Resolved::RotateHotKey { .. }
-                    | Resolved::ReissueDocument { .. }
-                    | Resolved::IssueDeviceKeys { .. }
-            ),
+            Some(p) => match serde_json::from_str::<Resolved>(&p).map_err(|_| unavailable())? {
+                // The first document of a just-provisioned vault: these are the
+                // keys the same passphrase unlocked seconds ago, and the grants
+                // came from the same operation (their document digest is still
+                // the genesis sentinel, so the revocation step skips them).
+                // Locking here would turn "one confirmation" into "one
+                // confirmation plus one unlock", so only this first install
+                // keeps the keys available.
+                Resolved::Catalog { effect } => match *effect {
+                    catalog::CatalogEffect::InstallDocument {
+                        before_digest, ..
+                    } => before_digest != GENESIS,
+                    _ => true,
+                },
+                Resolved::RotateHotKey { .. }
+                | Resolved::ReissueDocument { .. }
+                | Resolved::IssueDeviceKeys { .. } => true,
+                _ => false,
+            },
             None => false,
         })
     }
@@ -786,6 +1208,9 @@ impl Database {
             return Err(invalid());
         }
         let mut result = None;
+        // Files a credential-bearing mint wrote are removed unless the commit
+        // lands; declared here so the guard outlives the match arm.
+        let mut minted: Option<MintedFiles> = None;
         // A credential-bearing commit cannot be used for unrelated operations.
         if secret.is_some()
             != matches!(
@@ -794,6 +1219,7 @@ impl Database {
                     | Resolved::RotateHotKey { .. }
                     | Resolved::ReissueDocument { .. }
                     | Resolved::IssueDeviceKeys { .. }
+                    | Resolved::ProvisionIdentity { .. }
             )
         {
             return Err(invalid());
@@ -962,6 +1388,170 @@ impl Database {
                     "next": "reissue_document",
                 }));
             }
+            Resolved::ProvisionIdentity {
+                vault_id,
+                host,
+                port,
+                path_segments,
+                device_id,
+                principal_id,
+                policies,
+                grants,
+                expiry,
+                max_uses,
+            } => {
+                let secret = secret.ok_or_else(invalid)?;
+                let layout = crate::keystore::layout::KeydLayout::at(
+                    self.root.join("vaults").join(&vault_id),
+                );
+                layout.ensure().map_err(|_| invalid())?;
+                let device_secret = crate::keystore::device::load_or_create(&layout)?;
+                let mut spec = crate::did::spec::DidDocumentSpec::new(&host, path_segments);
+                if let Some(port) = port {
+                    spec = spec.with_port(port);
+                }
+                // 三把都由这一份口令封起来。全部算完才落盘,写盘之后由
+                // `MintedFiles` 兜底:事务没提交就删干净。
+                let created = crate::keystore::create::generate(
+                    &spec,
+                    "identity",
+                    secret.as_bytes(),
+                    &device_secret,
+                    crate::crypto::kdf::Argon2Config::default(),
+                    crate::keystore::hardware::HardwareChoice::None,
+                )?;
+                let did = created.did.clone();
+                let (sign_wrapped, _) = crate::keystore::create::generate_extra(
+                    &did,
+                    &format!("{device_id}-sign"),
+                    vec![
+                        anp::authentication::DidVerificationRelationship::Authentication,
+                        anp::authentication::DidVerificationRelationship::AssertionMethod,
+                    ],
+                    "device-sign",
+                    secret.as_bytes(),
+                    &device_secret,
+                    crate::crypto::kdf::Argon2Config::default(),
+                    crate::keystore::hardware::HardwareChoice::None,
+                )?;
+                let (agreement_wrapped, _) = crate::keystore::create::generate_agreement(
+                    &did,
+                    &format!("{device_id}-agreement"),
+                    "device-agreement",
+                    secret.as_bytes(),
+                    &device_secret,
+                    crate::crypto::kdf::Argon2Config::default(),
+                    crate::keystore::hardware::HardwareChoice::None,
+                )?;
+
+                let mut files = MintedFiles::default();
+                for wrapped in [&created.wrapped, &sign_wrapped, &agreement_wrapped] {
+                    let path = layout.key_path(&wrapped.id.thumbprint)?;
+                    crate::keystore::store::save_new(&layout, wrapped)?;
+                    files.push(path);
+                }
+                // 批准到完成之间这个 DID 可能已经进了目录或落了文档。有一处
+                // 就作废 —— 刚写的信封随 `files` 一起删掉。
+                let known: bool = tx
+                    .query_row("SELECT EXISTS(SELECT 1 FROM keys WHERE did=?1)", [&did], |r| {
+                        r.get::<_, bool>(0)
+                    })
+                    .map_err(db_error)?;
+                if known || layout.did_path(&did).exists() {
+                    return Err(invalid());
+                }
+
+                let records = vec![
+                    provision_record(&vault_id, &did, &created.wrapped, catalog::KeyRole::Root, "")?,
+                    provision_record(
+                        &vault_id,
+                        &did,
+                        &sign_wrapped,
+                        catalog::KeyRole::DeviceSigning,
+                        "device_assertion",
+                    )?,
+                    provision_record(
+                        &vault_id,
+                        &did,
+                        &agreement_wrapped,
+                        catalog::KeyRole::KeyAgreement,
+                        "",
+                    )?,
+                ];
+                let effect = catalog::resolve(
+                    &tx,
+                    &self.root,
+                    catalog::CatalogChange::AddKeys {
+                        vault_id: vault_id.clone(),
+                        did: did.clone(),
+                        keys: records.clone(),
+                    },
+                )?;
+                catalog::apply(&tx, &self.root, operation_id, effect)?;
+                for policy in &policies {
+                    let effect = catalog::resolve(
+                        &tx,
+                        &self.root,
+                        catalog::CatalogChange::PublishPolicy {
+                            policy_id: policy.policy_id.clone(),
+                            version: 1,
+                            content: policy.content.clone(),
+                        },
+                    )?;
+                    catalog::apply(&tx, &self.root, operation_id, effect)?;
+                }
+
+                let mut reply_grants = serde_json::Map::new();
+                for grant in &grants {
+                    let key = records
+                        .iter()
+                        .find(|record| record.role == grant.key)
+                        .ok_or_else(invalid)?;
+                    let effect = grants::resolve(
+                        &tx,
+                        &self.root,
+                        grants::GrantChange::Create {
+                            principal_id: principal_id.clone(),
+                            key_id: key.key_id.clone(),
+                            policy_id: grant.policy_id.clone(),
+                            policy_version: 1,
+                            expiry,
+                            max_uses,
+                        },
+                        self.boot_epoch,
+                        now,
+                    )?;
+                    let grant_id = match &effect {
+                        grants::Effect::Create { grant, .. } => grant.grant_id.clone(),
+                        grants::Effect::Revoke { .. } => return Err(invalid()),
+                    };
+                    grants::apply(&tx, &self.root, effect, self.boot_epoch, now)?;
+                    reply_grants.insert(
+                        grant.grant_name.clone(),
+                        json!({"grant_id": grant_id, "key_id": key.key_id}),
+                    );
+                }
+                let reply_keys: Vec<Value> = records
+                    .iter()
+                    .zip([&created.wrapped, &sign_wrapped, &agreement_wrapped])
+                    .map(|(record, wrapped)| {
+                        json!({
+                            "key_id": record.key_id,
+                            "role": record.role,
+                            "kid": record.kid,
+                            "public_multibase": wrapped.public_multibase,
+                        })
+                    })
+                    .collect();
+                result = Some(json!({
+                    "vault_id": vault_id,
+                    "did": did,
+                    "device_id": device_id,
+                    "keys": reply_keys,
+                    "grants": reply_grants,
+                }));
+                minted = Some(files);
+            }
             Resolved::RegistrationChallenge {
                 key,
                 origin,
@@ -1036,6 +1626,10 @@ impl Database {
             &json!({"event":"OPERATION_COMMITTED","actor":actor,"operation_id":operation_id,"digest":digest}),
         )?;
         tx.commit().map_err(db_error)?;
+        // 目录行已经落库,信封从此归 catalog 所有。
+        if let Some(files) = minted.take() {
+            files.keep();
+        }
         Ok(result)
     }
 
